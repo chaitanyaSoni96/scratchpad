@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -45,6 +46,7 @@ func NewServer(hub *watch.Hub) http.Handler {
 	mux.HandleFunc("GET /p/{path...}", handleFolderPage)
 	mux.HandleFunc("GET /fragments/list", handleListFragment)
 	mux.HandleFunc("GET /fragments/viewer/{path...}", handleViewerFragment)
+	mux.HandleFunc("GET /fragments/siblings", handleSiblings)
 	mux.HandleFunc("GET /a/{path...}", handleArtifact)
 	mux.HandleFunc("DELETE /a/{path...}", handleDelete)
 	mux.HandleFunc("GET /events", handleEvents(hub))
@@ -59,6 +61,7 @@ func NewServer(hub *watch.Hub) http.Handler {
 type crumb struct {
 	Name string
 	Href string
+	Rel  string // slash path under the root, for the sibling popover
 	Last bool
 }
 
@@ -71,7 +74,8 @@ func crumbs(path string) []crumb {
 	segs := strings.Split(path, "/")
 	out := make([]crumb, len(segs))
 	for i, s := range segs {
-		out[i] = crumb{Name: s, Href: "/p/" + strings.Join(segs[:i+1], "/"), Last: i == len(segs)-1}
+		rel := strings.Join(segs[:i+1], "/")
+		out[i] = crumb{Name: s, Href: "/p/" + rel, Rel: rel, Last: i == len(segs)-1}
 	}
 	return out
 }
@@ -99,6 +103,7 @@ type card struct {
 type pageView struct {
 	Folder string // "" on the home page
 	Crumbs []crumb
+	List   listView
 }
 
 type listView struct {
@@ -327,26 +332,152 @@ func handleFolderPage(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if err := tmpl.ExecuteTemplate(w, "index.tmpl", pageView{Folder: f, Crumbs: crumbs(f)}); err != nil {
+	list, err := buildListView(f)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err := tmpl.ExecuteTemplate(w, "index.tmpl", pageView{Folder: f, Crumbs: crumbs(f), List: list}); err != nil {
 		log.Printf("render folder page: %v", err)
 	}
 }
 
-func handleListFragment(w http.ResponseWriter, r *http.Request) {
-	f := strings.Trim(r.URL.Query().Get("project"), "/")
+func buildListView(f string) (listView, error) {
 	view := listView{Folder: f}
 	if a, isCollection := resolveCollection(f); isCollection {
 		view.Cards = pageCards(a)
-	} else {
-		artifacts, err := store.List()
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		view.Cards = buildCards(artifacts, f)
+		return view, nil
+	}
+	artifacts, err := store.List()
+	if err != nil {
+		return view, err
+	}
+	view.Cards = buildCards(artifacts, f)
+	return view, nil
+}
+
+func handleListFragment(w http.ResponseWriter, r *http.Request) {
+	view, err := buildListView(strings.Trim(r.URL.Query().Get("project"), "/"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
 	}
 	if err := tmpl.ExecuteTemplate(w, "list.tmpl", view); err != nil {
 		log.Printf("render list: %v", err)
+	}
+}
+
+// sibItem is one neighbour entry in a breadcrumb's hover popover. Folder
+// items navigate; Viewer items open in the artifact overlay instead.
+type sibItem struct {
+	Name   string
+	Href   string
+	Viewer bool
+}
+
+type sibView struct {
+	Above, Below []sibItem
+}
+
+// siblingItems lists everything living next to a child of folder parent:
+// artifacts (single-page → viewer, multi-page → their collection page),
+// subfolders with any renderable content, and loose markdown docs. When
+// parent is itself a multi-page artifact, the neighbours are its pages.
+func siblingItems(parent string) []sibItem {
+	if a, ok := resolveCollection(parent); ok {
+		var items []sibItem
+		for _, p := range a.Pages {
+			items = append(items, sibItem{Name: strings.TrimSuffix(p, filepath.Ext(p)),
+				Href: "/fragments/viewer/" + a.RelPath() + "/" + p, Viewer: true})
+		}
+		return items
+	}
+	root, err := store.Root()
+	if err != nil {
+		return nil
+	}
+	dir := filepath.Join(root, filepath.FromSlash(parent))
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	prefix := ""
+	if parent != "" {
+		prefix = parent + "/"
+	}
+	var items []sibItem
+	for _, e := range entries {
+		name := e.Name()
+		if strings.HasPrefix(name, ".") || store.Ignored(name) {
+			continue
+		}
+		rel := prefix + name
+		if entryIsDirFS(dir, e) {
+			if dirHasHTML(filepath.Join(dir, name)) {
+				if a, _, ok := store.ResolvePath(strings.Split(rel, "/")); ok && !a.MultiPage() {
+					items = append(items, sibItem{Name: name, Href: "/fragments/viewer/" + rel, Viewer: true})
+					continue
+				}
+			}
+			if hasRenderable(filepath.Join(dir, name)) {
+				items = append(items, sibItem{Name: name, Href: "/p/" + rel})
+			}
+		} else if strings.HasSuffix(strings.ToLower(name), ".md") {
+			items = append(items, sibItem{Name: strings.TrimSuffix(name, filepath.Ext(name)),
+				Href: "/fragments/viewer/" + rel, Viewer: true})
+		}
+	}
+	return items
+}
+
+// hasRenderable reports whether any html or markdown lives under dir, so the
+// popover skips folders that would render an empty page.
+func hasRenderable(dir string) bool {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if strings.HasPrefix(name, ".") || store.Ignored(name) {
+			continue
+		}
+		if entryIsDirFS(dir, e) {
+			if hasRenderable(filepath.Join(dir, name)) {
+				return true
+			}
+		} else if l := strings.ToLower(name); strings.HasSuffix(l, ".html") || strings.HasSuffix(l, ".md") {
+			return true
+		}
+	}
+	return false
+}
+
+func handleSiblings(w http.ResponseWriter, r *http.Request) {
+	rel := strings.Trim(r.URL.Query().Get("path"), "/")
+	if rel == "" || strings.Contains(rel, "..") {
+		http.NotFound(w, r)
+		return
+	}
+	segs := strings.Split(rel, "/")
+	cur := strings.ToLower(strings.TrimSuffix(segs[len(segs)-1], filepath.Ext(segs[len(segs)-1])))
+	items := siblingItems(strings.Join(segs[:len(segs)-1], "/"))
+	sort.Slice(items, func(i, j int) bool {
+		return strings.ToLower(items[i].Name) < strings.ToLower(items[j].Name)
+	})
+	var view sibView
+	for _, it := range items {
+		switch n := strings.ToLower(strings.TrimSuffix(it.Name, filepath.Ext(it.Name))); {
+		case n == cur:
+			// the hovered entry itself
+		case n < cur:
+			view.Above = append(view.Above, it)
+		default:
+			view.Below = append(view.Below, it)
+		}
+	}
+	if err := tmpl.ExecuteTemplate(w, "siblings.tmpl", view); err != nil {
+		log.Printf("render siblings: %v", err)
 	}
 }
 
@@ -407,7 +538,7 @@ func handleViewerFragment(w http.ResponseWriter, r *http.Request) {
 		view.URL = "/a/" + a.RelPath() + "/" + file
 		view.Title = strings.TrimSuffix(file, filepath.Ext(file))
 		view.Path = a.RelPath() + "/" + file
-		view.Crumbs = append(view.Crumbs, crumb{Name: a.Name, Href: "/p/" + a.RelPath()})
+		view.Crumbs = append(view.Crumbs, crumb{Name: a.Name, Href: "/p/" + a.RelPath(), Rel: a.RelPath()})
 		if fi, err := os.Stat(filepath.Join(a.Dir, file)); err == nil {
 			view.Size = fi.Size()
 		}

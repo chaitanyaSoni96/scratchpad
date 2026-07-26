@@ -4,16 +4,18 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{{if .Folder}}{{.Folder}} · scratchpad{{else}}scratchpad{{end}}</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ctext y='13' font-size='14' fill='%23ffb454'%3E%E2%96%9A%3C/text%3E%3C/svg%3E">
   <link rel="stylesheet" href="/static/style.css">
   <script src="/static/htmx.min.js"></script>
   <script src="/static/sse.js"></script>
   <script src="/static/viewer.js"></script>
+  <script src="/static/sibs.js"></script>
 </head>
-<body hx-ext="sse" sse-connect="/events">
+<body hx-boost="true" hx-ext="sse" sse-connect="/events">
   <header>
-    <h1><a href="/">scratchpad</a>{{range .Crumbs}}<span class="crumb-sep">/</span>{{if .Last}}<span class="crumb">{{.Name}}</span>{{else}}<a class="crumb" href="{{.Href}}">{{.Name}}</a>{{end}}{{end}}</h1>
+    <h1><a href="/">scratchpad</a>{{range .Crumbs}}<span class="crumb-sep">/</span><span class="crumb-wrap"><span class="sibs" hx-get="/fragments/siblings?path={{urlquery .Rel}}" hx-trigger="mouseenter once from:closest .crumb-wrap"></span>{{if .Last}}<span class="crumb">{{.Name}}</span>{{else}}<a class="crumb" href="{{.Href}}">{{.Name}}</a>{{end}}</span>{{end}}</h1>
   </header>
-  <main id="list" hx-get="/fragments/list{{if .Folder}}?project={{.Folder}}{{end}}" hx-trigger="load, sse:change"></main>
+  <main id="list" hx-get="/fragments/list{{if .Folder}}?project={{.Folder}}{{end}}" hx-trigger="sse:change">{{template "list.tmpl" .List}}</main>
   <div id="viewer"></div>
 </body>
 </html>

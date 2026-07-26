@@ -1,0 +1,7 @@
+{{if .Above}}<div class="sib-col above">
+  {{- range .Above}}{{template "sib" .}}{{end -}}
+</div>{{end}}
+{{- if .Below}}<div class="sib-col below">
+  {{- range .Below}}{{template "sib" .}}{{end -}}
+</div>{{end}}
+{{- define "sib"}}{{if .Viewer}}<button class="sib" hx-get="{{.Href}}" hx-target="#viewer">{{.Name}}</button>{{else}}<a class="sib" href="{{.Href}}">{{.Name}}/</a>{{end}}{{end -}}

@@ -16,7 +16,7 @@
   <a class="card project-card" href="{{.Href}}">
     <div class="preview">
       {{if .Preview.Dir}}
-      <iframe src="/a/{{.Preview.RelPath}}/" sandbox="allow-scripts" loading="lazy" title="{{.Label}} preview" tabindex="-1"></iframe>
+      <iframe src="/a/{{.Preview.RelPath}}/" sandbox="allow-scripts" loading="lazy" scrolling="no" title="{{.Label}} preview" tabindex="-1"></iframe>
       {{else}}
       <div class="doc-folder">▤</div>
       {{end}}
@@ -32,7 +32,7 @@
   {{else if eq .Kind "page"}}
   <article class="card">
     <div class="preview" hx-get="{{.ViewerHref}}" hx-target="#viewer" title="open {{.Label}}">
-      <iframe src="{{.PageHref}}" sandbox="allow-scripts" loading="lazy" title="{{.Label}} preview" tabindex="-1"></iframe>
+      <iframe src="{{.PageHref}}" sandbox="allow-scripts" loading="lazy" scrolling="no" title="{{.Label}} preview" tabindex="-1"></iframe>
     </div>
     <div class="meta">
       <div class="titles">
@@ -49,7 +49,7 @@
   {{else}}
   <article class="card">
     <div class="preview" hx-get="/fragments/viewer/{{.Artifact.RelPath}}" hx-target="#viewer" title="open {{.Artifact.Name}}">
-      <iframe src="/a/{{.Artifact.RelPath}}/" sandbox="allow-scripts" loading="lazy" title="{{.Artifact.Name}} preview" tabindex="-1"></iframe>
+      <iframe src="/a/{{.Artifact.RelPath}}/" sandbox="allow-scripts" loading="lazy" scrolling="no" title="{{.Artifact.Name}} preview" tabindex="-1"></iframe>
     </div>
     <div class="meta">
       <div class="titles">
