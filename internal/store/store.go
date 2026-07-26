@@ -22,10 +22,12 @@ const RootEnv = "SCRATCHPAD_ROOT"
 type Artifact struct {
 	Project string // slash-separated project path, "" for root-level artifacts
 	Name    string
-	Dir     string // absolute path
+	Dir     string // absolute path (may be or traverse a symlink)
 	Entry   string // entry html filename
 	Size    int64  // total bytes of all files in the artifact
 	ModTime time.Time
+	IsLink  bool // Dir itself is a symlink (a watched folder: delete = unlink)
+	Linked  bool // Dir lives inside a watched folder; not deletable here
 }
 
 // RelPath is the URL path segment(s) identifying the artifact.
@@ -118,6 +120,31 @@ func hasHTML(dir string) bool {
 	return false
 }
 
+// entryIsDir reports whether a directory entry is a directory, following
+// symlinks (watched folders appear as symlinks in the store).
+func entryIsDir(parent string, e os.DirEntry) bool {
+	if e.IsDir() {
+		return true
+	}
+	if e.Type()&os.ModeSymlink == 0 {
+		return false
+	}
+	fi, err := os.Stat(filepath.Join(parent, e.Name()))
+	return err == nil && fi.IsDir()
+}
+
+// annotate fills the symlink-related fields of an artifact.
+func annotate(a *Artifact) {
+	if fi, err := os.Lstat(a.Dir); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+		a.IsLink = true
+		return
+	}
+	real, err := filepath.EvalSymlinks(a.Dir)
+	if err == nil && real != a.Dir {
+		a.Linked = true
+	}
+}
+
 func loadArtifact(project, name, dir string) (Artifact, bool) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -141,7 +168,11 @@ func loadArtifact(project, name, dir string) (Artifact, bool) {
 		}
 	}
 	a := Artifact{Project: project, Name: name, Dir: dir, Entry: entry}
-	filepath.WalkDir(dir, func(_ string, d fs.DirEntry, err error) error {
+	sizeRoot := dir
+	if real, err := filepath.EvalSymlinks(dir); err == nil {
+		sizeRoot = real // WalkDir does not follow a symlinked root
+	}
+	filepath.WalkDir(sizeRoot, func(_ string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
 			return nil
 		}
@@ -153,6 +184,7 @@ func loadArtifact(project, name, dir string) (Artifact, bool) {
 	if fi, err := os.Stat(dir); err == nil {
 		a.ModTime = fi.ModTime()
 	}
+	annotate(&a)
 	return a, true
 }
 
@@ -164,14 +196,20 @@ func List() ([]Artifact, error) {
 		return nil, err
 	}
 	var out []Artifact
+	visited := map[string]bool{} // symlink-cycle guard
 	var walk func(dir, project string)
 	walk = func(dir, project string) {
+		if real, err := filepath.EvalSymlinks(dir); err != nil || visited[real] {
+			return
+		} else {
+			visited[real] = true
+		}
 		entries, err := os.ReadDir(dir)
 		if err != nil {
 			return
 		}
 		for _, e := range entries {
-			if !e.IsDir() || strings.HasPrefix(e.Name(), ".") {
+			if !entryIsDir(dir, e) || strings.HasPrefix(e.Name(), ".") {
 				continue
 			}
 			sub := filepath.Join(dir, e.Name())
@@ -307,28 +345,104 @@ func Publish(project, name string, files map[string][]byte) (Artifact, error) {
 	return a, nil
 }
 
-// Delete removes an artifact directory and prunes any project directories
-// left empty above it.
-func Delete(project, name string) error {
-	a, ok, err := Resolve(project, name)
+// Watch symlinks an external directory into the store so it is hosted
+// live. The target may be a single artifact folder (contains html) or a
+// whole tree of artifact folders. Create-only, like Publish.
+func Watch(project, name, target string) (string, error) {
+	abs, err := filepath.Abs(target)
 	if err != nil {
-		return err
+		return "", err
 	}
-	if !ok {
-		return fmt.Errorf("artifact %s not found", (Artifact{Project: project, Name: name}).RelPath())
+	fi, err := os.Stat(abs)
+	if err != nil {
+		return "", err
 	}
-	if err := os.RemoveAll(a.Dir); err != nil {
-		return err
+	if !fi.IsDir() {
+		return "", fmt.Errorf("%s is not a directory", abs)
 	}
+	root, err := EnsureRoot()
+	if err != nil {
+		return "", err
+	}
+	if real, err := filepath.EvalSymlinks(abs); err == nil {
+		if realRoot, err := filepath.EvalSymlinks(root); err == nil {
+			if real == realRoot || strings.HasPrefix(real, realRoot+string(filepath.Separator)) {
+				return "", fmt.Errorf("%s is already inside the scratchpad", abs)
+			}
+		}
+	}
+	link, err := artifactDir(root, project, name)
+	if err != nil {
+		return "", err
+	}
+	segs, _ := SplitProject(project)
+	for i := range segs {
+		if hasHTML(filepath.Join(append([]string{root}, segs[:i+1]...)...)) {
+			return "", fmt.Errorf("%q is an artifact, not a project", strings.Join(segs[:i+1], "/"))
+		}
+	}
+	if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
+		return "", err
+	}
+	// os.Symlink is atomic like os.Mkdir in Publish: EEXIST if taken.
+	if err := os.Symlink(abs, link); err != nil {
+		if os.IsExist(err) {
+			return "", fmt.Errorf("%q already exists — delete it in the web UI or pick a different name", strings.TrimPrefix(link[len(root):], string(filepath.Separator)))
+		}
+		return "", err
+	}
+	if !hasHTML(abs) {
+		fmt.Fprintln(os.Stderr, "note: no top-level .html in the watched folder — it will be treated as a project tree; only subfolders containing .html will show up")
+	}
+	return link, nil
+}
+
+// Delete removes an artifact and prunes any project directories left empty
+// above it. Watched folders (symlinks) are only unlinked — the source is
+// never touched — and nothing inside a watched folder can be deleted here.
+func Delete(project, name string) error {
 	root, err := Root()
 	if err != nil {
-		return nil
+		return err
 	}
-	for dir := filepath.Dir(a.Dir); dir != root && strings.HasPrefix(dir, root); dir = filepath.Dir(dir) {
-		if rem, err := os.ReadDir(dir); err != nil || len(rem) > 0 {
+	dir, err := artifactDir(root, project, name)
+	if err != nil {
+		return err
+	}
+	// Refuse when any parent component is a symlink: the files belong to
+	// the watched source folder.
+	cur := root
+	for _, seg := range strings.Split(strings.TrimPrefix(dir[len(root):], string(filepath.Separator)), string(filepath.Separator)) {
+		cur = filepath.Join(cur, seg)
+		if cur == dir {
 			break
 		}
-		if os.Remove(dir) != nil {
+		if fi, err := os.Lstat(cur); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("%s is inside watched folder %q — its files live at the source; delete the watch link instead", (Artifact{Project: project, Name: name}).RelPath(), strings.TrimPrefix(cur[len(root):], string(filepath.Separator)))
+		}
+	}
+	if fi, err := os.Lstat(dir); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+		// Unwatch: remove only the link, never the source.
+		if err := os.Remove(dir); err != nil {
+			return err
+		}
+	} else {
+		a, ok, err := Resolve(project, name)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return fmt.Errorf("artifact %s not found", (Artifact{Project: project, Name: name}).RelPath())
+		}
+		if err := os.RemoveAll(a.Dir); err != nil {
+			return err
+		}
+	}
+	for d := filepath.Dir(dir); d != root && strings.HasPrefix(d, root); d = filepath.Dir(d) {
+		if rem, err := os.ReadDir(d); err != nil || len(rem) > 0 {
+			break
+		}
+		if os.Remove(d) != nil {
 			break
 		}
 	}

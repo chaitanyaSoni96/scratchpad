@@ -12,10 +12,14 @@ test:
 image:
 	podman build -t $(IMAGE) .
 
+# $(HOME) is mounted read-only at the same path so symlinks created by
+# `scratchpad watch` resolve inside the container (ro also means the web
+# process can never modify watched sources).
 web: image
 	-podman rm -f scratchpad-web
 	podman run -d --name scratchpad-web -p 8737:8737 \
-		-v $(DATA):/data:z --restart unless-stopped $(IMAGE)
+		-v $(DATA):/data:z -v $(HOME):$(HOME):ro \
+		--restart unless-stopped $(IMAGE)
 	@echo "scratchpad-web up at http://localhost:8737"
 
 stop:

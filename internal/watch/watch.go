@@ -24,20 +24,40 @@ func Run(ctx context.Context, root string, hub *Hub) error {
 	}
 	defer w.Close()
 
-	// watchTree adds dir and every directory below it. Called for the root
-	// at startup and for any newly created directory: a dir can arrive with
-	// children already inside (mkdir -p, mv, cp -r), so one Create event
-	// must hook the whole subtree.
-	watchTree := func(dir string) {
-		filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
-			if err != nil || !d.IsDir() {
-				return nil
+	// watchTree adds dir and every directory below it, following symlinks
+	// (watched external folders) with a cycle guard. Called for the root at
+	// startup and for any newly created directory: a dir can arrive with
+	// children already inside (mkdir -p, mv, cp -r, ln -s), so one Create
+	// event must hook the whole subtree.
+	watchTree := func(top string) {
+		visited := map[string]bool{} // cycle guard, fresh per traversal
+		var add func(dir string)
+		add = func(dir string) {
+			real, err := filepath.EvalSymlinks(dir)
+			if err != nil || visited[real] {
+				return
 			}
-			if err := w.Add(p); err != nil {
-				log.Printf("watch %s: %v", p, err)
+			visited[real] = true
+			if err := w.Add(dir); err != nil {
+				log.Printf("watch %s: %v", dir, err)
+				return
 			}
-			return nil
-		})
+			entries, err := os.ReadDir(dir)
+			if err != nil {
+				return
+			}
+			for _, e := range entries {
+				p := filepath.Join(dir, e.Name())
+				if e.IsDir() {
+					add(p)
+				} else if e.Type()&fs.ModeSymlink != 0 {
+					if fi, err := os.Stat(p); err == nil && fi.IsDir() {
+						add(p)
+					}
+				}
+			}
+		}
+		add(top)
 	}
 	watchTree(root)
 

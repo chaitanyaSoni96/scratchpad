@@ -82,9 +82,16 @@ bash-driven agents:
 ```bash
 echo '<h1>hi</h1>' | scratchpad publish -name hello -html -
 scratchpad publish -project lab/graphs -name chart -dir ./chart-folder   # whole folder, any files
+scratchpad watch ./chart-folder     # symlink instead of copy: edits go live as you save
 scratchpad list [-json]
 scratchpad delete -project lab/graphs -name chart
 ```
+
+`watch` mounts a folder into the scratchpad by symlink — it can be a single
+artifact folder or a whole tree of them. Deleting a watched entry removes
+only the link (the UI shows "unlink"); files inside watched folders are not
+deletable through scratchpad at all, and the container mounts `$HOME`
+read-only, so the web process physically cannot modify watched sources.
 
 ## Development
 

@@ -40,9 +40,17 @@
         <time>{{.Artifact.ModTime.Format "Jan 2 15:04"}}</time>
         <span class="row-right">
           <span class="fsize">{{size .Artifact.Size}}</span>
+          {{if .Artifact.Linked}}
+          <span class="linked" title="inside a watched folder — files live at the source">watched</span>
+          {{else if .Artifact.IsLink}}
+          <button class="delete" hx-delete="/a/{{.Artifact.RelPath}}"
+                  hx-confirm="Unwatch {{.Artifact.RelPath}}? The source folder is kept."
+                  hx-target="closest .card" hx-swap="outerHTML">unlink</button>
+          {{else}}
           <button class="delete" hx-delete="/a/{{.Artifact.RelPath}}"
                   hx-confirm="Delete {{.Artifact.RelPath}}?"
                   hx-target="closest .card" hx-swap="outerHTML">delete</button>
+          {{end}}
         </span>
       </div>
     </div>

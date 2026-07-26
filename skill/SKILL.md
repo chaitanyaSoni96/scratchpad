@@ -24,6 +24,11 @@ echo '<h1>hi</h1>' | scratchpad publish -name hello -html -
 # what's hosted (name, size, modified, url)
 scratchpad list
 scratchpad list -json
+
+# host a folder IN PLACE via symlink — edits to the source show up live.
+# Use when the user wants to keep iterating on the folder after hosting.
+scratchpad watch ./my-demo-folder            # name defaults to folder name
+scratchpad watch ./out -name dashboard -project lab
 ```
 
 ## Rules
@@ -39,6 +44,10 @@ scratchpad list -json
   spaces).
 - Keep artifacts self-contained; the index page live-previews each artifact
   in an iframe.
+- `watch` links, it never copies: the folder stays where it is and stays
+  yours. Unwatching (delete in the UI, or `scratchpad delete`) removes only
+  the link; files inside a watched folder can never be deleted through
+  scratchpad.
 - After publishing, give the user the printed URL. A warning on stderr means
   the hosting server is down (`make web` in the scratchpad repo starts it).
 

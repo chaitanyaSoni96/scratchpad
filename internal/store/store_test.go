@@ -104,6 +104,59 @@ func TestPublishFilesAndRules(t *testing.T) {
 	}
 }
 
+func TestWatch(t *testing.T) {
+	testRoot(t)
+	src := t.TempDir()
+	os.WriteFile(filepath.Join(src, "index.html"), []byte("<h1>src</h1>"), 0o644)
+	os.MkdirAll(filepath.Join(src, "img"), 0o755)
+	os.WriteFile(filepath.Join(src, "img", "a.png"), []byte{1, 2}, 0o644)
+
+	if _, err := Watch("", "linked-art", src); err != nil {
+		t.Fatal(err)
+	}
+	// create-only, same as publish
+	if _, err := Watch("", "linked-art", src); err == nil || !strings.Contains(err.Error(), "already exists") {
+		t.Fatalf("re-watch should fail with already-exists, got %v", err)
+	}
+
+	list, err := List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 1 || !list[0].IsLink || list[0].Size != 14 {
+		t.Fatalf("watched artifact wrong: %+v", list)
+	}
+
+	// files inside a watched folder are not deletable
+	err = Delete("linked-art", "img")
+	if err == nil || !strings.Contains(err.Error(), "watched folder") {
+		t.Errorf("delete inside watched folder should be refused, got %v", err)
+	}
+
+	// deleting the watch unlinks only; source stays intact
+	if err := Delete("", "linked-art"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(src, "index.html")); err != nil {
+		t.Errorf("source must survive unwatch: %v", err)
+	}
+
+	// watching a tree without top-level html => project tree of artifacts
+	tree := t.TempDir()
+	os.MkdirAll(filepath.Join(tree, "one"), 0o755)
+	os.WriteFile(filepath.Join(tree, "one", "index.html"), []byte("<p>"), 0o644)
+	if _, err := Watch("", "tree", tree); err != nil {
+		t.Fatal(err)
+	}
+	list, _ = List()
+	if len(list) != 1 || list[0].RelPath() != "tree/one" || !list[0].Linked {
+		t.Fatalf("tree watch wrong: %+v", list)
+	}
+	if err := Delete("tree", "one"); err == nil {
+		t.Error("artifact inside watched tree must not be deletable")
+	}
+}
+
 func TestListAndResolvePath(t *testing.T) {
 	root := testRoot(t)
 

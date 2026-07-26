@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"scratchpad/internal/store"
@@ -38,13 +39,21 @@ const usage = `scratchpad - filesystem artifact store CLI
 Usage:
   scratchpad publish -name <name> [-project <p/ath>] -dir <folder>
   scratchpad publish -name <name> [-project <p/ath>] -html <file> [-css <file>] [-js <file>]
+  scratchpad watch <folder> [-name <name>] [-project <p/ath>]
   scratchpad list [-json]
   scratchpad delete -name <name> [-project <p/ath>]
 
 publish is CREATE-ONLY: it fails if the name already exists. -dir publishes a
 whole folder (any files; needs a top-level .html). Pass "-" as -html to read
-HTML from stdin. Artifacts land in ~/.scratchpad (override: SCRATCHPAD_ROOT)
-and are served at http://localhost:8737/a/<project>/<name>/ by scratchpad-web.`
+HTML from stdin.
+
+watch symlinks a folder into the scratchpad instead of copying: keep editing
+it in place and the site updates live. -name defaults to the folder's name.
+Deleting a watched entry only removes the link, never the source; files
+inside a watched folder cannot be deleted through scratchpad at all.
+
+Artifacts land in ~/.scratchpad (override: SCRATCHPAD_ROOT) and are served
+at http://localhost:8737/a/<project>/<name>/ by scratchpad-web.`
 
 func readInput(path string) ([]byte, error) {
 	if path == "-" {
@@ -127,6 +136,38 @@ func main() {
 		fmt.Printf("published %s\n%s/a/%s/\n", a.Dir, baseURL(), a.RelPath())
 		if !webAlive() {
 			fmt.Fprintf(os.Stderr, "warning: scratchpad web server not reachable at %s — the link will not load until it is started (make web)\n", baseURL())
+		}
+	case "watch":
+		fs := flag.NewFlagSet("watch", flag.ExitOnError)
+		project := fs.String("project", "", "optional project path")
+		name := fs.String("name", "", "link name (default: folder's base name)")
+		// accept the folder as a positional arg before or after flags
+		args := os.Args[2:]
+		var target string
+		if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+			target, args = args[0], args[1:]
+		}
+		fs.Parse(args)
+		if target == "" && fs.NArg() > 0 {
+			target = fs.Arg(0)
+		}
+		if target == "" {
+			fatal(fmt.Errorf("usage: scratchpad watch <folder> [-name n] [-project p]"))
+		}
+		if *name == "" {
+			*name = filepath.Base(strings.TrimRight(target, "/"))
+		}
+		link, err := store.Watch(*project, *name, target)
+		if err != nil {
+			fatal(err)
+		}
+		rel := *name
+		if *project != "" {
+			rel = *project + "/" + *name
+		}
+		fmt.Printf("watching %s -> %s\n%s/a/%s/\n", link, target, baseURL(), rel)
+		if !webAlive() {
+			fmt.Fprintf(os.Stderr, "warning: scratchpad web server not reachable at %s\n", baseURL())
 		}
 	case "list":
 		fs := flag.NewFlagSet("list", flag.ExitOnError)

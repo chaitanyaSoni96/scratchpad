@@ -149,6 +149,13 @@ a.project-card { text-decoration: none; color: inherit; }
 }
 .row-right { display: flex; align-items: center; gap: 0.6rem; }
 .fsize { color: var(--muted); font-size: 0.8rem; }
+.linked {
+  border: 1px dashed var(--border);
+  border-radius: 5px;
+  padding: 0.15rem 0.6rem;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
 button.delete {
   background: none;
   border: 1px solid var(--border);
