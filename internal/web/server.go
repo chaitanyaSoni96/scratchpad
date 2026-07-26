@@ -368,13 +368,11 @@ func handleListFragment(w http.ResponseWriter, r *http.Request) {
 }
 
 // sibItem is one entry in a breadcrumb's hover dropdown. Folder items
-// navigate; Viewer items open in the artifact overlay instead. Current marks
-// the hovered crumb's own entry, listed first and inert.
+// navigate; Viewer items open in the artifact overlay instead.
 type sibItem struct {
-	Name    string
-	Href    string
-	Viewer  bool
-	Current bool
+	Name   string
+	Href   string
+	Viewer bool
 }
 
 type sibView struct {
@@ -469,13 +467,11 @@ func handleSiblings(w http.ResponseWriter, r *http.Request) {
 	sort.Slice(items, func(i, j int) bool {
 		return strings.ToLower(items[i].Name) < strings.ToLower(items[j].Name)
 	})
-	// The hovered entry leads the list; the rest stay alphabetical.
+	// The hovered entry itself stays out of its own dropdown.
 	cur := norm(segs[len(segs)-1])
 	var view sibView
 	for _, it := range items {
-		if it.Current = norm(it.Name) == cur; it.Current {
-			view.Items = append([]sibItem{it}, view.Items...)
-		} else {
+		if norm(it.Name) != cur {
 			view.Items = append(view.Items, it)
 		}
 	}

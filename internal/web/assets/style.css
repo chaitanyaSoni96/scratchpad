@@ -40,10 +40,10 @@ h1 a:hover { color: var(--accent); }
 .crumb { color: var(--accent); }
 a.crumb { text-decoration: none; }
 a.crumb:hover { text-decoration: underline; }
-/* Sibling dropdown: hovering a crumb fades in the full sibling list below
-   it — the hovered entry first (inert), the rest alphabetical — every entry
-   in the same type and color as the crumbs themselves. The list is a child
-   of .crumb-wrap, so moving the pointer onto it keeps the :hover alive. */
+/* Sibling dropdown: hovering a crumb fades in its siblings below it,
+   alphabetically, every entry in the same type and color as the crumbs
+   themselves. The list is a child of .crumb-wrap, so moving the pointer
+   onto it keeps the :hover alive. */
 .crumb-wrap { position: relative; display: inline-block; }
 .sib-list {
   position: absolute;
@@ -83,7 +83,6 @@ a.crumb:hover { text-decoration: underline; }
   width: 100%;
 }
 .sib:hover { text-decoration: underline; }
-.sib.current { cursor: default; }
 .tagline { margin: 0; color: var(--muted); font-size: 0.85rem; }
 code {
   background: var(--surface);
