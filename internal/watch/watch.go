@@ -8,9 +8,12 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
+
+	"scratchpad/internal/store"
 )
 
 const debounce = 250 * time.Millisecond
@@ -47,6 +50,9 @@ func Run(ctx context.Context, root string, hub *Hub) error {
 				return
 			}
 			for _, e := range entries {
+				if strings.HasPrefix(e.Name(), ".") || store.Ignored(e.Name()) {
+					continue
+				}
 				p := filepath.Join(dir, e.Name())
 				if e.IsDir() {
 					add(p)

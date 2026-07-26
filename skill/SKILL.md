@@ -27,8 +27,11 @@ scratchpad list -json
 
 # host a folder IN PLACE via symlink — edits to the source show up live.
 # Use when the user wants to keep iterating on the folder after hosting.
+# Works for single artifacts, whole trees of them, and docs/plans trees:
+# .md files render as styled pages alongside html mockups.
 scratchpad watch ./my-demo-folder            # name defaults to folder name
 scratchpad watch ./out -name dashboard -project lab
+scratchpad watch .agents/plans -name plans   # browsable md + html tree
 ```
 
 ## Rules

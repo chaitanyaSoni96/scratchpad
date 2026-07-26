@@ -15,25 +15,30 @@
   {{if eq .Kind "project"}}
   <a class="card project-card" href="{{.Href}}">
     <div class="preview">
+      {{if .Preview.Dir}}
       <iframe src="/a/{{.Preview.RelPath}}/" sandbox="allow-scripts" loading="lazy" title="{{.Label}} preview" tabindex="-1"></iframe>
+      {{else}}
+      <div class="doc-folder">▤</div>
+      {{end}}
     </div>
     <div class="meta">
       <div class="titles"><span class="name">{{.Label}} /</span></div>
       <div class="row">
-        <time>{{.Preview.ModTime.Format "Jan 2 15:04"}}</time>
+        {{if .Preview.Dir}}<time>{{.Preview.ModTime.Format "Jan 2 15:04"}}</time>{{else}}<span></span>{{end}}
         <span class="badge">{{.Count}} {{.Unit}}</span>
       </div>
     </div>
   </a>
   {{else if eq .Kind "page"}}
   <article class="card">
-    <div class="preview" hx-get="/fragments/viewer/{{.Artifact.RelPath}}/{{.PageFile}}" hx-target="#viewer" title="open {{.Label}}">
-      <iframe src="/a/{{.Artifact.RelPath}}/{{.PageFile}}" sandbox="allow-scripts" loading="lazy" title="{{.Label}} preview" tabindex="-1"></iframe>
+    <div class="preview" hx-get="{{.ViewerHref}}" hx-target="#viewer" title="open {{.Label}}">
+      <iframe src="{{.PageHref}}" sandbox="allow-scripts" loading="lazy" title="{{.Label}} preview" tabindex="-1"></iframe>
     </div>
     <div class="meta">
       <div class="titles">
-        <button class="name" hx-get="/fragments/viewer/{{.Artifact.RelPath}}/{{.PageFile}}" hx-target="#viewer">{{.Label}}</button>
-        <a class="ext" href="/a/{{.Artifact.RelPath}}/{{.PageFile}}" target="_blank" rel="noopener" title="open in new tab">↗</a>
+        <button class="name" hx-get="{{.ViewerHref}}" hx-target="#viewer">{{.Label}}</button>
+        {{if .PageIsDoc}}<span class="doctag">md</span>{{end}}
+        <a class="ext" href="{{.PageHref}}" target="_blank" rel="noopener" title="open in new tab">↗</a>
       </div>
       <div class="row">
         <time>{{.PageMod.Format "Jan 2 15:04"}}</time>

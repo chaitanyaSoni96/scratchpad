@@ -93,6 +93,18 @@ only the link (the UI shows "unlink"); files inside watched folders are not
 deletable through scratchpad at all, and the container mounts `$HOME`
 read-only, so the web process physically cannot modify watched sources.
 
+**Markdown is first-class.** Any `.md` under the scratchpad renders as a
+styled page (`?raw=1` for source). Folders with several html/md files and no
+`index.html` become page collections (one card per file); loose `.md` files
+in project folders get cards too, and folders containing only markdown show
+as "N docs" folders — so watching a docs/plans tree gives you a browsable
+site of mockups and notes.
+
+Watching big trees is fine: common junk dirs (`node_modules`, `vendor`,
+`dist`, `build`, `target`, `coverage`, `bin`, …) are invisible to scanning
+and the filesystem watcher — extend the list with a comma-separated
+`SCRATCHPAD_IGNORE`.
+
 ## Development
 
 ```bash

@@ -89,7 +89,9 @@ type card struct {
 	Count       int
 	Unit        string // "artifacts" | "pages"
 	Preview     store.Artifact
-	PageFile    string // page cards: filename inside the artifact
+	PageHref    string // page cards: served URL (/a/...)
+	ViewerHref  string // page cards: viewer fragment URL
+	PageIsDoc   bool   // page cards: markdown rather than html
 	PageSize    int64
 	PageMod     time.Time
 }
@@ -110,17 +112,112 @@ func collectionCard(a store.Artifact, label string) card {
 		Count: len(a.Pages), Unit: "pages", Preview: a}
 }
 
-// pageCards renders one tile per top-level html file of a multi-page artifact.
+func pageCard(label, href, viewerHref, absPath string, isDoc bool) card {
+	c := card{Kind: "page", Label: label, PageHref: href, ViewerHref: viewerHref, PageIsDoc: isDoc}
+	if fi, err := os.Stat(absPath); err == nil {
+		c.PageSize = fi.Size()
+		c.PageMod = fi.ModTime()
+	}
+	return c
+}
+
+// pageCards renders one tile per top-level html/md file of a multi-page artifact.
 func pageCards(a store.Artifact) []card {
 	var cards []card
 	for _, f := range a.Pages {
-		c := card{Kind: "page", Artifact: a, PageFile: f,
-			Label: strings.TrimSuffix(f, filepath.Ext(f)), PageMod: a.ModTime}
-		if fi, err := os.Stat(filepath.Join(a.Dir, f)); err == nil {
-			c.PageSize = fi.Size()
-			c.PageMod = fi.ModTime()
+		base := "/a/" + a.RelPath() + "/" + f
+		cards = append(cards, pageCard(
+			strings.TrimSuffix(f, filepath.Ext(f)),
+			base, "/fragments/viewer/"+a.RelPath()+"/"+f,
+			filepath.Join(a.Dir, f),
+			strings.HasSuffix(strings.ToLower(f), ".md")))
+	}
+	return cards
+}
+
+// docCount counts markdown files in a subtree, skipping ignored dirs and not
+// descending into artifacts (their pages are counted as theirs).
+func docCount(dir string) int {
+	n := 0
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return 0
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if strings.HasPrefix(name, ".") || store.Ignored(name) {
+			continue
 		}
-		cards = append(cards, c)
+		if entryIsDirFS(dir, e) {
+			sub := filepath.Join(dir, name)
+			if !dirHasHTML(sub) {
+				n += docCount(sub)
+			}
+		} else if strings.HasSuffix(strings.ToLower(name), ".md") {
+			n++
+		}
+	}
+	return n
+}
+
+func entryIsDirFS(parent string, e os.DirEntry) bool {
+	if e.IsDir() {
+		return true
+	}
+	if e.Type()&fs.ModeSymlink == 0 {
+		return false
+	}
+	fi, err := os.Stat(filepath.Join(parent, e.Name()))
+	return err == nil && fi.IsDir()
+}
+
+func dirHasHTML(dir string) bool {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false
+	}
+	for _, e := range entries {
+		if e.Type().IsRegular() && strings.HasSuffix(strings.ToLower(e.Name()), ".html") {
+			return true
+		}
+	}
+	return false
+}
+
+// folderExtras appends cards artifacts can't produce: loose markdown files
+// directly in folder f, and doc-only subfolders (no artifacts anywhere but
+// markdown within).
+func folderExtras(f string, used map[string]bool) []card {
+	root, err := store.Root()
+	if err != nil {
+		return nil
+	}
+	dir := filepath.Join(root, filepath.FromSlash(f))
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	prefix := ""
+	if f != "" {
+		prefix = f + "/"
+	}
+	var cards []card
+	for _, e := range entries {
+		name := e.Name()
+		if strings.HasPrefix(name, ".") || store.Ignored(name) || used[name] {
+			continue
+		}
+		if entryIsDirFS(dir, e) {
+			if n := docCount(filepath.Join(dir, name)); n > 0 {
+				cards = append(cards, card{Kind: "project", Label: name,
+					Href: "/p/" + prefix + name, Count: n, Unit: "docs"})
+			}
+		} else if strings.HasSuffix(strings.ToLower(name), ".md") {
+			cards = append(cards, pageCard(
+				strings.TrimSuffix(name, filepath.Ext(name)),
+				"/a/"+prefix+name, "/fragments/viewer/"+prefix+name,
+				filepath.Join(dir, name), true))
+		}
 	}
 	return cards
 }
@@ -139,10 +236,11 @@ func buildCards(artifacts []store.Artifact, f string) []card {
 		}
 	}
 	var cards []card
-	seen := map[string]bool{}
+	used := map[string]bool{}
 	for _, a := range artifacts {
 		switch {
 		case a.Project == f:
+			used[a.Name] = true
 			if a.MultiPage() {
 				cards = append(cards, collectionCard(a, a.Name))
 			} else {
@@ -153,6 +251,7 @@ func buildCards(artifacts []store.Artifact, f string) []card {
 		default:
 			child := strings.SplitN(strings.TrimPrefix(a.Project, prefix), "/", 2)[0]
 			if perChild[child] == 1 {
+				used[child] = true
 				if a.MultiPage() {
 					cards = append(cards, collectionCard(a, strings.TrimPrefix(a.RelPath(), prefix)))
 				} else {
@@ -160,27 +259,27 @@ func buildCards(artifacts []store.Artifact, f string) []card {
 						PrefixLabel: strings.TrimPrefix(a.Project, prefix),
 						PrefixHref:  "/p/" + a.Project})
 				}
-			} else if !seen[child] {
-				seen[child] = true
+			} else if !used[child] {
+				used[child] = true
 				cards = append(cards, card{Kind: "project", Label: child,
 					Href: "/p/" + prefix + child, Count: perChild[child], Unit: "artifacts", Preview: a})
 			}
 		}
 	}
-	return cards
+	return append(cards, folderExtras(f, used)...)
 }
 
-// folderExists reports whether f is the root or holds at least one artifact.
-func folderExists(artifacts []store.Artifact, f string) bool {
+// folderExists reports whether f names a real directory under the root.
+func folderExists(f string) bool {
 	if f == "" {
 		return true
 	}
-	for _, a := range artifacts {
-		if a.Project == f || strings.HasPrefix(a.Project, f+"/") {
-			return true
-		}
+	root, err := store.Root()
+	if err != nil {
+		return false
 	}
-	return false
+	fi, err := os.Stat(filepath.Join(root, filepath.FromSlash(f)))
+	return err == nil && fi.IsDir()
 }
 
 // resolveCollection returns the multi-page artifact at path f, if that is
@@ -203,16 +302,9 @@ func handleFolderPage(w http.ResponseWriter, r *http.Request) {
 			http.NotFound(w, r)
 			return
 		}
-		if _, isCollection := resolveCollection(f); !isCollection {
-			artifacts, err := store.List()
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-			if !folderExists(artifacts, f) {
-				http.NotFound(w, r)
-				return
-			}
+		if _, isCollection := resolveCollection(f); !isCollection && !folderExists(f) {
+			http.NotFound(w, r)
+			return
 		}
 	}
 	if err := tmpl.ExecuteTemplate(w, "index.tmpl", pageView{Folder: f, Crumbs: crumbs(f)}); err != nil {
@@ -249,6 +341,27 @@ type viewerView struct {
 func handleViewerFragment(w http.ResponseWriter, r *http.Request) {
 	a, file, ok := resolveRequest(r)
 	if !ok {
+		// Viewer for loose markdown in project directories.
+		raw := strings.Trim(r.PathValue("path"), "/")
+		segs := strings.Split(raw, "/")
+		if p, isDoc := store.ResolveDoc(segs); isDoc {
+			view := viewerView{
+				URL:    "/a/" + raw,
+				Title:  strings.TrimSuffix(segs[len(segs)-1], filepath.Ext(segs[len(segs)-1])),
+				Path:   raw,
+				Crumbs: crumbs(strings.Join(segs[:len(segs)-1], "/")),
+			}
+			for i := range view.Crumbs {
+				view.Crumbs[i].Last = false
+			}
+			if fi, err := os.Stat(p); err == nil {
+				view.Size = fi.Size()
+			}
+			if err := tmpl.ExecuteTemplate(w, "viewer.tmpl", view); err != nil {
+				log.Printf("render viewer: %v", err)
+			}
+			return
+		}
 		http.NotFound(w, r)
 		return
 	}
@@ -295,6 +408,12 @@ func resolveRequest(r *http.Request) (store.Artifact, string, bool) {
 func handleArtifact(w http.ResponseWriter, r *http.Request) {
 	a, file, ok := resolveRequest(r)
 	if !ok {
+		// Loose markdown living in plain project directories renders too.
+		raw := strings.Trim(r.PathValue("path"), "/")
+		if p, isDoc := store.ResolveDoc(strings.Split(raw, "/")); isDoc {
+			serveMarkdown(w, r, p, filepath.Base(p))
+			return
+		}
 		http.NotFound(w, r)
 		return
 	}
@@ -311,7 +430,12 @@ func handleArtifact(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	http.ServeFile(w, r, filepath.Join(a.Dir, clean))
+	full := filepath.Join(a.Dir, clean)
+	if strings.HasSuffix(strings.ToLower(clean), ".md") {
+		serveMarkdown(w, r, full, filepath.Base(clean))
+		return
+	}
+	http.ServeFile(w, r, full)
 }
 
 func handleDelete(w http.ResponseWriter, r *http.Request) {

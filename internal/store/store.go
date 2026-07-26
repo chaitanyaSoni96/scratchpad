@@ -67,6 +67,29 @@ func EnsureRoot() (string, error) {
 	return root, nil
 }
 
+// defaultIgnores keeps repo-scale watched trees sane: these directories are
+// invisible to scanning and to the filesystem watcher. Extend with a
+// comma-separated SCRATCHPAD_IGNORE.
+var defaultIgnores = map[string]bool{
+	"node_modules": true, "vendor": true, "dist": true, "build": true,
+	"target": true, "__pycache__": true, "venv": true, ".venv": true,
+	"coverage": true, "bin": true, "obj": true,
+}
+
+// Ignored reports whether a directory name is skipped during scans and
+// watching (dot-dirs are always skipped by callers).
+func Ignored(name string) bool {
+	if defaultIgnores[name] {
+		return true
+	}
+	for _, extra := range strings.Split(os.Getenv("SCRATCHPAD_IGNORE"), ",") {
+		if extra != "" && name == strings.TrimSpace(extra) {
+			return true
+		}
+	}
+	return false
+}
+
 var nameRe = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,99}$`)
 
 func validateName(s string) error {
@@ -157,16 +180,24 @@ func loadArtifact(project, name, dir string) (Artifact, bool) {
 	if err != nil {
 		return Artifact{}, false // tolerate concurrent deletes
 	}
-	var htmls []string
+	var htmls, pages []string
 	for _, e := range entries {
-		if e.Type().IsRegular() && strings.HasSuffix(strings.ToLower(e.Name()), ".html") {
+		if !e.Type().IsRegular() {
+			continue
+		}
+		switch strings.ToLower(filepath.Ext(e.Name())) {
+		case ".html":
 			htmls = append(htmls, e.Name())
+			pages = append(pages, e.Name())
+		case ".md":
+			pages = append(pages, e.Name())
 		}
 	}
 	if len(htmls) == 0 {
-		return Artifact{}, false
+		return Artifact{}, false // only html qualifies a dir as an artifact
 	}
 	sort.Strings(htmls)
+	sort.Strings(pages)
 	entry := htmls[0]
 	for _, h := range htmls {
 		if h == "index.html" {
@@ -174,7 +205,7 @@ func loadArtifact(project, name, dir string) (Artifact, bool) {
 			break
 		}
 	}
-	a := Artifact{Project: project, Name: name, Dir: dir, Entry: entry, Pages: htmls}
+	a := Artifact{Project: project, Name: name, Dir: dir, Entry: entry, Pages: pages}
 	sizeRoot := dir
 	if real, err := filepath.EvalSymlinks(dir); err == nil {
 		sizeRoot = real // WalkDir does not follow a symlinked root
@@ -216,7 +247,7 @@ func List() ([]Artifact, error) {
 			return
 		}
 		for _, e := range entries {
-			if !entryIsDir(dir, e) || strings.HasPrefix(e.Name(), ".") {
+			if !entryIsDir(dir, e) || strings.HasPrefix(e.Name(), ".") || Ignored(e.Name()) {
 				continue
 			}
 			sub := filepath.Join(dir, e.Name())
@@ -273,6 +304,29 @@ func ResolvePath(segs []string) (a Artifact, file string, ok bool) {
 		}
 	}
 	return Artifact{}, "", false
+}
+
+// ResolveDoc resolves URL segments to a loose markdown file living in plain
+// project directories (not inside any artifact — ResolvePath covers those).
+func ResolveDoc(segs []string) (string, bool) {
+	if len(segs) == 0 || !strings.HasSuffix(strings.ToLower(segs[len(segs)-1]), ".md") {
+		return "", false
+	}
+	root, err := Root()
+	if err != nil {
+		return "", false
+	}
+	for _, s := range segs {
+		if validateName(s) != nil {
+			return "", false
+		}
+	}
+	p := filepath.Join(append([]string{root}, segs...)...)
+	fi, err := os.Stat(p)
+	if err != nil || fi.IsDir() {
+		return "", false
+	}
+	return p, true
 }
 
 // ValidateFilePath checks a relative asset path for a published file: every

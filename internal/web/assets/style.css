@@ -149,6 +149,22 @@ a.project-card { text-decoration: none; color: inherit; }
 }
 .row-right { display: flex; align-items: center; gap: 0.6rem; }
 .fsize { color: var(--muted); font-size: 0.8rem; }
+.doctag {
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 0.7rem;
+  padding: 0 0.35rem;
+  flex-shrink: 0;
+}
+.doc-folder {
+  display: grid;
+  place-items: center;
+  height: 100%;
+  font-size: 3rem;
+  color: var(--muted);
+  background: var(--surface);
+}
 .linked {
   border: 1px dashed var(--border);
   border-radius: 5px;
