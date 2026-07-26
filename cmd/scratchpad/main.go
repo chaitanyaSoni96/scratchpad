@@ -7,11 +7,31 @@ import (
 	"flag"
 	"fmt"
 	"io/fs"
+	"net/http"
 	"os"
 	"path/filepath"
+	"time"
 
 	"scratchpad/internal/store"
 )
+
+func baseURL() string {
+	if u := os.Getenv("SCRATCHPAD_URL"); u != "" {
+		return u
+	}
+	return "http://localhost:8737"
+}
+
+// webAlive probes the hosting server so publish can warn about dead links.
+func webAlive() bool {
+	client := http.Client{Timeout: 700 * time.Millisecond}
+	resp, err := client.Get(baseURL() + "/")
+	if err != nil {
+		return false
+	}
+	resp.Body.Close()
+	return resp.StatusCode < 500
+}
 
 const usage = `scratchpad - filesystem artifact store CLI
 
@@ -104,7 +124,10 @@ func main() {
 		if err != nil {
 			fatal(err)
 		}
-		fmt.Printf("published %s\nhttp://localhost:8737/a/%s/\n", a.Dir, a.RelPath())
+		fmt.Printf("published %s\n%s/a/%s/\n", a.Dir, baseURL(), a.RelPath())
+		if !webAlive() {
+			fmt.Fprintf(os.Stderr, "warning: scratchpad web server not reachable at %s — the link will not load until it is started (make web)\n", baseURL())
+		}
 	case "list":
 		fs := flag.NewFlagSet("list", flag.ExitOnError)
 		asJSON := fs.Bool("json", false, "output JSON")
@@ -122,8 +145,8 @@ func main() {
 			return
 		}
 		for _, a := range artifacts {
-			fmt.Printf("%-40s  %8d B  %s  http://localhost:8737/a/%s/\n",
-				a.RelPath(), a.Size, a.ModTime.Format("2006-01-02 15:04"), a.RelPath())
+			fmt.Printf("%-40s  %8d B  %s  %s/a/%s/\n",
+				a.RelPath(), a.Size, a.ModTime.Format("2006-01-02 15:04"), baseURL(), a.RelPath())
 		}
 	case "delete":
 		fs := flag.NewFlagSet("delete", flag.ExitOnError)

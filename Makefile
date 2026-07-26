@@ -24,7 +24,8 @@ stop:
 logs:
 	podman logs -f scratchpad-web
 
-register: register-claude register-opencode register-goose register-pi
+register: build
+	scripts/register-mcp.sh all
 
 register-claude:
 	scripts/register-mcp.sh claude
@@ -35,5 +36,11 @@ register-opencode:
 register-goose:
 	scripts/register-mcp.sh goose
 
-register-pi:
+register-pi: build
 	scripts/register-mcp.sh pi
+
+install-cli: build
+	scripts/register-mcp.sh cli
+
+install-skill:
+	scripts/register-mcp.sh skill

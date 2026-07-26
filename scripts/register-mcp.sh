@@ -90,19 +90,30 @@ EOF
   fi
 }
 
-register_pi() {
-  # pi has no MCP support; install the bundled extension instead.
-  local dst="$HOME/.pi/agent/extensions"
-  mkdir -p "$dst"
-  cp "$REPO_DIR/contrib/pi/scratchpad.ts" "$dst/scratchpad.ts"
-  echo "pi: extension installed at $dst/scratchpad.ts"
+install_cli() {
+  mkdir -p "$HOME/.local/bin"
+  ln -sf "$REPO_DIR/bin/scratchpad" "$HOME/.local/bin/scratchpad"
+  echo "cli: symlinked to ~/.local/bin/scratchpad"
+}
+
+install_skill() {
+  # Agent Skills standard (agentskills.io): same SKILL.md serves Claude Code
+  # and pi. Skills teach agents the CLI; pi (no MCP support) relies on this.
+  for dst in "$HOME/.claude/skills/scratchpad" "$HOME/.pi/agent/skills/scratchpad"; do
+    mkdir -p "$dst"
+    cp "$REPO_DIR/skill/SKILL.md" "$dst/SKILL.md"
+    echo "skill: installed at $dst/SKILL.md"
+  done
+  rm -f "$HOME/.pi/agent/extensions/scratchpad.ts" # superseded by skill+CLI
 }
 
 case "$TARGET" in
   claude)   register_claude ;;
   opencode) register_opencode ;;
   goose)    register_goose ;;
-  pi)       register_pi ;;
-  all)      register_claude; register_opencode; register_goose; register_pi ;;
-  *) echo "usage: $0 [claude|opencode|goose|pi|all]" >&2; exit 2 ;;
+  cli)      install_cli ;;
+  skill)    install_skill ;;
+  pi)       install_cli; install_skill ;;
+  all)      register_claude; register_opencode; register_goose; install_cli; install_skill ;;
+  *) echo "usage: $0 [claude|opencode|goose|cli|skill|all]" >&2; exit 2 ;;
 esac

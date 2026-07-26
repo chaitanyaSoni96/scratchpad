@@ -44,10 +44,20 @@ polling.
 ## Connect your agents
 
 ```bash
-make register   # claude + opencode + goose + pi, or register-<client> individually
+make register   # MCP for claude/opencode/goose + CLI on PATH + skill for claude/pi
 ```
 
-The MCP surface is deliberately minimal: two tools plus server instructions.
+Two complementary interfaces, one shared store:
+
+**CLI + skill (primary).** `scratchpad` goes on `~/.local/bin`; a single
+[Agent Skills](https://agentskills.io)-format `skill/SKILL.md` teaches agents
+to build a folder and `publish -dir` it — the natural fit for agents that
+already write files. Installed to `~/.claude/skills/scratchpad/` and
+`~/.pi/agent/skills/scratchpad/` (pi has no MCP by design; skill+CLI is its
+author-recommended pattern).
+
+**MCP (kept minimal).** Two tools plus server instructions, for clients
+where MCP is the smoother path:
 
 - `publish_artifact` (project?, name, files[{path, content, base64?}]) —
   create-only; needs one top-level `.html`; binary assets via base64.
@@ -55,15 +65,14 @@ The MCP surface is deliberately minimal: two tools plus server instructions.
   web server isn't reachable.
 - `list_artifacts` — read-only annotated; names, URLs, sizes, newest first.
 - Server **instructions** carry the guardrails (create-only policy, file
-  rules, name pattern, self-containment) so every client injects them as
-  context without bloating tool descriptions.
+  rules, name pattern, self-containment).
 
 | Client | Mechanism |
 |---|---|
-| Claude Code | `claude mcp add -s user scratchpad -- podman run -i --rm -v ~/.scratchpad:/data:z localhost/scratchpad:latest /scratchpad-mcp` |
-| opencode | `mcp.scratchpad` block in `~/.config/opencode/opencode.json` (1.x schema; v2 nests under `mcp.servers` and drops `enabled`) |
-| goose | `extensions.scratchpad` stdio block in `~/.config/goose/config.yaml` |
-| pi | pi has no MCP support by design — `contrib/pi/scratchpad.ts` is installed to `~/.pi/agent/extensions/`, registering the same two tools natively |
+| Claude Code | MCP (`claude mcp add -s user scratchpad -- podman run -i --rm -v ~/.scratchpad:/data:z localhost/scratchpad:latest /scratchpad-mcp`) + skill |
+| opencode | MCP: `mcp.scratchpad` block in `~/.config/opencode/opencode.json` (1.x schema; v2 nests under `mcp.servers` and drops `enabled`) |
+| goose | MCP: `extensions.scratchpad` stdio block in `~/.config/goose/config.yaml` |
+| pi | CLI + skill at `~/.pi/agent/skills/scratchpad/` |
 
 ## CLI
 
