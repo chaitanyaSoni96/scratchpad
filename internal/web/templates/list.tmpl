@@ -1,0 +1,53 @@
+{{if not .Cards}}
+<div class="empty">
+  {{if .Folder}}
+  <p>No artifacts left in <code>{{.Folder}}</code>.</p>
+  <p><a href="/">← back to scratchpad</a></p>
+  {{else}}
+  <p>Nothing here yet.</p>
+  <p>Publish an artifact via the <code>scratchpad</code> MCP server, or drop an
+     <code>index.html</code> into a folder under <code>~/.scratchpad</code>.</p>
+  {{end}}
+</div>
+{{else}}
+<div class="grid">
+  {{range .Cards}}
+  {{if eq .Kind "project"}}
+  <a class="card project-card" href="{{.Href}}">
+    <div class="preview">
+      <iframe src="/a/{{.Preview.RelPath}}/" sandbox="allow-scripts" loading="lazy" title="{{.Label}} preview" tabindex="-1"></iframe>
+    </div>
+    <div class="meta">
+      <div class="titles"><span class="name">{{.Label}} /</span></div>
+      <div class="row">
+        <time>{{.Preview.ModTime.Format "Jan 2 15:04"}}</time>
+        <span class="badge">{{.Count}} artifacts</span>
+      </div>
+    </div>
+  </a>
+  {{else}}
+  <article class="card">
+    <div class="preview" hx-get="/fragments/viewer/{{.Artifact.RelPath}}" hx-target="#viewer" title="open {{.Artifact.Name}}">
+      <iframe src="/a/{{.Artifact.RelPath}}/" sandbox="allow-scripts" loading="lazy" title="{{.Artifact.Name}} preview" tabindex="-1"></iframe>
+    </div>
+    <div class="meta">
+      <div class="titles">
+        {{if .PrefixLabel}}<a class="project" href="{{.PrefixHref}}" title="open folder {{.PrefixLabel}}">{{.PrefixLabel}} /</a>{{end}}
+        <button class="name" hx-get="/fragments/viewer/{{.Artifact.RelPath}}" hx-target="#viewer">{{.Artifact.Name}}</button>
+        <a class="ext" href="/a/{{.Artifact.RelPath}}/" target="_blank" rel="noopener" title="open in new tab">↗</a>
+      </div>
+      <div class="row">
+        <time>{{.Artifact.ModTime.Format "Jan 2 15:04"}}</time>
+        <span class="row-right">
+          <span class="fsize">{{size .Artifact.Size}}</span>
+          <button class="delete" hx-delete="/a/{{.Artifact.RelPath}}"
+                  hx-confirm="Delete {{.Artifact.RelPath}}?"
+                  hx-target="closest .card" hx-swap="outerHTML">delete</button>
+        </span>
+      </div>
+    </div>
+  </article>
+  {{end}}
+  {{end}}
+</div>
+{{end}}
