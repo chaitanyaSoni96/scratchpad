@@ -77,8 +77,8 @@ func crumbs(path string) []crumb {
 }
 
 // card is the view model for one tile: an artifact, a whole subfolder
-// (subfolders holding a single artifact collapse into that artifact's card),
-// or one html page of a multi-page artifact.
+// (subfolders holding a single artifact and nothing else collapse into that
+// artifact's card), or one html page of a multi-page artifact.
 type card struct {
 	Kind        string // "artifact" | "project" | "page"
 	Artifact    store.Artifact
@@ -250,7 +250,11 @@ func buildCards(artifacts []store.Artifact, f string) []card {
 			// outside this folder
 		default:
 			child := strings.SplitN(strings.TrimPrefix(a.Project, prefix), "/", 2)[0]
-			if perChild[child] == 1 {
+			docs := 0
+			if perChild[child] == 1 && !used[child] {
+				docs = childDocs(prefix, child)
+			}
+			if perChild[child] == 1 && docs == 0 {
 				used[child] = true
 				if a.MultiPage() {
 					cards = append(cards, collectionCard(a, strings.TrimPrefix(a.RelPath(), prefix)))
@@ -261,12 +265,28 @@ func buildCards(artifacts []store.Artifact, f string) []card {
 				}
 			} else if !used[child] {
 				used[child] = true
-				cards = append(cards, card{Kind: "project", Label: child,
-					Href: "/p/" + prefix + child, Count: perChild[child], Unit: "artifacts", Preview: a})
+				c := card{Kind: "project", Label: child,
+					Href: "/p/" + prefix + child, Count: perChild[child], Unit: "artifacts", Preview: a}
+				if docs > 0 {
+					c.Count += docs
+					c.Unit = "items"
+				}
+				cards = append(cards, c)
 			}
 		}
 	}
 	return append(cards, folderExtras(f, used)...)
+}
+
+// childDocs counts markdown under child folder of the current folder; a
+// non-zero count blocks the single-artifact collapse so those docs stay
+// reachable from the folder page.
+func childDocs(prefix, child string) int {
+	root, err := store.Root()
+	if err != nil {
+		return 0
+	}
+	return docCount(filepath.Join(root, filepath.FromSlash(prefix+child)))
 }
 
 // folderExists reports whether f names a real directory under the root.

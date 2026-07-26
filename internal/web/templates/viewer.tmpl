@@ -6,7 +6,7 @@
       <span class="fsize">{{size .Size}}</span>
       <a href="{{.URL}}" target="_blank" rel="noopener" title="open in new tab">↗ tab</a>
       <button class="close" title="close (Esc)"
-              hx-on:click="htmx.find('#viewer').innerHTML=''">✕</button>
+              hx-on:click="viewerClose()">✕</button>
     </div>
   </header>
   <!-- Deliberate open action: same trust as the open-in-tab link, so
@@ -17,18 +17,16 @@
 </div>
 <script>
   (function () {
-    function esc(e) {
-      if (e.key !== "Escape") return;
-      document.removeEventListener("keydown", esc);
-      var v = document.getElementById("viewer");
-      if (v) v.innerHTML = "";
-    }
-    document.addEventListener("keydown", esc);
-    // Focus moves into the artifact once it's clicked, so listen inside the
-    // (same-origin) viewer iframe too or Esc would stop working.
+    // Focus moves into the artifact once it's clicked, and keydown doesn't
+    // cross the iframe boundary, so listen inside the (same-origin) viewer
+    // iframe too or Esc would stop working. The listener dies with the frame.
     var frame = document.querySelector("#overlay iframe");
     frame.addEventListener("load", function () {
-      try { frame.contentWindow.addEventListener("keydown", esc); } catch (_) {}
+      try {
+        frame.contentWindow.addEventListener("keydown", function (e) {
+          if (e.key === "Escape") viewerClose();
+        });
+      } catch (_) {}
     });
   })();
 </script>
