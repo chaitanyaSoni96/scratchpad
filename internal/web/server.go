@@ -367,16 +367,18 @@ func handleListFragment(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// sibItem is one neighbour entry in a breadcrumb's hover popover. Folder
-// items navigate; Viewer items open in the artifact overlay instead.
+// sibItem is one entry in a breadcrumb's hover dropdown. Folder items
+// navigate; Viewer items open in the artifact overlay instead. Current marks
+// the hovered crumb's own entry, listed first and inert.
 type sibItem struct {
-	Name   string
-	Href   string
-	Viewer bool
+	Name    string
+	Href    string
+	Viewer  bool
+	Current bool
 }
 
 type sibView struct {
-	Above, Below []sibItem
+	Items []sibItem
 }
 
 // siblingItems lists everything living next to a child of folder parent:
@@ -460,20 +462,21 @@ func handleSiblings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	segs := strings.Split(rel, "/")
-	cur := strings.ToLower(strings.TrimSuffix(segs[len(segs)-1], filepath.Ext(segs[len(segs)-1])))
+	norm := func(s string) string {
+		return strings.ToLower(strings.TrimSuffix(s, filepath.Ext(s)))
+	}
 	items := siblingItems(strings.Join(segs[:len(segs)-1], "/"))
 	sort.Slice(items, func(i, j int) bool {
 		return strings.ToLower(items[i].Name) < strings.ToLower(items[j].Name)
 	})
+	// The hovered entry leads the list; the rest stay alphabetical.
+	cur := norm(segs[len(segs)-1])
 	var view sibView
 	for _, it := range items {
-		switch n := strings.ToLower(strings.TrimSuffix(it.Name, filepath.Ext(it.Name))); {
-		case n == cur:
-			// the hovered entry itself
-		case n < cur:
-			view.Above = append(view.Above, it)
-		default:
-			view.Below = append(view.Below, it)
+		if it.Current = norm(it.Name) == cur; it.Current {
+			view.Items = append([]sibItem{it}, view.Items...)
+		} else {
+			view.Items = append(view.Items, it)
 		}
 	}
 	if err := tmpl.ExecuteTemplate(w, "siblings.tmpl", view); err != nil {
