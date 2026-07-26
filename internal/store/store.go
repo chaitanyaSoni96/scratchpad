@@ -210,18 +210,24 @@ func loadArtifact(project, name, dir string) (Artifact, bool) {
 	if real, err := filepath.EvalSymlinks(dir); err == nil {
 		sizeRoot = real // WalkDir does not follow a symlinked root
 	}
+	if fi, err := os.Stat(dir); err == nil {
+		a.ModTime = fi.ModTime()
+	}
+	// ModTime is the newest mtime in the tree, not the directory's: editing a
+	// file in place leaves the directory untouched, and the web UI keys
+	// preview iframes on the modtime to reload them when content changes.
 	filepath.WalkDir(sizeRoot, func(_ string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
 			return nil
 		}
 		if fi, err := d.Info(); err == nil {
 			a.Size += fi.Size()
+			if fi.ModTime().After(a.ModTime) {
+				a.ModTime = fi.ModTime()
+			}
 		}
 		return nil
 	})
-	if fi, err := os.Stat(dir); err == nil {
-		a.ModTime = fi.ModTime()
-	}
 	annotate(&a)
 	return a, true
 }

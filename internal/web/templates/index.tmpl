@@ -7,10 +7,16 @@
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ctext y='13' font-size='14' fill='%23ffb454'%3E%E2%96%9A%3C/text%3E%3C/svg%3E">
   <link rel="stylesheet" href="/static/style.css">
   <script src="/static/htmx.min.js"></script>
+  <script src="/static/idiomorph-ext.min.js"></script>
   <script src="/static/sse.js"></script>
   <script src="/static/viewer.js"></script>
+  <script src="/static/fade.js"></script>
 </head>
-<body hx-boost="true" hx-ext="sse" sse-connect="/events">
+<!-- morph swaps (idiomorph) keep DOM nodes with matching ids alive across
+     boosted navigations and sse list refreshes, so card preview iframes are
+     only recreated when their card actually changed — a plain innerHTML swap
+     reloads every iframe and each one blanks out until its artifact paints. -->
+<body hx-boost="true" hx-ext="sse,morph" hx-swap="morph:innerHTML" sse-connect="/events">
   <header>
     <h1><a href="/">scratchpad</a>{{range .Crumbs}}<span class="crumb-sep">/</span><span class="crumb-wrap"><span class="sibs" hx-get="/fragments/siblings?path={{urlquery .Rel}}" hx-trigger="mouseenter once from:closest .crumb-wrap"></span>{{if .Last}}<span class="crumb">{{.Name}}</span>{{else}}<a class="crumb" href="{{.Href}}">{{.Name}}</a>{{end}}</span>{{end}}</h1>
   </header>

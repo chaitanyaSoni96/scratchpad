@@ -1,4 +1,9 @@
 :root {
+  /* Declaring the scheme keeps the browser's default canvas dark on full
+     loads, and makes light-default artifact documents render on an opaque
+     white canvas inside our dark iframes (mismatched-scheme iframes lose
+     transparency) instead of showing black text over the dark surface. */
+  color-scheme: dark light;
   --bg: #101014;
   --surface: #18181f;
   --border: #2a2a35;
@@ -9,6 +14,7 @@
 }
 @media (prefers-color-scheme: light) {
   :root {
+    color-scheme: light;
     --bg: #f6f5f2;
     --surface: #ffffff;
     --border: #e2e0da;
@@ -116,7 +122,7 @@ main { padding: 1rem 2rem 3rem; }
 .card:hover { border-color: var(--accent); }
 .preview {
   aspect-ratio: 16 / 10;
-  background: #fff;
+  background: var(--surface);
   border-bottom: 1px solid var(--border);
   overflow: hidden;
   cursor: pointer;
@@ -128,6 +134,16 @@ main { padding: 1rem 2rem 3rem; }
   transform: scale(0.5);
   transform-origin: top left;
   pointer-events: none;
+}
+/* invisible until the embedded document has loaded (see fade.js) */
+.preview iframe,
+.overlay iframe {
+  opacity: 0;
+  transition: opacity 0.2s ease;
+}
+.preview iframe.loaded,
+.overlay iframe.loaded {
+  opacity: 1;
 }
 .meta { padding: 0.75rem 1rem; display: flex; flex-direction: column; gap: 0.4rem; }
 .titles { display: flex; gap: 0.4rem; align-items: baseline; min-width: 0; }
@@ -184,7 +200,7 @@ a.project-card { text-decoration: none; color: inherit; }
   cursor: pointer;
 }
 .overlay-actions .close:hover { color: var(--text); border-color: var(--accent); }
-.overlay iframe { border: 0; flex: 1; width: 100%; background: #fff; }
+.overlay iframe { border: 0; flex: 1; width: 100%; background: var(--bg); }
 .row {
   display: flex;
   justify-content: space-between;

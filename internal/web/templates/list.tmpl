@@ -13,10 +13,18 @@
 <div class="grid">
   {{range .Cards}}
   {{if eq .Kind "project"}}
-  <a class="card project-card" href="{{.Href}}">
+  {{/* ids let the morph swap recognize unchanged cards and leave their
+       preview iframes untouched; hrefs are unique so they double as keys */}}
+  <a class="card project-card" id="card{{.Href}}" href="{{.Href}}">
     <div class="preview">
       {{if .Preview.Dir}}
-      <iframe src="/a/{{.Preview.RelPath}}/" sandbox="allow-scripts" loading="lazy" scrolling="no" title="{{.Label}} preview" tabindex="-1"></iframe>
+      {{/* ?v= makes edits show up under morph swaps: a changed modtime is an
+           attribute change, so only that card's iframe reloads */}}
+      {{/* onload lives inline, not in delegated JS: it must fire in every
+           engine and survive morph swaps, or the preview stays hidden.
+           No loading=lazy — an engine may never load a hidden lazy frame,
+           and hidden-until-loaded would then deadlock. */}}
+      <iframe src="/a/{{.Preview.RelPath}}/?v={{.Preview.ModTime.Unix}}" onload="this.classList.add('loaded')" onerror="this.classList.add('loaded')" sandbox="allow-scripts" scrolling="no" title="{{.Label}} preview" tabindex="-1"></iframe>
       {{else}}
       <div class="doc-folder">▤</div>
       {{end}}
@@ -30,9 +38,9 @@
     </div>
   </a>
   {{else if eq .Kind "page"}}
-  <article class="card">
+  <article class="card" id="card{{.PageHref}}">
     <div class="preview" hx-get="{{.ViewerHref}}" hx-target="#viewer" title="open {{.Label}}">
-      <iframe src="{{.PageHref}}" sandbox="allow-scripts" loading="lazy" scrolling="no" title="{{.Label}} preview" tabindex="-1"></iframe>
+      <iframe src="{{.PageHref}}?v={{.PageMod.Unix}}" onload="this.classList.add('loaded')" onerror="this.classList.add('loaded')" sandbox="allow-scripts" scrolling="no" title="{{.Label}} preview" tabindex="-1"></iframe>
     </div>
     <div class="meta">
       <div class="titles">
@@ -47,9 +55,9 @@
     </div>
   </article>
   {{else}}
-  <article class="card">
+  <article class="card" id="card/a/{{.Artifact.RelPath}}">
     <div class="preview" hx-get="/fragments/viewer/{{.Artifact.RelPath}}" hx-target="#viewer" title="open {{.Artifact.Name}}">
-      <iframe src="/a/{{.Artifact.RelPath}}/" sandbox="allow-scripts" loading="lazy" scrolling="no" title="{{.Artifact.Name}} preview" tabindex="-1"></iframe>
+      <iframe src="/a/{{.Artifact.RelPath}}/?v={{.Artifact.ModTime.Unix}}" onload="this.classList.add('loaded')" onerror="this.classList.add('loaded')" sandbox="allow-scripts" scrolling="no" title="{{.Artifact.Name}} preview" tabindex="-1"></iframe>
     </div>
     <div class="meta">
       <div class="titles">
