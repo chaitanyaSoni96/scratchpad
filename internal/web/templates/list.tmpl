@@ -22,7 +22,7 @@
       {{end}}
     </div>
     <div class="meta">
-      <div class="titles"><span class="name">{{.Label}} /</span></div>
+      <div class="titles"><span class="name">{{.Label}}/</span></div>
       <div class="row">
         {{if .Preview.Dir}}<time>{{.Preview.ModTime.Format "Jan 2 15:04"}}</time>{{else}}<span></span>{{end}}
         <span class="badge">{{.Count}} {{.Unit}}</span>
@@ -53,7 +53,7 @@
     </div>
     <div class="meta">
       <div class="titles">
-        {{if .PrefixLabel}}<a class="project" href="{{.PrefixHref}}" title="open folder {{.PrefixLabel}}">{{.PrefixLabel}} /</a>{{end}}
+        {{if .PrefixLabel}}<a class="project" href="{{.PrefixHref}}" title="open folder {{.PrefixLabel}}">{{.PrefixLabel}}/</a>{{end}}
         <button class="name" hx-get="/fragments/viewer/{{.Artifact.RelPath}}" hx-target="#viewer">{{.Artifact.Name}}</button>
         <a class="ext" href="/a/{{.Artifact.RelPath}}/" target="_blank" rel="noopener" title="open in new tab">↗</a>
       </div>

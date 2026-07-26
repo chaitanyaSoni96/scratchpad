@@ -1,7 +1,6 @@
 <div class="overlay" id="overlay">
   <header>
-    <h1><a href="/">scratchpad</a>{{range .Crumbs}} <span class="crumb-sep">/</span> <a class="crumb" href="{{.Href}}">{{.Name}}</a>{{end}} <span class="crumb-sep">/</span> <span class="crumb">{{.Title}}</span></h1>
-    <p class="tagline">artifact in <code>~/.scratchpad/{{.Path}}</code>, live</p>
+    <h1><a href="/">scratchpad</a>{{range .Crumbs}}<span class="crumb-sep">/</span><a class="crumb" href="{{.Href}}">{{.Name}}</a>{{end}}<span class="crumb-sep">/</span><span class="crumb">{{.Title}}</span></h1>
     <div class="overlay-actions">
       <span class="fsize">{{size .Size}}</span>
       <a href="{{.URL}}" target="_blank" rel="noopener" title="open in new tab">↗ tab</a>

@@ -11,8 +11,7 @@
 </head>
 <body hx-ext="sse" sse-connect="/events">
   <header>
-    <h1><a href="/">scratchpad</a>{{range .Crumbs}} <span class="crumb-sep">/</span> {{if .Last}}<span class="crumb">{{.Name}}</span>{{else}}<a class="crumb" href="{{.Href}}">{{.Name}}</a>{{end}}{{end}}</h1>
-    <p class="tagline">artifacts in <code>~/.scratchpad{{if .Folder}}/{{.Folder}}{{end}}</code>, live</p>
+    <h1><a href="/">scratchpad</a>{{range .Crumbs}}<span class="crumb-sep">/</span>{{if .Last}}<span class="crumb">{{.Name}}</span>{{else}}<a class="crumb" href="{{.Href}}">{{.Name}}</a>{{end}}{{end}}</h1>
   </header>
   <main id="list" hx-get="/fragments/list{{if .Folder}}?project={{.Folder}}{{end}}" hx-trigger="load, sse:change"></main>
   <div id="viewer"></div>
