@@ -21,6 +21,6 @@
     <h1><a href="/">scratchpad</a>{{range .Crumbs}}<span class="crumb-sep">/</span><span class="crumb-wrap"><span class="sibs" hx-get="/fragments/siblings?path={{urlquery .Rel}}" hx-trigger="mouseenter once from:closest .crumb-wrap"></span>{{if .Last}}<span class="crumb">{{.Name}}</span>{{else}}<a class="crumb" href="{{.Href}}">{{.Name}}</a>{{end}}</span>{{end}}</h1>
   </header>
   <main id="list" hx-get="/fragments/list{{if .Folder}}?project={{.Folder}}{{end}}" hx-trigger="sse:change">{{template "list.tmpl" .List}}</main>
-  <div id="viewer"></div>
+  <div id="viewer"{{if .View}} data-view="{{.View}}" data-folder="{{.Folder}}"{{end}}></div>
 </body>
 </html>

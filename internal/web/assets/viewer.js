@@ -24,9 +24,10 @@
       });
   }
 
-  // Overlay URL on top of the current list page, keeping slashes readable.
+  // Overlay deep link: the viewed file's own path under /p/. The server
+  // renders such paths as the parent folder page with the overlay open.
   function viewerURL(rel) {
-    return location.pathname + "?view=" + encodeURIComponent(rel).replace(/%2F/gi, "/");
+    return "/p/" + encodeURIComponent(rel).replace(/%2F/gi, "/");
   }
 
   // Shared close path for the ✕ button, Esc, and anything else: clear the
@@ -62,18 +63,28 @@
 
   // A document can load with the viewer open in two ways: its history entry
   // says so (reload while open, or Back from a page navigated to from the
-  // overlay), or it is a fresh ?view= deep link. For a deep link, synthesize
-  // the normal two-entry stack (clean list below, viewer on top) so Back and
-  // close land on the list instead of leaving the site.
+  // overlay), or it is a fresh deep link — a /p/ file path the server
+  // rendered with data-view set, or a legacy ?view= query. For a deep link,
+  // synthesize the normal two-entry stack (clean list below, viewer on top)
+  // so Back and close land on the list instead of leaving the site.
   document.addEventListener("DOMContentLoaded", function () {
     if (history.state && history.state.viewer) {
       restore(history.state.viewer);
       return;
     }
-    var rel = new URLSearchParams(location.search).get("view");
+    var v = viewer();
+    var rel = v && v.getAttribute("data-view");
+    var clean;
+    if (rel) {
+      var folder = v.getAttribute("data-folder");
+      clean = folder ? "/p/" + folder : "/";
+    } else {
+      rel = new URLSearchParams(location.search).get("view");
+      clean = location.pathname;
+    }
     if (rel) {
       var path = FRAG + rel;
-      history.replaceState(null, "", location.pathname);
+      history.replaceState(null, "", clean);
       history.pushState({ viewer: path }, "", viewerURL(rel));
       restore(path);
     }

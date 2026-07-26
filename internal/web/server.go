@@ -102,6 +102,7 @@ type card struct {
 
 type pageView struct {
 	Folder string // "" on the home page
+	View   string // deep-linked overlay target, "" for a plain folder page
 	Crumbs []crumb
 	List   listView
 }
@@ -320,14 +321,46 @@ func resolveCollection(f string) (store.Artifact, bool) {
 	return a, true
 }
 
+// resolveView reports whether f names something the viewer overlay can show
+// as a /p/ deep link — a top-level page of an artifact, a single-page
+// artifact, or a loose markdown doc — and returns the folder page to render
+// underneath the overlay.
+func resolveView(f string) (folder string, ok bool) {
+	segs := strings.Split(f, "/")
+	if a, file, ok := store.ResolvePath(segs); ok {
+		if file == "" {
+			if a.MultiPage() {
+				return "", false // collection pages render as folders, not overlays
+			}
+			return a.Project, true
+		}
+		for _, p := range a.Pages {
+			if p == file {
+				if a.MultiPage() {
+					return a.RelPath(), true
+				}
+				return a.Project, true
+			}
+		}
+		return "", false
+	}
+	if _, isDoc := store.ResolveDoc(segs); isDoc {
+		return strings.Join(segs[:len(segs)-1], "/"), true
+	}
+	return "", false
+}
+
 func handleFolderPage(w http.ResponseWriter, r *http.Request) {
 	f := strings.Trim(r.PathValue("path"), "/")
+	view := ""
 	if f != "" {
 		if _, err := store.SplitProject(f); err != nil {
 			http.NotFound(w, r)
 			return
 		}
-		if _, isCollection := resolveCollection(f); !isCollection && !folderExists(f) {
+		if folder, ok := resolveView(f); ok {
+			view, f = f, folder
+		} else if _, isCollection := resolveCollection(f); !isCollection && !folderExists(f) {
 			http.NotFound(w, r)
 			return
 		}
@@ -337,7 +370,7 @@ func handleFolderPage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if err := tmpl.ExecuteTemplate(w, "index.tmpl", pageView{Folder: f, Crumbs: crumbs(f), List: list}); err != nil {
+	if err := tmpl.ExecuteTemplate(w, "index.tmpl", pageView{Folder: f, View: view, Crumbs: crumbs(f), List: list}); err != nil {
 		log.Printf("render folder page: %v", err)
 	}
 }
