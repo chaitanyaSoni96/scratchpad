@@ -23,11 +23,18 @@ type Artifact struct {
 	Project string // slash-separated project path, "" for root-level artifacts
 	Name    string
 	Dir     string // absolute path (may be or traverse a symlink)
-	Entry   string // entry html filename
-	Size    int64  // total bytes of all files in the artifact
+	Entry   string   // entry html filename
+	Pages   []string // all top-level html files, sorted
+	Size    int64    // total bytes of all files in the artifact
 	ModTime time.Time
 	IsLink  bool // Dir itself is a symlink (a watched folder: delete = unlink)
 	Linked  bool // Dir lives inside a watched folder; not deletable here
+}
+
+// MultiPage reports whether the artifact is a page collection: several
+// top-level html files and no index.html to crown one of them the entry.
+func (a Artifact) MultiPage() bool {
+	return len(a.Pages) > 1 && a.Entry != "index.html"
 }
 
 // RelPath is the URL path segment(s) identifying the artifact.
@@ -167,7 +174,7 @@ func loadArtifact(project, name, dir string) (Artifact, bool) {
 			break
 		}
 	}
-	a := Artifact{Project: project, Name: name, Dir: dir, Entry: entry}
+	a := Artifact{Project: project, Name: name, Dir: dir, Entry: entry, Pages: htmls}
 	sizeRoot := dir
 	if real, err := filepath.EvalSymlinks(dir); err == nil {
 		sizeRoot = real // WalkDir does not follow a symlinked root

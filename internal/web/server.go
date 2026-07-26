@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -75,17 +76,22 @@ func crumbs(path string) []crumb {
 	return out
 }
 
-// card is the view model for one tile: an artifact, or a whole subfolder
-// (subfolders holding a single artifact collapse into that artifact's card).
+// card is the view model for one tile: an artifact, a whole subfolder
+// (subfolders holding a single artifact collapse into that artifact's card),
+// or one html page of a multi-page artifact.
 type card struct {
-	Kind        string // "artifact" | "project"
+	Kind        string // "artifact" | "project" | "page"
 	Artifact    store.Artifact
 	PrefixLabel string // artifact card: "sub/path" prefix shown before the name
 	PrefixHref  string
-	Label       string // project card
+	Label       string // project + page cards
 	Href        string
 	Count       int
+	Unit        string // "artifacts" | "pages"
 	Preview     store.Artifact
+	PageFile    string // page cards: filename inside the artifact
+	PageSize    int64
+	PageMod     time.Time
 }
 
 type pageView struct {
@@ -96,6 +102,27 @@ type pageView struct {
 type listView struct {
 	Folder string
 	Cards  []card
+}
+
+// collectionCard renders a multi-page artifact as a browsable folder tile.
+func collectionCard(a store.Artifact, label string) card {
+	return card{Kind: "project", Label: label, Href: "/p/" + a.RelPath(),
+		Count: len(a.Pages), Unit: "pages", Preview: a}
+}
+
+// pageCards renders one tile per top-level html file of a multi-page artifact.
+func pageCards(a store.Artifact) []card {
+	var cards []card
+	for _, f := range a.Pages {
+		c := card{Kind: "page", Artifact: a, PageFile: f,
+			Label: strings.TrimSuffix(f, filepath.Ext(f)), PageMod: a.ModTime}
+		if fi, err := os.Stat(filepath.Join(a.Dir, f)); err == nil {
+			c.PageSize = fi.Size()
+			c.PageMod = fi.ModTime()
+		}
+		cards = append(cards, c)
+	}
+	return cards
 }
 
 // buildCards turns the newest-first artifact list into tiles for folder f.
@@ -116,19 +143,27 @@ func buildCards(artifacts []store.Artifact, f string) []card {
 	for _, a := range artifacts {
 		switch {
 		case a.Project == f:
-			cards = append(cards, card{Kind: "artifact", Artifact: a})
+			if a.MultiPage() {
+				cards = append(cards, collectionCard(a, a.Name))
+			} else {
+				cards = append(cards, card{Kind: "artifact", Artifact: a})
+			}
 		case !strings.HasPrefix(a.Project+"/", prefix):
 			// outside this folder
 		default:
 			child := strings.SplitN(strings.TrimPrefix(a.Project, prefix), "/", 2)[0]
 			if perChild[child] == 1 {
-				cards = append(cards, card{Kind: "artifact", Artifact: a,
-					PrefixLabel: strings.TrimPrefix(a.Project, prefix),
-					PrefixHref:  "/p/" + a.Project})
+				if a.MultiPage() {
+					cards = append(cards, collectionCard(a, strings.TrimPrefix(a.RelPath(), prefix)))
+				} else {
+					cards = append(cards, card{Kind: "artifact", Artifact: a,
+						PrefixLabel: strings.TrimPrefix(a.Project, prefix),
+						PrefixHref:  "/p/" + a.Project})
+				}
 			} else if !seen[child] {
 				seen[child] = true
 				cards = append(cards, card{Kind: "project", Label: child,
-					Href: "/p/" + prefix + child, Count: perChild[child], Preview: a})
+					Href: "/p/" + prefix + child, Count: perChild[child], Unit: "artifacts", Preview: a})
 			}
 		}
 	}
@@ -148,6 +183,19 @@ func folderExists(artifacts []store.Artifact, f string) bool {
 	return false
 }
 
+// resolveCollection returns the multi-page artifact at path f, if that is
+// what f names.
+func resolveCollection(f string) (store.Artifact, bool) {
+	if f == "" {
+		return store.Artifact{}, false
+	}
+	a, file, ok := store.ResolvePath(strings.Split(f, "/"))
+	if !ok || file != "" || !a.MultiPage() {
+		return store.Artifact{}, false
+	}
+	return a, true
+}
+
 func handleFolderPage(w http.ResponseWriter, r *http.Request) {
 	f := strings.Trim(r.PathValue("path"), "/")
 	if f != "" {
@@ -155,14 +203,16 @@ func handleFolderPage(w http.ResponseWriter, r *http.Request) {
 			http.NotFound(w, r)
 			return
 		}
-		artifacts, err := store.List()
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		if !folderExists(artifacts, f) {
-			http.NotFound(w, r)
-			return
+		if _, isCollection := resolveCollection(f); !isCollection {
+			artifacts, err := store.List()
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			if !folderExists(artifacts, f) {
+				http.NotFound(w, r)
+				return
+			}
 		}
 	}
 	if err := tmpl.ExecuteTemplate(w, "index.tmpl", pageView{Folder: f, Crumbs: crumbs(f)}); err != nil {
@@ -171,32 +221,63 @@ func handleFolderPage(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleListFragment(w http.ResponseWriter, r *http.Request) {
-	artifacts, err := store.List()
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
 	f := strings.Trim(r.URL.Query().Get("project"), "/")
-	view := listView{Folder: f, Cards: buildCards(artifacts, f)}
+	view := listView{Folder: f}
+	if a, isCollection := resolveCollection(f); isCollection {
+		view.Cards = pageCards(a)
+	} else {
+		artifacts, err := store.List()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		view.Cards = buildCards(artifacts, f)
+	}
 	if err := tmpl.ExecuteTemplate(w, "list.tmpl", view); err != nil {
 		log.Printf("render list: %v", err)
 	}
 }
 
 type viewerView struct {
-	Artifact store.Artifact
-	Crumbs   []crumb
+	URL    string // iframe src
+	Title  string // final crumb
+	Path   string // display path under ~/.scratchpad
+	Size   int64
+	Crumbs []crumb
 }
 
 func handleViewerFragment(w http.ResponseWriter, r *http.Request) {
 	a, file, ok := resolveRequest(r)
-	if !ok || file != "" {
+	if !ok {
 		http.NotFound(w, r)
 		return
 	}
-	view := viewerView{Artifact: a, Crumbs: crumbs(a.Project)}
+	view := viewerView{Crumbs: crumbs(a.Project)}
 	for i := range view.Crumbs {
-		view.Crumbs[i].Last = false // artifact name is the final crumb
+		view.Crumbs[i].Last = false // the title is the final crumb
+	}
+	if file == "" {
+		view.URL = "/a/" + a.RelPath() + "/"
+		view.Title = a.Name
+		view.Path = a.RelPath()
+		view.Size = a.Size
+	} else {
+		// Only top-level html pages get a viewer; other files just serve.
+		page := false
+		for _, p := range a.Pages {
+			page = page || p == file
+		}
+		if !page {
+			http.NotFound(w, r)
+			return
+		}
+		view.URL = "/a/" + a.RelPath() + "/" + file
+		view.Title = strings.TrimSuffix(file, filepath.Ext(file))
+		view.Path = a.RelPath() + "/" + file
+		view.Crumbs = append(view.Crumbs, crumb{Name: a.Name, Href: "/p/" + a.RelPath()})
+		if fi, err := os.Stat(filepath.Join(a.Dir, file)); err == nil {
+			view.Size = fi.Size()
+		}
 	}
 	if err := tmpl.ExecuteTemplate(w, "viewer.tmpl", view); err != nil {
 		log.Printf("render viewer: %v", err)

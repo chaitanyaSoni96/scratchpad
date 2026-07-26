@@ -1,10 +1,10 @@
 <div class="overlay" id="overlay">
   <header>
-    <h1><a href="/">scratchpad</a>{{range .Crumbs}} <span class="crumb-sep">/</span> <a class="crumb" href="{{.Href}}">{{.Name}}</a>{{end}} <span class="crumb-sep">/</span> <span class="crumb">{{.Artifact.Name}}</span></h1>
-    <p class="tagline">artifact in <code>~/.scratchpad/{{.Artifact.RelPath}}</code>, live</p>
+    <h1><a href="/">scratchpad</a>{{range .Crumbs}} <span class="crumb-sep">/</span> <a class="crumb" href="{{.Href}}">{{.Name}}</a>{{end}} <span class="crumb-sep">/</span> <span class="crumb">{{.Title}}</span></h1>
+    <p class="tagline">artifact in <code>~/.scratchpad/{{.Path}}</code>, live</p>
     <div class="overlay-actions">
-      <span class="fsize">{{size .Artifact.Size}}</span>
-      <a href="/a/{{.Artifact.RelPath}}/" target="_blank" rel="noopener" title="open in new tab">↗ tab</a>
+      <span class="fsize">{{size .Size}}</span>
+      <a href="{{.URL}}" target="_blank" rel="noopener" title="open in new tab">↗ tab</a>
       <button class="close" title="close (Esc)"
               hx-on:click="htmx.find('#viewer').innerHTML=''">✕</button>
     </div>
@@ -12,7 +12,7 @@
   <!-- Deliberate open action: same trust as the open-in-tab link, so
        same-origin (localStorage etc.) is allowed; top-navigation stays
        blocked so the artifact can't navigate the scratchpad page away. -->
-  <iframe src="/a/{{.Artifact.RelPath}}/" title="{{.Artifact.Name}}"
+  <iframe src="{{.URL}}" title="{{.Title}}"
           sandbox="allow-scripts allow-same-origin allow-forms allow-modals allow-popups allow-downloads"></iframe>
 </div>
 <script>
