@@ -61,6 +61,9 @@ hr { border: 0; border-top: 1px solid #e2e0da; }
 // serveMarkdown renders a markdown file to a full standalone HTML page.
 // ?raw=1 serves the source instead.
 func serveMarkdown(w http.ResponseWriter, r *http.Request, path, title string) {
+	// Rendered fresh off disk on every request, so the browser must always
+	// revalidate rather than risk showing a stale render of an edited file.
+	w.Header().Set("Cache-Control", "no-cache")
 	if r.URL.Query().Get("raw") != "" {
 		http.ServeFile(w, r, path)
 		return

@@ -514,10 +514,13 @@ func handleSiblings(w http.ResponseWriter, r *http.Request) {
 }
 
 type viewerView struct {
-	URL    string // iframe src
-	Title  string // final crumb
-	Path   string // display path under ~/.scratchpad
-	Size   int64
+	URL     string // iframe src
+	Title   string // final crumb
+	Path    string // display path under ~/.scratchpad
+	Size    int64
+	ModTime int64 // unix seconds; appended to the iframe src so an SSE-driven
+	// re-render actually reloads it instead of idiomorph leaving an
+	// unchanged src attribute (and therefore the iframe) untouched
 	Crumbs []crumb
 }
 
@@ -539,6 +542,7 @@ func handleViewerFragment(w http.ResponseWriter, r *http.Request) {
 			}
 			if fi, err := os.Stat(p); err == nil {
 				view.Size = fi.Size()
+				view.ModTime = fi.ModTime().Unix()
 			}
 			if err := tmpl.ExecuteTemplate(w, "viewer.tmpl", view); err != nil {
 				log.Printf("render viewer: %v", err)
@@ -557,6 +561,7 @@ func handleViewerFragment(w http.ResponseWriter, r *http.Request) {
 		view.Title = a.Name
 		view.Path = a.RelPath()
 		view.Size = a.Size
+		view.ModTime = a.ModTime.Unix()
 	} else {
 		// Only top-level html pages get a viewer; other files just serve.
 		page := false
@@ -573,6 +578,7 @@ func handleViewerFragment(w http.ResponseWriter, r *http.Request) {
 		view.Crumbs = append(view.Crumbs, crumb{Name: a.Name, Href: "/p/" + a.RelPath(), Rel: a.RelPath()})
 		if fi, err := os.Stat(filepath.Join(a.Dir, file)); err == nil {
 			view.Size = fi.Size()
+			view.ModTime = fi.ModTime().Unix()
 		}
 	}
 	if err := tmpl.ExecuteTemplate(w, "viewer.tmpl", view); err != nil {
@@ -589,6 +595,10 @@ func resolveRequest(r *http.Request) (store.Artifact, string, bool) {
 }
 
 func handleArtifact(w http.ResponseWriter, r *http.Request) {
+	// Served straight off disk on every request, so the browser must always
+	// revalidate rather than risk showing a stale copy of a file that was
+	// just edited (watched folders in particular churn on every save).
+	w.Header().Set("Cache-Control", "no-cache")
 	a, file, ok := resolveRequest(r)
 	if !ok {
 		// Loose markdown living in plain project directories renders too.

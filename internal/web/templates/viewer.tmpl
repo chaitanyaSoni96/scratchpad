@@ -11,7 +11,7 @@
   <!-- Deliberate open action: same trust as the open-in-tab link, so
        same-origin (localStorage etc.) is allowed; top-navigation stays
        blocked so the artifact can't navigate the scratchpad page away. -->
-  <iframe src="{{.URL}}" title="{{.Title}}"
+  <iframe src="{{.URL}}?v={{.ModTime}}" title="{{.Title}}"
           onload="this.classList.add('loaded')" onerror="this.classList.add('loaded')"
           sandbox="allow-scripts allow-same-origin allow-forms allow-modals allow-popups allow-downloads"></iframe>
 </div>

@@ -29,9 +29,25 @@ func Run(ctx context.Context, root string, hub *Hub) error {
 
 	// watchTree adds dir and every directory below it, following symlinks
 	// (watched external folders) with a cycle guard. Called for the root at
-	// startup and for any newly created directory: a dir can arrive with
-	// children already inside (mkdir -p, mv, cp -r, ln -s), so one Create
-	// event must hook the whole subtree.
+	// startup, for any newly created directory (a dir can arrive with
+	// children already inside via mkdir -p, mv, cp -r, ln -s, so one Create
+	// event must hook the whole subtree), and again after every debounced
+	// burst to repair watches fsnotify dropped along the way.
+	//
+	// That repair matters because of a case fsnotify itself won't report: if
+	// a watched directory's own inode is replaced (a build tool cleaning and
+	// regenerating its output dir, rsync resyncing a tree, etc.), the old
+	// watch dies with it. Ordinarily that'd surface as a Remove event on the
+	// directory's own path, but fsnotify deliberately swallows that specific
+	// event whenever the parent directory is also watched — which, since
+	// watchTree watches every level, is always true here — on the assumption
+	// that the parent's own delete event already covers it. That assumption
+	// doesn't hold across a symlink boundary (a watched folder is a symlink
+	// to elsewhere): replacing the symlink's target leaves the symlink's
+	// dentry in its parent untouched, so no such parent-level event ever
+	// comes. Re-walking after every burst sidesteps the swallowed event
+	// instead of trying to detect it: w.Add on a path still standing is a
+	// cheap no-op, and EvalSymlinks freshly resolves anything replaced.
 	watchTree := func(top string) {
 		visited := map[string]bool{} // cycle guard, fresh per traversal
 		var add func(dir string)
@@ -97,6 +113,7 @@ func Run(ctx context.Context, root string, hub *Hub) error {
 		case <-timerC:
 			timer = nil
 			timerC = nil
+			watchTree(root)
 			hub.Broadcast()
 		}
 	}
