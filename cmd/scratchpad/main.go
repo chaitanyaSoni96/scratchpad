@@ -40,6 +40,8 @@ Usage:
   scratchpad publish -name <name> [-project <p/ath>] -dir <folder>
   scratchpad publish -name <name> [-project <p/ath>] -html <file> [-css <file>] [-js <file>]
   scratchpad watch <folder> [-name <name>] [-project <p/ath>]
+  scratchpad unwatch <path> | -name <name> [-project <p/ath>]
+  scratchpad watches
   scratchpad list [-json]
   scratchpad delete -name <name> [-project <p/ath>]
 
@@ -49,7 +51,8 @@ HTML from stdin.
 
 watch symlinks a folder into the scratchpad instead of copying: keep editing
 it in place and the site updates live. -name defaults to the folder's name.
-Deleting a watched entry only removes the link, never the source; files
+unwatch removes that link and nothing else — the source folder is never
+touched — and watches lists every link currently in the scratchpad. Files
 inside a watched folder cannot be deleted through scratchpad at all.
 
 Artifacts land in ~/.scratchpad (override: SCRATCHPAD_ROOT) and are served
@@ -169,6 +172,40 @@ func main() {
 		if !webAlive() {
 			fmt.Fprintf(os.Stderr, "warning: scratchpad web server not reachable at %s\n", baseURL())
 		}
+	case "unwatch":
+		fs := flag.NewFlagSet("unwatch", flag.ExitOnError)
+		project := fs.String("project", "", "optional project path")
+		name := fs.String("name", "", "link name")
+		// the link may be given positionally as a whole path, like the
+		// scratchpad URL shows it (project/name), or via the flags
+		args := os.Args[2:]
+		var target string
+		if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+			target, args = args[0], args[1:]
+		}
+		fs.Parse(args)
+		if target != "" {
+			rel := strings.Trim(target, "/")
+			if i := strings.LastIndex(rel, "/"); i >= 0 {
+				*project, *name = rel[:i], rel[i+1:]
+			} else {
+				*project, *name = "", rel
+			}
+		}
+		if *name == "" {
+			printWatches("nothing to unwatch — no watched folders")
+			fatal(fmt.Errorf("usage: scratchpad unwatch <path> | -name <name> [-project <p/ath>]"))
+		}
+		if err := store.Unwatch(*project, *name); err != nil {
+			fatal(err)
+		}
+		rel := *name
+		if *project != "" {
+			rel = *project + "/" + *name
+		}
+		fmt.Printf("unwatched %s (source folder kept)\n", rel)
+	case "watches":
+		printWatches("no watched folders")
 	case "list":
 		fs := flag.NewFlagSet("list", flag.ExitOnError)
 		asJSON := fs.Bool("json", false, "output JSON")
@@ -201,6 +238,21 @@ func main() {
 	default:
 		fmt.Fprintln(os.Stderr, usage)
 		os.Exit(2)
+	}
+}
+
+// printWatches lists the watch links, or empty when there are none.
+func printWatches(empty string) {
+	links, err := store.Watches()
+	if err != nil {
+		fatal(err)
+	}
+	if len(links) == 0 {
+		fmt.Println(empty)
+		return
+	}
+	for _, l := range links {
+		fmt.Printf("%-40s -> %s\n", l.Path, l.Target)
 	}
 }
 

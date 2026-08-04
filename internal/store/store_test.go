@@ -157,6 +157,78 @@ func TestWatch(t *testing.T) {
 	}
 }
 
+func TestUnwatch(t *testing.T) {
+	root := testRoot(t)
+	src := t.TempDir()
+	os.WriteFile(filepath.Join(src, "index.html"), []byte("<h1>src</h1>"), 0o644)
+	tree := t.TempDir()
+	os.MkdirAll(filepath.Join(tree, "one"), 0o755)
+	os.WriteFile(filepath.Join(tree, "one", "index.html"), []byte("<p>"), 0o644)
+
+	if _, err := Watch("lab", "art", src); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Watch("", "tree", tree); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Publish("", "owned", map[string][]byte{"index.html": []byte("<p>")}); err != nil {
+		t.Fatal(err)
+	}
+
+	links, err := Watches()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(links) != 2 || links[0].Path != "lab/art" || links[0].Target != src || links[1].Path != "tree" {
+		t.Fatalf("Watches() = %+v", links)
+	}
+
+	// only links can be unwatched; published artifacts are never touched
+	if err := Unwatch("", "owned"); err == nil || !strings.Contains(err.Error(), "not a watched folder") {
+		t.Errorf("unwatch of a published artifact = %v, want refusal", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "owned", "index.html")); err != nil {
+		t.Errorf("published artifact must survive a refused unwatch: %v", err)
+	}
+	if err := Unwatch("", "missing"); err == nil {
+		t.Error("unwatch of a missing entry should fail")
+	}
+	// an entry inside a watched tree points the human at the link itself
+	err = Unwatch("tree", "one")
+	if err == nil || !strings.Contains(err.Error(), `watched folder "tree"`) {
+		t.Errorf("unwatch inside a watched tree = %v, want a pointer to the link", err)
+	}
+
+	if got := WatchLinkFor("tree/one"); got != "tree" {
+		t.Errorf("WatchLinkFor(tree/one) = %q, want tree", got)
+	}
+	if got := WatchLinkFor("owned"); got != "" {
+		t.Errorf("WatchLinkFor(owned) = %q, want empty", got)
+	}
+
+	// unwatching a project tree that is not an artifact (Delete cannot reach it)
+	if err := Unwatch("", "tree"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(tree, "one", "index.html")); err != nil {
+		t.Errorf("source tree must survive unwatch: %v", err)
+	}
+
+	// unwatching the last link in a project prunes the empty project dir
+	if err := Unwatch("lab", "art"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(src, "index.html")); err != nil {
+		t.Errorf("source must survive unwatch: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "lab")); !os.IsNotExist(err) {
+		t.Error("empty project dir should be pruned after unwatch")
+	}
+	if links, _ := Watches(); len(links) != 0 {
+		t.Errorf("Watches() = %+v, want none left", links)
+	}
+}
+
 func TestListAndResolvePath(t *testing.T) {
 	root := testRoot(t)
 

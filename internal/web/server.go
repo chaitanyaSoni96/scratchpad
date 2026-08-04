@@ -49,6 +49,7 @@ func NewServer(hub *watch.Hub) http.Handler {
 	mux.HandleFunc("GET /fragments/siblings", handleSiblings)
 	mux.HandleFunc("GET /a/{path...}", handleArtifact)
 	mux.HandleFunc("DELETE /a/{path...}", handleDelete)
+	mux.HandleFunc("DELETE /watch/{path...}", handleUnwatch)
 	mux.HandleFunc("GET /events", handleEvents(hub))
 	assets, err := fs.Sub(assetFS, "assets")
 	if err != nil {
@@ -98,6 +99,53 @@ type card struct {
 	PageIsDoc   bool   // page cards: markdown rather than html
 	PageSize    int64
 	PageMod     time.Time
+	Unwatch     *unwatchAction // set when this tile is (or lives under) a watch link
+}
+
+// unwatchAction is the unwatch button on a card: the watch link that would be
+// removed plus the confirm line. Cards inside a watched tree point at the
+// ancestor link, so the wording has to say the whole tree goes with it.
+type unwatchAction struct {
+	Path    string
+	Confirm string
+}
+
+func unwatchLink(link, rel string) *unwatchAction {
+	if link == "" {
+		return nil
+	}
+	if link == rel {
+		return &unwatchAction{Path: link, Confirm: "Stop watching " + link + "? The source folder is kept."}
+	}
+	return &unwatchAction{Path: link,
+		Confirm: "Stop watching " + link + "? That unlinks the whole watched folder, so " + rel + " goes with it. The source files are kept."}
+}
+
+// artifactUnwatch resolves the watch link an artifact card would remove.
+func artifactUnwatch(a store.Artifact) *unwatchAction {
+	rel := a.RelPath()
+	switch {
+	case a.IsLink:
+		return unwatchLink(rel, rel)
+	case a.Linked:
+		return unwatchLink(store.WatchLinkFor(rel), rel)
+	}
+	return nil
+}
+
+// folderUnwatch offers unwatch on a folder tile only when the folder itself
+// is the link: tiles further down a watched tree would remove far more than
+// they show.
+func folderUnwatch(rel string) *unwatchAction {
+	root, err := store.Root()
+	if err != nil {
+		return nil
+	}
+	fi, err := os.Lstat(filepath.Join(root, filepath.FromSlash(rel)))
+	if err != nil || fi.Mode()&fs.ModeSymlink == 0 {
+		return nil
+	}
+	return unwatchLink(rel, rel)
 }
 
 type pageView struct {
@@ -115,7 +163,7 @@ type listView struct {
 // collectionCard renders a multi-page artifact as a browsable folder tile.
 func collectionCard(a store.Artifact, label string) card {
 	return card{Kind: "project", Label: label, Href: "/p/" + a.RelPath(),
-		Count: len(a.Pages), Unit: "pages", Preview: a}
+		Count: len(a.Pages), Unit: "pages", Preview: a, Unwatch: artifactUnwatch(a)}
 }
 
 func pageCard(label, href, viewerHref, absPath string, isDoc bool) card {
@@ -216,7 +264,8 @@ func folderExtras(f string, used map[string]bool) []card {
 		if entryIsDirFS(dir, e) {
 			if n := docCount(filepath.Join(dir, name)); n > 0 {
 				cards = append(cards, card{Kind: "project", Label: name,
-					Href: "/p/" + prefix + name, Count: n, Unit: "docs"})
+					Href: "/p/" + prefix + name, Count: n, Unit: "docs",
+					Unwatch: folderUnwatch(prefix + name)})
 			}
 		} else if strings.HasSuffix(strings.ToLower(name), ".md") {
 			cards = append(cards, pageCard(
@@ -250,7 +299,7 @@ func buildCards(artifacts []store.Artifact, f string) []card {
 			if a.MultiPage() {
 				cards = append(cards, collectionCard(a, a.Name))
 			} else {
-				cards = append(cards, card{Kind: "artifact", Artifact: a})
+				cards = append(cards, card{Kind: "artifact", Artifact: a, Unwatch: artifactUnwatch(a)})
 			}
 		case !strings.HasPrefix(a.Project+"/", prefix):
 			// outside this folder
@@ -267,12 +316,14 @@ func buildCards(artifacts []store.Artifact, f string) []card {
 				} else {
 					cards = append(cards, card{Kind: "artifact", Artifact: a,
 						PrefixLabel: strings.TrimPrefix(a.Project, prefix),
-						PrefixHref:  "/p/" + a.Project})
+						PrefixHref:  "/p/" + a.Project,
+						Unwatch:     artifactUnwatch(a)})
 				}
 			} else if !used[child] {
 				used[child] = true
 				c := card{Kind: "project", Label: child,
-					Href: "/p/" + prefix + child, Count: perChild[child], Unit: "artifacts", Preview: a}
+					Href: "/p/" + prefix + child, Count: perChild[child], Unit: "artifacts", Preview: a,
+					Unwatch: folderUnwatch(prefix + child)}
 				if docs > 0 {
 					c.Count += docs
 					c.Unit = "items"
@@ -643,6 +694,26 @@ func handleDelete(w http.ResponseWriter, r *http.Request) {
 	}
 	// 200 with empty body: htmx swaps the card away instantly; the
 	// watcher-driven SSE refresh reconciles the full list moments later.
+	w.WriteHeader(http.StatusOK)
+}
+
+// handleUnwatch removes a watch link. It is separate from handleDelete
+// because a watched project tree is not an artifact — nothing resolves it —
+// and because store.Unwatch can only ever unlink, never remove files.
+func handleUnwatch(w http.ResponseWriter, r *http.Request) {
+	rel := strings.Trim(r.PathValue("path"), "/")
+	if rel == "" {
+		http.NotFound(w, r)
+		return
+	}
+	project, name := "", rel
+	if i := strings.LastIndex(rel, "/"); i >= 0 {
+		project, name = rel[:i], rel[i+1:]
+	}
+	if err := store.Unwatch(project, name); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	w.WriteHeader(http.StatusOK)
 }
 

@@ -15,8 +15,10 @@
   {{if eq .Kind "project"}}
   {{/* ids let the morph swap recognize unchanged cards and leave their
        preview iframes untouched; hrefs are unique so they double as keys */}}
-  <a class="card project-card" id="card{{.Href}}" href="{{.Href}}">
-    <div class="preview">
+  {{/* an article, not one big anchor: the tile carries an unwatch button when
+       the folder is a watch link, and a button may not nest inside a link */}}
+  <article class="card project-card" id="card{{.Href}}">
+    <a class="preview" href="{{.Href}}">
       {{if .Preview.Dir}}
       {{/* ?v= makes edits show up under morph swaps: a changed modtime is an
            attribute change, so only that card's iframe reloads */}}
@@ -28,15 +30,23 @@
       {{else}}
       <div class="doc-folder">▤</div>
       {{end}}
-    </div>
+    </a>
     <div class="meta">
-      <div class="titles"><span class="name">{{.Label}}/</span></div>
+      <div class="titles"><a class="name" href="{{.Href}}">{{.Label}}/</a></div>
       <div class="row">
         {{if .Preview.Dir}}<time>{{.Preview.ModTime.Format "Jan 2 15:04"}}</time>{{else}}<span></span>{{end}}
-        <span class="badge">{{.Count}} {{.Unit}}</span>
+        <span class="row-right">
+          <span class="badge">{{.Count}} {{.Unit}}</span>
+          {{with .Unwatch}}
+          <button class="delete" hx-delete="/watch/{{.Path}}"
+                  hx-confirm="{{.Confirm}}"
+                  hx-target="closest .card" hx-swap="outerHTML"
+                  title="watched folder — removes the link, keeps the source">unwatch</button>
+          {{end}}
+        </span>
       </div>
     </div>
-  </a>
+  </article>
   {{else if eq .Kind "page"}}
   <article class="card" id="card{{.PageHref}}">
     <div class="preview" hx-get="{{.ViewerHref}}" hx-target="#viewer" title="open {{.Label}}">
@@ -69,12 +79,14 @@
         <time>{{.Artifact.ModTime.Format "Jan 2 15:04"}}</time>
         <span class="row-right">
           <span class="fsize">{{size .Artifact.Size}}</span>
-          {{if .Artifact.Linked}}
-          <span class="linked" title="inside a watched folder — files live at the source">watched</span>
-          {{else if .Artifact.IsLink}}
-          <button class="delete" hx-delete="/a/{{.Artifact.RelPath}}"
-                  hx-confirm="Unwatch {{.Artifact.RelPath}}? The source folder is kept."
-                  hx-target="closest .card" hx-swap="outerHTML">unlink</button>
+          {{if .Unwatch}}
+          {{if ne .Unwatch.Path .Artifact.RelPath}}
+          <span class="linked" title="inside watched folder {{.Unwatch.Path}} — files live at the source">watched</span>
+          {{end}}
+          <button class="delete" hx-delete="/watch/{{.Unwatch.Path}}"
+                  hx-confirm="{{.Unwatch.Confirm}}"
+                  hx-target="closest .card" hx-swap="outerHTML"
+                  title="removes the link, keeps the source folder">unwatch</button>
           {{else}}
           <button class="delete" hx-delete="/a/{{.Artifact.RelPath}}"
                   hx-confirm="Delete {{.Artifact.RelPath}}?"

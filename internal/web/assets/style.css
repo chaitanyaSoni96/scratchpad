@@ -121,6 +121,7 @@ main { padding: 1rem 2rem 3rem; }
 }
 .card:hover { border-color: var(--accent); }
 .preview {
+  display: block; /* the folder tile's preview is an anchor */
   aspect-ratio: 16 / 10;
   background: var(--surface);
   border-bottom: 1px solid var(--border);
@@ -152,7 +153,7 @@ main { padding: 1rem 2rem 3rem; }
 .project { color: var(--muted); font-size: 0.85rem; white-space: nowrap; }
 a.project { text-decoration: none; }
 a.project:hover { color: var(--accent); text-decoration: underline; }
-a.project-card { text-decoration: none; color: inherit; }
+.project-card a { text-decoration: none; color: inherit; }
 .project-card .preview { cursor: pointer; opacity: 0.85; }
 .project-card:hover .preview { opacity: 1; }
 .badge {

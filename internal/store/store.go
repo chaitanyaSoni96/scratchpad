@@ -464,6 +464,116 @@ func Watch(project, name, target string) (string, error) {
 	return link, nil
 }
 
+// WatchLink is one watch symlink in the store.
+type WatchLink struct {
+	Path   string // slash path under the root
+	Target string // the source directory the link points at
+}
+
+// WatchLinkFor returns the slash path of the watch link governing rel — rel
+// itself when it is the link, an ancestor when rel lives inside a watched
+// tree — or "" when nothing on the path is a link.
+func WatchLinkFor(rel string) string {
+	root, err := Root()
+	if err != nil || rel == "" {
+		return ""
+	}
+	segs := strings.Split(rel, "/")
+	cur := root
+	for i, seg := range segs {
+		cur = filepath.Join(cur, seg)
+		if fi, err := os.Lstat(cur); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+			return strings.Join(segs[:i+1], "/")
+		}
+	}
+	return ""
+}
+
+// Watches lists every watch link in the store, shallowest first. Watched
+// trees and artifact subtrees are not descended into: symlinks below them
+// belong to the source folder, not to the store.
+func Watches() ([]WatchLink, error) {
+	root, err := EnsureRoot()
+	if err != nil {
+		return nil, err
+	}
+	var out []WatchLink
+	var walk func(dir, rel string)
+	walk = func(dir, rel string) {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			return
+		}
+		for _, e := range entries {
+			name := e.Name()
+			if strings.HasPrefix(name, ".") || Ignored(name) {
+				continue
+			}
+			sub, child := filepath.Join(dir, name), name
+			if rel != "" {
+				child = rel + "/" + name
+			}
+			if e.Type()&os.ModeSymlink != 0 {
+				target, lerr := os.Readlink(sub)
+				fi, serr := os.Stat(sub)
+				if lerr == nil && serr == nil && fi.IsDir() {
+					out = append(out, WatchLink{Path: child, Target: target})
+				}
+				continue
+			}
+			if e.IsDir() && !hasHTML(sub) {
+				walk(sub, child)
+			}
+		}
+	}
+	walk(root, "")
+	sort.Slice(out, func(i, j int) bool { return out[i].Path < out[j].Path })
+	return out, nil
+}
+
+// Unwatch removes a watch link, leaving the source folder untouched. Unlike
+// Delete it refuses anything that is not itself a symlink, so it can never
+// destroy stored files — and it works for watched project trees, which are
+// not artifacts and therefore not reachable through Delete.
+func Unwatch(project, name string) error {
+	root, err := Root()
+	if err != nil {
+		return err
+	}
+	dir, err := artifactDir(root, project, name)
+	if err != nil {
+		return err
+	}
+	rel := (Artifact{Project: project, Name: name}).RelPath()
+	fi, err := os.Lstat(dir)
+	if err != nil {
+		return fmt.Errorf("%s not found", rel)
+	}
+	if fi.Mode()&os.ModeSymlink == 0 {
+		if link := WatchLinkFor(rel); link != "" {
+			return fmt.Errorf("%s is not a watch link — it lives inside watched folder %q; unwatch that instead", rel, link)
+		}
+		return fmt.Errorf("%s is not a watched folder", rel)
+	}
+	if err := os.Remove(dir); err != nil {
+		return err
+	}
+	pruneEmpty(root, dir)
+	return nil
+}
+
+// pruneEmpty removes project directories left empty above a removed entry.
+func pruneEmpty(root, dir string) {
+	for d := filepath.Dir(dir); d != root && strings.HasPrefix(d, root); d = filepath.Dir(d) {
+		if rem, err := os.ReadDir(d); err != nil || len(rem) > 0 {
+			break
+		}
+		if os.Remove(d) != nil {
+			break
+		}
+	}
+}
+
 // Delete removes an artifact and prunes any project directories left empty
 // above it. Watched folders (symlinks) are only unlinked — the source is
 // never touched — and nothing inside a watched folder can be deleted here.
@@ -485,7 +595,7 @@ func Delete(project, name string) error {
 			break
 		}
 		if fi, err := os.Lstat(cur); err == nil && fi.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("%s is inside watched folder %q — its files live at the source; delete the watch link instead", (Artifact{Project: project, Name: name}).RelPath(), strings.TrimPrefix(cur[len(root):], string(filepath.Separator)))
+			return fmt.Errorf("%s is inside watched folder %q — its files live at the source; unwatch the link instead", (Artifact{Project: project, Name: name}).RelPath(), strings.TrimPrefix(cur[len(root):], string(filepath.Separator)))
 		}
 	}
 	if fi, err := os.Lstat(dir); err == nil && fi.Mode()&os.ModeSymlink != 0 {
@@ -505,13 +615,6 @@ func Delete(project, name string) error {
 			return err
 		}
 	}
-	for d := filepath.Dir(dir); d != root && strings.HasPrefix(d, root); d = filepath.Dir(d) {
-		if rem, err := os.ReadDir(d); err != nil || len(rem) > 0 {
-			break
-		}
-		if os.Remove(d) != nil {
-			break
-		}
-	}
+	pruneEmpty(root, dir)
 	return nil
 }

@@ -83,13 +83,16 @@ bash-driven agents:
 echo '<h1>hi</h1>' | scratchpad publish -name hello -html -
 scratchpad publish -project lab/graphs -name chart -dir ./chart-folder   # whole folder, any files
 scratchpad watch ./chart-folder     # symlink instead of copy: edits go live as you save
+scratchpad watches                  # every watch link and where it points
+scratchpad unwatch lab/graphs/chart # drop the link, keep the folder
 scratchpad list [-json]
 scratchpad delete -project lab/graphs -name chart
 ```
 
 `watch` mounts a folder into the scratchpad by symlink — it can be a single
-artifact folder or a whole tree of them. Deleting a watched entry removes
-only the link (the UI shows "unlink"); files inside watched folders are not
+artifact folder or a whole tree of them. `unwatch` (or the "unwatch" button
+on any watched card in the UI) removes only the link, never the source, and
+refuses anything that is not a link. Files inside watched folders are not
 deletable through scratchpad at all, and the container mounts `$HOME`
 read-only, so the web process physically cannot modify watched sources.
 

@@ -32,6 +32,10 @@ scratchpad list -json
 scratchpad watch ./my-demo-folder            # name defaults to folder name
 scratchpad watch ./out -name dashboard -project lab
 scratchpad watch .agents/plans -name plans   # browsable md + html tree
+
+# list the watch links, and drop one (source folder is never touched)
+scratchpad watches
+scratchpad unwatch lab/dashboard
 ```
 
 ## Rules
@@ -48,11 +52,11 @@ scratchpad watch .agents/plans -name plans   # browsable md + html tree
 - Keep artifacts self-contained; the index page live-previews each artifact
   in an iframe.
 - `watch` links, it never copies: the folder stays where it is and stays
-  yours. Unwatching (delete in the UI, or `scratchpad delete`) removes only
-  the link; files inside a watched folder can never be deleted through
-  scratchpad.
+  yours. Unwatching (the button in the UI, or `scratchpad unwatch <path>`)
+  removes only the link; files inside a watched folder can never be deleted
+  through scratchpad.
 - After publishing, give the user the printed URL. A warning on stderr means
   the hosting server is down (`make web` in the scratchpad repo starts it).
 
-`scratchpad delete` exists for humans at the terminal; do not use it to
-recycle names.
+`scratchpad delete` and `scratchpad unwatch` exist for humans at the
+terminal; do not use them to recycle names.
