@@ -1,0 +1,7 @@
+# build output (make build; the container builds its own copies)
+/bin/
+
+# stale binaries from the pre-bin/ build layout
+/scratchpad
+/scratchpad-mcp
+/scratchpad-web
