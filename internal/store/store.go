@@ -67,31 +67,10 @@ func EnsureRoot() (string, error) {
 	return root, nil
 }
 
-// defaultIgnores keeps repo-scale watched trees sane: these directories are
-// invisible to scanning and to the filesystem watcher. Extend with a
-// comma-separated SCRATCHPAD_IGNORE.
-var defaultIgnores = map[string]bool{
-	"node_modules": true, "vendor": true, "dist": true, "build": true,
-	"target": true, "__pycache__": true, "venv": true, ".venv": true,
-	"coverage": true, "bin": true, "obj": true,
-}
-
-// Ignored reports whether a directory name is skipped during scans and
-// watching (dot-dirs are always skipped by callers).
-func Ignored(name string) bool {
-	if defaultIgnores[name] {
-		return true
-	}
-	for _, extra := range strings.Split(os.Getenv("SCRATCHPAD_IGNORE"), ",") {
-		if extra != "" && name == strings.TrimSpace(extra) {
-			return true
-		}
-	}
-	return false
-}
-
 var nameRe = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,99}$`)
 
+// validateName guards names the store creates — published artifacts, watch
+// links and the project directories made for them.
 func validateName(s string) error {
 	if !nameRe.MatchString(s) {
 		return fmt.Errorf("invalid name %q: must match %s", s, nameRe.String())
@@ -100,6 +79,63 @@ func validateName(s string) error {
 		return fmt.Errorf("invalid name %q", s)
 	}
 	return nil
+}
+
+// validateSegment guards a path segment the store only looks *up*: an
+// existing entry named by a URL or by delete/unwatch. It is deliberately
+// looser than validateName — a watched folder is the source repo's to name,
+// so its spaces, unicode and (un-ignored) dot-directories must stay reachable
+// — but keeps every traversal guard.
+func validateSegment(s string) error {
+	if s == "" || s == "." || s == ".." || len(s) > 255 {
+		return fmt.Errorf("invalid path segment %q", s)
+	}
+	if strings.ContainsAny(s, `/\`) {
+		return fmt.Errorf("invalid path segment %q", s)
+	}
+	for _, r := range s {
+		if r < 0x20 || r == 0x7f {
+			return fmt.Errorf("invalid path segment %q", s)
+		}
+	}
+	return nil
+}
+
+// visibleSegments reports whether a lookup path is traversable: every segment
+// syntactically safe and, while the path is still store tree, not hidden by
+// ignore rules. It stops checking at an artifact directory — everything below
+// one is that artifact's assets, served as published, not filtered.
+func visibleSegments(root string, segs []string) bool {
+	dir := root
+	for _, s := range segs {
+		if err := validateSegment(s); err != nil {
+			return false
+		}
+		if hasHTML(dir) {
+			return true // inside an artifact: the rest is assets
+		}
+		full := filepath.Join(dir, s)
+		fi, err := os.Stat(full)
+		if !Visible(dir, s, err == nil && fi.IsDir()) {
+			return false
+		}
+		dir = full
+	}
+	return true
+}
+
+// VisiblePath reports whether a slash path under the root can be browsed:
+// used by the web layer before it renders or lists anything for that path.
+func VisiblePath(p string) bool {
+	p = strings.Trim(p, "/")
+	if p == "" {
+		return true
+	}
+	root, err := Root()
+	if err != nil {
+		return false
+	}
+	return visibleSegments(root, strings.Split(p, "/"))
 }
 
 // SplitProject validates a slash-separated project path and returns its
@@ -128,6 +164,27 @@ func artifactDir(root, project, name string) (string, error) {
 		return "", err
 	}
 	parts := append([]string{root}, append(segs, name)...)
+	return joinInRoot(root, parts)
+}
+
+// existingDir is artifactDir for entries the store only looks up or removes:
+// same containment guarantee, lookup validation instead of the create-time
+// naming rules, so delete and unwatch reach everything the UI can show.
+func existingDir(root, project, name string) (string, error) {
+	segs := strings.Split(strings.Trim(project, "/"), "/")
+	if project == "" {
+		segs = nil
+	}
+	for _, s := range append(append([]string{}, segs...), name) {
+		if err := validateSegment(s); err != nil {
+			return "", err
+		}
+	}
+	return joinInRoot(root, append([]string{root}, append(segs, name)...))
+}
+
+// joinInRoot joins parts and verifies the result stays inside root.
+func joinInRoot(root string, parts []string) (string, error) {
 	dir := filepath.Join(parts...)
 	rel, err := filepath.Rel(root, dir)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
@@ -253,7 +310,7 @@ func List() ([]Artifact, error) {
 			return
 		}
 		for _, e := range entries {
-			if !entryIsDir(dir, e) || strings.HasPrefix(e.Name(), ".") || Ignored(e.Name()) {
+			if !entryIsDir(dir, e) || !Visible(dir, e.Name(), true) {
 				continue
 			}
 			sub := filepath.Join(dir, e.Name())
@@ -279,7 +336,7 @@ func Resolve(project, name string) (Artifact, bool, error) {
 	if err != nil {
 		return Artifact{}, false, err
 	}
-	dir, err := artifactDir(root, project, name)
+	dir, err := existingDir(root, project, name)
 	if err != nil {
 		return Artifact{}, false, err
 	}
@@ -295,10 +352,10 @@ func ResolvePath(segs []string) (a Artifact, file string, ok bool) {
 	if err != nil {
 		return Artifact{}, "", false
 	}
+	if !visibleSegments(root, segs) {
+		return Artifact{}, "", false
+	}
 	for i, s := range segs {
-		if validateName(s) != nil {
-			return Artifact{}, "", false
-		}
 		dir := filepath.Join(append([]string{root}, segs[:i+1]...)...)
 		if hasHTML(dir) {
 			project := strings.Join(segs[:i], "/")
@@ -322,10 +379,8 @@ func ResolveDoc(segs []string) (string, bool) {
 	if err != nil {
 		return "", false
 	}
-	for _, s := range segs {
-		if validateName(s) != nil {
-			return "", false
-		}
+	if !visibleSegments(root, segs) {
+		return "", false
 	}
 	p := filepath.Join(append([]string{root}, segs...)...)
 	fi, err := os.Stat(p)
@@ -506,13 +561,13 @@ func Watches() ([]WatchLink, error) {
 		}
 		for _, e := range entries {
 			name := e.Name()
-			if strings.HasPrefix(name, ".") || Ignored(name) {
-				continue
-			}
 			sub, child := filepath.Join(dir, name), name
 			if rel != "" {
 				child = rel + "/" + name
 			}
+			// Links are reported whatever the ignore rules say: hiding a
+			// watched folder from the UI must not strand its link with no
+			// way to list or unwatch it. Rules only prune the descent.
 			if e.Type()&os.ModeSymlink != 0 {
 				target, lerr := os.Readlink(sub)
 				fi, serr := os.Stat(sub)
@@ -521,7 +576,7 @@ func Watches() ([]WatchLink, error) {
 				}
 				continue
 			}
-			if e.IsDir() && !hasHTML(sub) {
+			if e.IsDir() && Visible(dir, name, true) && !hasHTML(sub) {
 				walk(sub, child)
 			}
 		}
@@ -540,7 +595,7 @@ func Unwatch(project, name string) error {
 	if err != nil {
 		return err
 	}
-	dir, err := artifactDir(root, project, name)
+	dir, err := existingDir(root, project, name)
 	if err != nil {
 		return err
 	}
@@ -582,7 +637,7 @@ func Delete(project, name string) error {
 	if err != nil {
 		return err
 	}
-	dir, err := artifactDir(root, project, name)
+	dir, err := existingDir(root, project, name)
 	if err != nil {
 		return err
 	}

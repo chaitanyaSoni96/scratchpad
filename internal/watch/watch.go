@@ -8,7 +8,6 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
@@ -66,17 +65,19 @@ func Run(ctx context.Context, root string, hub *Hub) error {
 				return
 			}
 			for _, e := range entries {
-				if strings.HasPrefix(e.Name(), ".") || store.Ignored(e.Name()) {
-					continue
-				}
 				p := filepath.Join(dir, e.Name())
-				if e.IsDir() {
-					add(p)
-				} else if e.Type()&fs.ModeSymlink != 0 {
+				isDir := e.IsDir()
+				if !isDir && e.Type()&fs.ModeSymlink != 0 {
 					if fi, err := os.Stat(p); err == nil && fi.IsDir() {
-						add(p)
+						isDir = true
 					}
 				}
+				// Ignore rules keep scanning and watching in step: a folder
+				// the UI never shows is not worth an inotify watch either.
+				if !isDir || !store.Visible(dir, e.Name(), true) {
+					continue
+				}
+				add(p)
 			}
 		}
 		add(top)

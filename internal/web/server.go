@@ -199,10 +199,11 @@ func docCount(dir string) int {
 	}
 	for _, e := range entries {
 		name := e.Name()
-		if strings.HasPrefix(name, ".") || store.Ignored(name) {
+		isDir := entryIsDirFS(dir, e)
+		if !store.Visible(dir, name, isDir) {
 			continue
 		}
-		if entryIsDirFS(dir, e) {
+		if isDir {
 			sub := filepath.Join(dir, name)
 			if !dirHasHTML(sub) {
 				n += docCount(sub)
@@ -258,7 +259,7 @@ func folderExtras(f string, used map[string]bool) []card {
 	var cards []card
 	for _, e := range entries {
 		name := e.Name()
-		if strings.HasPrefix(name, ".") || store.Ignored(name) || used[name] {
+		if used[name] || !store.Visible(dir, name, entryIsDirFS(dir, e)) {
 			continue
 		}
 		if entryIsDirFS(dir, e) {
@@ -405,7 +406,9 @@ func handleFolderPage(w http.ResponseWriter, r *http.Request) {
 	f := strings.Trim(r.PathValue("path"), "/")
 	view := ""
 	if f != "" {
-		if _, err := store.SplitProject(f); err != nil {
+		// Hidden folders are unreachable, not just unlisted: the same rules
+		// that keep a path off the index keep it off its own page.
+		if !store.VisiblePath(f) {
 			http.NotFound(w, r)
 			return
 		}
@@ -492,7 +495,7 @@ func siblingItems(parent string) []sibItem {
 	var items []sibItem
 	for _, e := range entries {
 		name := e.Name()
-		if strings.HasPrefix(name, ".") || store.Ignored(name) {
+		if !store.Visible(dir, name, entryIsDirFS(dir, e)) {
 			continue
 		}
 		rel := prefix + name
@@ -523,10 +526,11 @@ func hasRenderable(dir string) bool {
 	}
 	for _, e := range entries {
 		name := e.Name()
-		if strings.HasPrefix(name, ".") || store.Ignored(name) {
+		isDir := entryIsDirFS(dir, e)
+		if !store.Visible(dir, name, isDir) {
 			continue
 		}
-		if entryIsDirFS(dir, e) {
+		if isDir {
 			if hasRenderable(filepath.Join(dir, name)) {
 				return true
 			}
@@ -539,7 +543,7 @@ func hasRenderable(dir string) bool {
 
 func handleSiblings(w http.ResponseWriter, r *http.Request) {
 	rel := strings.Trim(r.URL.Query().Get("path"), "/")
-	if rel == "" || strings.Contains(rel, "..") {
+	if rel == "" || !store.VisiblePath(rel) {
 		http.NotFound(w, r)
 		return
 	}

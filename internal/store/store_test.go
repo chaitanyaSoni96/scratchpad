@@ -241,21 +241,25 @@ func TestListAndResolvePath(t *testing.T) {
 	mk("flat/assets/deep/tex.png", "x") // asset subtree, not an artifact
 	mk("x/y/z/art/index.html", "<p>")
 	mk("junk/notes.txt", "x")
-	mk(".hidden/index.html", "<p>")
+	mk(".git/index.html", "<p>")     // built-in ignore: never scanned
+	mk(".agents/index.html", "<p>")  // ordinary dot-folder: shown
 
 	list, err := List()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(list) != 2 {
-		t.Fatalf("List() = %d artifacts, want 2: %+v", len(list), list)
+	if len(list) != 3 {
+		t.Fatalf("List() = %d artifacts, want 3: %+v", len(list), list)
 	}
 	got := map[string]bool{}
 	for _, a := range list {
 		got[a.RelPath()] = true
 	}
-	if !got["flat"] || !got["x/y/z/art"] {
+	if !got["flat"] || !got["x/y/z/art"] || !got[".agents"] {
 		t.Errorf("unexpected list: %+v", got)
+	}
+	if got[".git"] {
+		t.Error(".git must stay out of the scan")
 	}
 
 	a, file, ok := ResolvePath([]string{"flat", "assets", "deep", "tex.png"})

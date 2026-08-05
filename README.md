@@ -103,10 +103,37 @@ in project folders get cards too, and folders containing only markdown show
 as "N docs" folders — so watching a docs/plans tree gives you a browsable
 site of mockups and notes.
 
-Watching big trees is fine: common junk dirs (`node_modules`, `vendor`,
-`dist`, `build`, `target`, `coverage`, `bin`, …) are invisible to scanning
-and the filesystem watcher — extend the list with a comma-separated
-`SCRATCHPAD_IGNORE`.
+**Everything is visible unless a rule hides it** — dot-folders like `.agents`
+or `.github` included. The built-in ruleset is deliberately short, and every
+entry is there for one of two reasons: directories whose *cost* would sink a
+watched repo (`.git`, `node_modules`, `.venv`, `dist`, `build`, `target`,
+`.next`, … — thousands of directories, an inotify watch each, churning on
+every build), and files whose *contents* shouldn't be one URL away from a
+server on your LAN (`.env`, `.env.*`, `.netrc`, `*.pem`, `.ssh/`, `.aws/`).
+
+**`.scratchpadignore`** tunes that. Drop one at the scratchpad root to govern
+everything, and/or one in any folder below it — including inside a watched
+source repo, where it lives next to the `.gitignore` it can pull in:
+
+```
+include .gitignore   # merge another ignore file, resolved next to this one
+uploads/             # directories only
+*.log                # glob on the name, at any depth below here
+/scratch             # leading slash: only this folder's own "scratch"
+docs/**/draft-*      # ** spans any number of segments
+.agents              # hide a folder you'd rather not see
+!bin                 # negation un-hides, including the built-ins above
+```
+
+Syntax is a gitignore subset: blank lines and `#` comments (a `#` after
+whitespace starts one), `!` to negate, trailing `/` for directories only, a
+slash anywhere else anchors the pattern to the file's own directory, and a
+bare name matches at any depth. The built-ins are consulted first, then every
+`.scratchpadignore` from the root down: the deepest file wins, and within one
+file the last matching line wins — so any `!line` overrides a built-in.
+Hidden means unreachable, not merely unlisted: its pages 404. Rules apply to
+the folder tree only — once inside an artifact, every file is an asset and is
+served as published.
 
 ## Development
 
@@ -120,7 +147,10 @@ Layout: `internal/store` (scan/publish/delete rules, name sanitization),
 site, SSE, static serving; assets embedded), `cmd/{scratchpad,scratchpad-mcp,scratchpad-web}`.
 
 Notes:
-- Artifact names/projects must match `^[a-zA-Z0-9][a-zA-Z0-9._-]{0,99}$`.
+- Artifact names/projects must match `^[a-zA-Z0-9][a-zA-Z0-9._-]{0,99}$` when
+  the store *creates* them (publish, watch). Looking up what already exists is
+  looser — a watched repo names its own folders — but still rejects `.`, `..`,
+  separators and control characters, and hidden paths never resolve.
 - Card previews run in `sandbox="allow-scripts"` iframes without
   `allow-same-origin`: auto-running artifact JS can't touch the parent page or
   the delete endpoint. Clicking a card opens the artifact in an in-page viewer
