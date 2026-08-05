@@ -7,7 +7,6 @@ RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /out/ ./cmd/...
 
 FROM scratch
 COPY --from=build /out/scratchpad-web /scratchpad-web
-COPY --from=build /out/scratchpad-mcp /scratchpad-mcp
 COPY --from=build /out/scratchpad /scratchpad
 ENV SCRATCHPAD_ROOT=/data
 EXPOSE 8737

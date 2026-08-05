@@ -443,7 +443,7 @@ func Publish(project, name string, files map[string][]byte) (Artifact, error) {
 	// publishes and existing artifacts both surface as EEXIST.
 	if err := os.Mkdir(dir, 0o755); err != nil {
 		if os.IsExist(err) {
-			return Artifact{}, fmt.Errorf("%q already exists — names are not reusable until a human deletes the old artifact in the web UI; pick a different name (see list_artifacts)", strings.TrimPrefix(dir[len(root):], string(filepath.Separator)))
+			return Artifact{}, fmt.Errorf("%q already exists — names are not reusable until a human deletes the old artifact in the web UI; pick a different name (see `scratchpad list`)", strings.TrimPrefix(dir[len(root):], string(filepath.Separator)))
 		}
 		return Artifact{}, err
 	}

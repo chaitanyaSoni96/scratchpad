@@ -1,7 +1,7 @@
 IMAGE := localhost/scratchpad:latest
 DATA  := $(HOME)/.scratchpad
 
-.PHONY: build test image web stop logs register register-claude register-opencode register-goose register-pi
+.PHONY: build test image web stop logs install-skill install-cli drop-mcp
 
 build:
 	go build -o bin/ ./cmd/...
@@ -28,23 +28,17 @@ stop:
 logs:
 	podman logs -f scratchpad-web
 
-register: build
-	scripts/register-mcp.sh all
+# The skill is how agents learn the CLI, and it is useless without the CLI on
+# PATH — so this installs both: bin/scratchpad -> ~/.local/bin, SKILL.md ->
+# ~/.claude/skills and ~/.pi/agent/skills. Also clears MCP registrations left
+# by older installs. Re-run after editing skill/SKILL.md.
+install-skill: build
+	scripts/install.sh all
 
-register-claude:
-	scripts/register-mcp.sh claude
-
-register-opencode:
-	scripts/register-mcp.sh opencode
-
-register-goose:
-	scripts/register-mcp.sh goose
-
-register-pi: build
-	scripts/register-mcp.sh pi
-
+# just the CLI symlink, no skill
 install-cli: build
-	scripts/register-mcp.sh cli
+	scripts/install.sh cli
 
-install-skill:
-	scripts/register-mcp.sh skill
+# clean up MCP registrations left by older installs
+drop-mcp:
+	scripts/install.sh drop-mcp

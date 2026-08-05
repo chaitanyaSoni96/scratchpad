@@ -1,8 +1,8 @@
 # scratchpad
 
 Self-hosted artifact hosting for coding agents. Agents publish html/css/js
-artifacts via MCP (or CLI); every artifact folder under `~/.scratchpad` is
-served instantly on an auto-refreshing htmx site.
+artifacts with the `scratchpad` CLI; every artifact folder under
+`~/.scratchpad` is served instantly on an auto-refreshing htmx site.
 
 ```
 ~/.scratchpad/
@@ -18,9 +18,9 @@ served instantly on an auto-refreshing htmx site.
 A folder is an **artifact** when it directly contains an `.html` file — its
 whole subtree is that artifact's assets. Every folder above it is project
 path, nested to any depth, each level browsable as its own page. The
-filesystem is the sole source of truth — the MCP server and the web server
-only coordinate through it, so anything that writes a folder (agents,
-`cp -r`, this repo's CLI) publishes an artifact.
+filesystem is the sole source of truth — the CLI and the web server only
+coordinate through it, so anything that writes a folder (agents, `cp -r`,
+this repo's CLI) publishes an artifact.
 
 **Publishing is create-only.** A taken name is an error, never an overwrite;
 deleting is a human action in the web UI. Agents are told to pick a fresh
@@ -28,7 +28,7 @@ name instead.
 
 ## Run
 
-Everything ships in one container image (built from `scratch`, three static
+Everything ships in one container image (built from `scratch`, two static
 binaries):
 
 ```bash
@@ -44,35 +44,21 @@ polling.
 ## Connect your agents
 
 ```bash
-make register   # MCP for claude/opencode/goose + CLI on PATH + skill for claude/pi
+make install-skill   # CLI on PATH + skill for claude/pi
 ```
 
-Two complementary interfaces, one shared store:
-
-**CLI + skill (primary).** `scratchpad` goes on `~/.local/bin`; a single
+**One interface: CLI + skill.** `scratchpad` goes on `~/.local/bin`; a single
 [Agent Skills](https://agentskills.io)-format `skill/SKILL.md` teaches agents
 to build a folder and `publish -dir` it — the natural fit for agents that
-already write files. Installed to `~/.claude/skills/scratchpad/` and
-`~/.pi/agent/skills/scratchpad/` (pi has no MCP by design; skill+CLI is its
-author-recommended pattern).
+already write files, and it needs nothing beyond bash. Installed to
+`~/.claude/skills/scratchpad/` and `~/.pi/agent/skills/scratchpad/`; any other
+agent that reads Agent Skills or just runs shell commands works the same way.
 
-**MCP (kept minimal).** Two tools plus server instructions, for clients
-where MCP is the smoother path:
-
-- `publish_artifact` (project?, name, files[{path, content, base64?}]) —
-  create-only; needs one top-level `.html`; binary assets via base64.
-  Annotated non-destructive. Returns the URL, plus a warning note when the
-  web server isn't reachable.
-- `list_artifacts` — read-only annotated; names, URLs, sizes, newest first.
-- Server **instructions** carry the guardrails (create-only policy, file
-  rules, name pattern, self-containment).
-
-| Client | Mechanism |
-|---|---|
-| Claude Code | MCP (`claude mcp add -s user scratchpad -- podman run -i --rm -v ~/.scratchpad:/data:z localhost/scratchpad:latest /scratchpad-mcp`) + skill |
-| opencode | MCP: `mcp.scratchpad` block in `~/.config/opencode/opencode.json` (1.x schema; v2 nests under `mcp.servers` and drops `enabled`) |
-| goose | MCP: `extensions.scratchpad` stdio block in `~/.config/goose/config.yaml` |
-| pi | CLI + skill at `~/.pi/agent/skills/scratchpad/` |
+There is no MCP server. It existed early on and was removed: it duplicated the
+CLI's surface, forced files through a JSON envelope (base64 for every binary
+asset) when agents can already write folders, and made the guardrails live in
+two places. `make install-skill` also runs `make drop-mcp`, which clears
+registrations left by older installs (claude, opencode, goose).
 
 ## CLI
 
@@ -144,7 +130,7 @@ make test       # go vet + unit tests (store rules, traversal rejection)
 
 Layout: `internal/store` (scan/publish/delete rules, name sanitization),
 `internal/watch` (fsnotify → debounced fan-out hub), `internal/web` (htmx
-site, SSE, static serving; assets embedded), `cmd/{scratchpad,scratchpad-mcp,scratchpad-web}`.
+site, SSE, static serving; assets embedded), `cmd/{scratchpad,scratchpad-web}`.
 
 Notes:
 - Artifact names/projects must match `^[a-zA-Z0-9][a-zA-Z0-9._-]{0,99}$` when

@@ -1,5 +1,6 @@
-// scratchpad is a small CLI over the artifact store, for humans and for
-// agents without MCP support (e.g. pi, which drives CLIs via bash).
+// scratchpad is a small CLI over the artifact store — the interface for
+// humans at the terminal and for agents, which drive it via bash (see
+// skill/SKILL.md).
 package main
 
 import (

@@ -11,17 +11,18 @@ go test ./internal/store -run TestName   # single test (store is the only tested
 make web        # podman-build the image and run the site at http://localhost:8737
 make stop       # stop the container
 make logs       # follow container logs
-make register   # register MCP + CLI + skill with local agent CLIs (scripts/register-mcp.sh)
+make install-skill  # CLI on PATH + skill into ~/.claude and ~/.pi (scripts/install.sh)
+make install-cli    # just the bin/scratchpad symlink into ~/.local/bin
+make drop-mcp       # clear MCP registrations left by older installs
 ```
 
-The container is built with podman from `Containerfile` (a `scratch` image holding three static binaries). `make web` mounts `~/.scratchpad` at `/data` and `$HOME` read-only (so `watch` symlinks resolve but the web process can never modify watched sources).
+The container is built with podman from `Containerfile` (a `scratch` image holding two static binaries). `make web` mounts `~/.scratchpad` at `/data` and `$HOME` read-only (so `watch` symlinks resolve but the web process can never modify watched sources).
 
 ## Architecture
 
-Three binaries in `cmd/` share one store and coordinate **only through the filesystem** — there is no IPC or database. `~/.scratchpad` (override: `SCRATCHPAD_ROOT`; the container sets `/data`) is the sole source of truth: anything that writes a folder there publishes an artifact.
+Two binaries in `cmd/` share one store and coordinate **only through the filesystem** — there is no IPC or database. `~/.scratchpad` (override: `SCRATCHPAD_ROOT`; the container sets `/data`) is the sole source of truth: anything that writes a folder there publishes an artifact.
 
-- `cmd/scratchpad` — CLI (publish/watch/unwatch/watches/list/delete) for humans and bash-driven agents.
-- `cmd/scratchpad-mcp` — stdio MCP server, deliberately minimal: `publish_artifact` (create-only) + `list_artifacts`; guardrails live in the server instructions string. stdout is the MCP transport, logs go to stderr.
+- `cmd/scratchpad` — CLI (publish/watch/unwatch/watches/list/delete). The **only** agent interface: agents drive it through bash, taught by `skill/SKILL.md`. There is deliberately no MCP server (one existed and was removed — it duplicated the CLI and split the guardrails across two places); don't reintroduce one without a reason the CLI can't cover.
 - `cmd/scratchpad-web` — the htmx site: folder pages, sandboxed iframe previews, viewer overlay, SSE-driven live refresh, delete endpoint.
 
 Internal packages:
@@ -38,4 +39,4 @@ Name validation is split by intent: `validateName`/`artifactDir` (strict `^[a-zA
 
 Env vars: `SCRATCHPAD_ROOT` (store root), `SCRATCHPAD_URL` (advertised base URL, default `http://localhost:8737`). Ignore rules are files, not env: see `.scratchpadignore` above.
 
-`skill/SKILL.md` (Agent Skills format) and the MCP server instructions both restate the store's rules for agents — if publish/name/create-only semantics change, update `README.md`, the skill, and the `instructions` const in `cmd/scratchpad-mcp/main.go` together.
+`skill/SKILL.md` (Agent Skills format) restates the store's rules for agents and is the single agent-facing contract — if publish/name/create-only semantics or CLI flags change, update the skill and `README.md` together, and re-run `make install-skill` to push the copies in `~/.claude/skills` and `~/.pi/agent/skills` (they are copies, not symlinks — an edit in the repo does nothing until you re-run it).
