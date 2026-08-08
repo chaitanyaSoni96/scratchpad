@@ -1,0 +1,44 @@
+[Unit]
+Description=scratchpad-web — local artifact hosting
+Documentation=https://github.com/you/scratchpad
+After=network.target
+
+[Service]
+Type=exec
+# A user unit, not a system one: scratchpad-web reads and writes wherever the
+# invoking user can (~/.scratchpad, plus any path `scratchpad watch` symlinks
+# in, which need not live under $HOME). Running it as that same login session
+# gives it exactly that access with no sudo and no DynamicUser identity that
+# would lack permission on the user's own files.
+ExecStart=%h/.local/bin/scratchpad-web --addr :8737
+Restart=on-failure
+RestartSec=2s
+
+# --- hardening --------------------------------------------------------------
+# Nothing below restricts filesystem paths: unlike `make web`'s container,
+# which bind-mounts $HOME read-only so the process can never touch a watched
+# source, a user-unit process runs with the user's own permissions and can
+# write anywhere they can. That is the deliberate tradeoff for running
+# natively instead of in a container — prefer `make web` if you want the
+# read-only guarantee back.
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_INET AF_INET6
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=default.target
