@@ -56,7 +56,7 @@ func NewServer(hub *watch.Hub) http.Handler {
 		panic(err)
 	}
 	mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServerFS(assets)))
-	return mux
+	return withGzip(mux)
 }
 
 type crumb struct {

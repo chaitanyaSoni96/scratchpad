@@ -21,7 +21,9 @@ that writes a folder there publishes an artifact.
   subscribes to.
 - `internal/web` — handlers and view-model building. Templates and static
   assets (htmx, sse, idiomorph) are `go:embed`ded, so there are no runtime file
-  dependencies.
+  dependencies. Responses pass through `withGzip`, which compresses text types
+  only — event streams, Range replies and already-compressed formats go through
+  untouched.
 
 ## Security model
 
