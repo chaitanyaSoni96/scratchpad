@@ -227,6 +227,60 @@ a.project:hover { color: var(--accent); text-decoration: underline; }
   color: var(--muted);
   background: var(--surface);
 }
+/* Stands in for an artifact too large to embed as a live thumbnail. The size
+   is the one true datum, so it gets the type; the schematic stays in --muted
+   and only the hover affordance earns the accent, as everywhere else. */
+.heavy-preview {
+  position: relative;
+  height: 100%;
+  background: var(--surface);
+  color: var(--muted);
+  text-align: center;
+}
+/* Full-bleed: the schematic is cropped by the tile, like the live previews.
+   The mask dissolves it before the caption, so that type sits on clean
+   ground; where mask is unsupported the page simply meets the tile edge. */
+.heavy-doc {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0.55;
+  -webkit-mask-image: linear-gradient(to bottom, #000 40%, transparent 68%);
+  mask-image: linear-gradient(to bottom, #000 40%, transparent 68%);
+}
+.heavy-text {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  padding: 0 1rem 1.15rem;
+}
+.heavy-size {
+  margin: 0;
+  font-size: 1.3rem;
+  letter-spacing: -0.02em;
+  color: var(--text);
+}
+.heavy-swap {
+  display: grid;
+  margin: 0.2rem 0 0;
+  font-size: 0.75rem;
+  letter-spacing: 0.08em;
+}
+.heavy-swap > * {
+  grid-area: 1 / 1; /* one cell, so the swap never reflows the tile */
+  transition: opacity 0.15s ease;
+}
+.heavy-open {
+  opacity: 0;
+  color: var(--accent);
+}
+.card:hover .heavy-why { opacity: 0; }
+.card:hover .heavy-open { opacity: 1; }
+@media (prefers-reduced-motion: reduce) {
+  .heavy-swap > * { transition: none; }
+}
 .linked {
   border: 1px dashed var(--border);
   border-radius: 5px;

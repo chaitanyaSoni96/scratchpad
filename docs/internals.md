@@ -25,6 +25,16 @@ that writes a folder there publishes an artifact.
   only — event streams, Range replies and already-compressed formats go through
   untouched.
 
+## Preview weight
+
+Card previews are eager: a lazy iframe that starts hidden may never load in
+some engines, and hidden-until-loaded would then deadlock. The cost is that
+every tile on a folder page fetches and runs its artifact on every visit, so a
+single generated artifact that inlines megabytes of data slows down the whole
+folder it happens to sit in. Past `maxPreviewBytes` (1 MiB of entry document,
+measured on the entry page rather than the whole subtree) the tile stops
+embedding and draws a placeholder that still links through.
+
 ## Security model
 
 Card previews run in `sandbox="allow-scripts"` iframes *without*

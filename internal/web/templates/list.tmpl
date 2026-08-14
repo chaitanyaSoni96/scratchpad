@@ -19,7 +19,7 @@
        the folder is a watch link, and a button may not nest inside a link */}}
   <article class="card project-card" id="card{{.Href}}">
     <a class="preview" href="{{.Href}}">
-      {{if .Preview.Dir}}
+      {{if and .Preview.Dir (not .Heavy)}}
       {{/* ?v= makes edits show up under morph swaps: a changed modtime is an
            attribute change, so only that card's iframe reloads */}}
       {{/* onload lives inline, not in delegated JS: it must fire in every
@@ -27,6 +27,8 @@
            No loading=lazy — an engine may never load a hidden lazy frame,
            and hidden-until-loaded would then deadlock. */}}
       <iframe src="/a/{{.Preview.RelPath}}/?v={{.Preview.ModTime.Unix}}" onload="this.classList.add('loaded')" onerror="this.classList.add('loaded')" sandbox="allow-scripts" scrolling="no" title="{{.Label}} preview" tabindex="-1"></iframe>
+      {{else if .Heavy}}
+      {{template "heavy" .}}
       {{else}}
       <div class="doc-folder">▤</div>
       {{end}}
@@ -50,7 +52,9 @@
   {{else if eq .Kind "page"}}
   <article class="card" id="card{{.PageHref}}">
     <div class="preview" hx-get="{{.ViewerHref}}" hx-target="#viewer" title="open {{.Label}}">
+      {{if .Heavy}}{{template "heavy" .}}{{else}}
       <iframe src="{{.PageHref}}?v={{.PageMod.Unix}}" onload="this.classList.add('loaded')" onerror="this.classList.add('loaded')" sandbox="allow-scripts" scrolling="no" title="{{.Label}} preview" tabindex="-1"></iframe>
+      {{end}}
     </div>
     <div class="meta">
       <div class="titles">
@@ -67,7 +71,9 @@
   {{else}}
   <article class="card" id="card/a/{{.Artifact.RelPath}}">
     <div class="preview" hx-get="/fragments/viewer/{{.Artifact.RelPath}}" hx-target="#viewer" title="open {{.Artifact.Name}}">
+      {{if .Heavy}}{{template "heavy" .}}{{else}}
       <iframe src="/a/{{.Artifact.RelPath}}/?v={{.Artifact.ModTime.Unix}}" onload="this.classList.add('loaded')" onerror="this.classList.add('loaded')" sandbox="allow-scripts" scrolling="no" title="{{.Artifact.Name}} preview" tabindex="-1"></iframe>
+      {{end}}
     </div>
     <div class="meta">
       <div class="titles">
@@ -100,3 +106,37 @@
   {{end}}
 </div>
 {{end}}
+
+{{/* Stand-in for a tile whose artifact is too large to embed eagerly. Every
+     other tile renders the real page, so this one draws the shape of one
+     instead: a document with no bottom edge, its lines running past what the
+     tile can hold. The click targets live on the enclosing .preview, so the
+     tile still opens. */}}
+{{define "heavy"}}<div class="heavy-preview">
+  {{/* viewBox matches the tile's 16/10, so the page is cropped by the real
+       tile edge rather than by a box drawn inside it */}}
+  {{/* the dissolve is a CSS mask, not an SVG gradient: a gradient would need
+       an id, and a folder holding two heavy artifacts would then repeat it */}}
+  <svg class="heavy-doc" viewBox="0 0 160 100" preserveAspectRatio="xMidYMin slice"
+       role="img" aria-label="document larger than the preview area" focusable="false">
+    {{/* the sides never close: the page runs out of tile, it does not end */}}
+    <path d="M44 100V15a5 5 0 0 1 5-5h62a5 5 0 0 1 5 5v85"
+          fill="none" stroke="currentColor" stroke-width="1.5"/>
+    <g fill="currentColor">
+      <rect x="53" y="21" width="26" height="5" rx="2.5"/>
+      <rect x="53" y="33" width="54" height="3" rx="1.5"/>
+      <rect x="53" y="40" width="54" height="3" rx="1.5"/>
+      <rect x="53" y="47" width="41" height="3" rx="1.5"/>
+      <rect x="53" y="54" width="54" height="3" rx="1.5"/>
+      <rect x="53" y="61" width="48" height="3" rx="1.5"/>
+    </g>
+  </svg>
+  <div class="heavy-text">
+    <p class="heavy-size">{{size .PreviewBytes}}</p>
+    {{/* stacked in one grid cell so the hover swap cannot shift the tile */}}
+    <p class="heavy-swap">
+      <span class="heavy-why">too large to preview</span>
+      <span class="heavy-open">open →</span>
+    </p>
+  </div>
+</div>{{end}}

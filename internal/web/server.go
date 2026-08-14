@@ -100,6 +100,48 @@ type card struct {
 	PageSize    int64
 	PageMod     time.Time
 	Unwatch     *unwatchAction // set when this tile is (or lives under) a watch link
+	// PreviewBytes is the entry document the tile's iframe would fetch; past
+	// maxPreviewBytes Heavy is set and the template draws a placeholder
+	// instead of embedding it.
+	PreviewBytes int64
+	Heavy        bool
+}
+
+// Card previews are eager by design (see list.tmpl: a lazy iframe that starts
+// hidden may never load), so every tile on a folder page fetches and runs its
+// artifact the moment the page opens. That is fine for the hand-written pages
+// this site was built for, but a generated artifact can inline megabytes of
+// data and spend seconds of script time before it paints — and it does so on
+// every visit to the folder it merely happens to sit in. Past this size the
+// tile stops embedding and just links through.
+const maxPreviewBytes = 1 << 20
+
+// previewBytes measures the artifact's entry page rather than its whole
+// subtree: assets load only if that page asks for them, but the entry
+// document is always parsed before the preview can paint.
+func previewBytes(a store.Artifact) int64 {
+	if a.Entry == "" {
+		return 0
+	}
+	fi, err := os.Stat(filepath.Join(a.Dir, a.Entry))
+	if err != nil {
+		return 0
+	}
+	return fi.Size()
+}
+
+// withPreview fills in the weight of the artifact a tile would embed.
+func withPreview(c card, a store.Artifact) card {
+	c.PreviewBytes = previewBytes(a)
+	c.Heavy = c.PreviewBytes > maxPreviewBytes
+	return c
+}
+
+// artifactCard builds a single-page artifact tile; prefixLabel/prefixHref are
+// set only when the artifact is shown from an ancestor folder.
+func artifactCard(a store.Artifact, prefixLabel, prefixHref string) card {
+	return withPreview(card{Kind: "artifact", Artifact: a, PrefixLabel: prefixLabel,
+		PrefixHref: prefixHref, Unwatch: artifactUnwatch(a)}, a)
 }
 
 // unwatchAction is the unwatch button on a card: the watch link that would be
@@ -162,8 +204,8 @@ type listView struct {
 
 // collectionCard renders a multi-page artifact as a browsable folder tile.
 func collectionCard(a store.Artifact, label string) card {
-	return card{Kind: "project", Label: label, Href: "/p/" + a.RelPath(),
-		Count: len(a.Pages), Unit: "pages", Preview: a, Unwatch: artifactUnwatch(a)}
+	return withPreview(card{Kind: "project", Label: label, Href: "/p/" + a.RelPath(),
+		Count: len(a.Pages), Unit: "pages", Preview: a, Unwatch: artifactUnwatch(a)}, a)
 }
 
 func pageCard(label, href, viewerHref, absPath string, isDoc bool) card {
@@ -172,6 +214,9 @@ func pageCard(label, href, viewerHref, absPath string, isDoc bool) card {
 		c.PageSize = fi.Size()
 		c.PageMod = fi.ModTime()
 	}
+	// A page tile embeds the file itself, so its own size is the weight.
+	c.PreviewBytes = c.PageSize
+	c.Heavy = c.PreviewBytes > maxPreviewBytes
 	return c
 }
 
@@ -300,7 +345,7 @@ func buildCards(artifacts []store.Artifact, f string) []card {
 			if a.MultiPage() {
 				cards = append(cards, collectionCard(a, a.Name))
 			} else {
-				cards = append(cards, card{Kind: "artifact", Artifact: a, Unwatch: artifactUnwatch(a)})
+				cards = append(cards, artifactCard(a, "", ""))
 			}
 		case !strings.HasPrefix(a.Project+"/", prefix):
 			// outside this folder
@@ -315,16 +360,14 @@ func buildCards(artifacts []store.Artifact, f string) []card {
 				if a.MultiPage() {
 					cards = append(cards, collectionCard(a, strings.TrimPrefix(a.RelPath(), prefix)))
 				} else {
-					cards = append(cards, card{Kind: "artifact", Artifact: a,
-						PrefixLabel: strings.TrimPrefix(a.Project, prefix),
-						PrefixHref:  "/p/" + a.Project,
-						Unwatch:     artifactUnwatch(a)})
+					cards = append(cards, artifactCard(a,
+						strings.TrimPrefix(a.Project, prefix), "/p/"+a.Project))
 				}
 			} else if !used[child] {
 				used[child] = true
-				c := card{Kind: "project", Label: child,
+				c := withPreview(card{Kind: "project", Label: child,
 					Href: "/p/" + prefix + child, Count: perChild[child], Unit: "artifacts", Preview: a,
-					Unwatch: folderUnwatch(prefix + child)}
+					Unwatch: folderUnwatch(prefix + child)}, a)
 				if docs > 0 {
 					c.Count += docs
 					c.Unit = "items"
