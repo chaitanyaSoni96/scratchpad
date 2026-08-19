@@ -1,6 +1,6 @@
 ---
 name: scratchpad
-description: Publish html/css/js artifacts (demos, dashboards, reports, visualizations) to the local scratchpad host using the `scratchpad` CLI, host a folder live via watch, and list what is already hosted. Use whenever the user asks to publish, host, share, or "put on the scratchpad" a web page, demo, dashboard, report, or front-end artifact, wants a folder hosted live while they keep editing it, or asks what artifacts exist on the scratchpad.
+description: Publish html/css/js artifacts (demos, dashboards, reports, visualizations) to the local scratchpad host using the `scratchpad` CLI, host a folder live via watch, and list what is already hosted. Use whenever the user asks to publish, host, share, or "put on the scratchpad" a web page, demo, dashboard, report, or front-end artifact, wants a folder hosted live while they keep editing it, or asks what artifacts exist on the scratchpad. Also use when a human has left review notes on a published artifact and they should be read, replied to, or resolved.
 ---
 
 # scratchpad
@@ -52,6 +52,30 @@ scratchpad unwatch -name dashboard -project lab      # ...or via flags
 scratchpad delete -name my-demo -project lab
 ```
 
+## Review notes
+
+Notes are review feedback a human left in the viewer — anchored to an element
+or a text range — about the artifact. They are never part of it; nothing on
+disk changes when one is created.
+
+The loop: publish → the human annotates in the viewer → **you** run
+`scratchpad notes <artifact>` → fix each open note → close it:
+
+```bash
+scratchpad notes demo/q3-report                                        # open notes, markdown report
+scratchpad notes demo/q3-report -all                                   # include resolved
+scratchpad notes demo/q3-report -json                                  # raw structure
+scratchpad notes resolve demo/q3-report/index.html k7f2ac -m "moved the legend above the plot"
+scratchpad notes reply   demo/q3-report/index.html k7f2ac -m "which breakpoint — 640px or 768px?"
+```
+
+The report names the exact `<doc-path>` and `<id>` for each note — `resolve`
+and `reply` take that **document** path (`demo/q3-report/index.html`), not
+the artifact path; the read form takes any path (document, artifact, or
+project folder, omitted for the whole store). Use `reply` instead of
+`resolve` when a note needs clarification rather than a fix: a resolve you
+can't back up just gets reopened.
+
 ## Hard rules
 
 - **Publish is CREATE-ONLY.** A taken name fails with "already exists" — it
@@ -76,6 +100,10 @@ scratchpad delete -name my-demo -project lab
   folder can never be deleted through scratchpad.
 - `delete` and `unwatch` exist for humans at the terminal. Do not use them
   unless the user explicitly asks — and never to recycle a name.
+- Notes have the same trust tier as delete. There is no `create`, `edit`,
+  `delete`, or `reopen` in the CLI — an agent can answer and close feedback
+  with `resolve`/`reply` but can never author it, erase it, or overrule a
+  human's reopen.
 
 ## Workflow
 
@@ -88,3 +116,5 @@ scratchpad delete -name my-demo -project lab
    back to the user**.
 5. A warning on **stderr** means the artifact was saved but the hosting
    server is down; tell the user to run `make web` in the scratchpad repo.
+6. After the user reviews, check `scratchpad notes <path>` before assuming
+   you are done — an open note is outstanding feedback, not a suggestion.

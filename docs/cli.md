@@ -15,6 +15,9 @@ scratchpad watches                  # every watch link and where it points
 scratchpad unwatch lab/graphs/chart # drop the link, keep the folder
 scratchpad list [-json]
 scratchpad delete -project lab/graphs -name chart
+scratchpad notes [<path>] [-all] [-json]
+scratchpad notes resolve <doc-path> <id> -m "what changed"
+scratchpad notes reply   <doc-path> <id> -m "text"
 ```
 
 Every publish prints the artifact URL on stdout. A warning on stderr means the
@@ -60,6 +63,29 @@ stays yours:
 Lookups of things that already exist — URLs, delete, unwatch — use looser
 validation than publish, because a watched repo names its own folders. They
 still reject traversal and control characters, and hidden paths never resolve.
+
+## notes
+
+```bash
+scratchpad notes [<path>] [-all] [-json]
+scratchpad notes resolve <doc-path> <id> -m "what changed"
+scratchpad notes reply   <doc-path> <id> -m "text"
+```
+
+`<path>` is a document, an artifact, or a project folder (omit it for the
+whole store). The read form reports open notes as a markdown report by
+default; `-all` includes resolved notes; `-json` prints the raw structure
+instead. `resolve` appends a reply and marks the note resolved — the normal
+way it gets closed; `reply` appends a comment (e.g. a clarifying question)
+without closing it. Both take the note's **document** path, not the
+artifact path, and the `id` the report prints; `-m`/`-message` is required
+for both.
+
+There is no `create`, `edit`, `delete`, or `reopen`: an agent can answer and
+close feedback but can never author it, erase it, or overrule a human's
+reopen — same trust tier as `delete` above, and those verbs stay the
+human's, in the web UI. Full reference, including storage, the HTTP API,
+and anchoring: [docs/notes.md](notes.md).
 
 ## Markdown
 

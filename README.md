@@ -68,12 +68,28 @@ scratchpad delete -project lab/graphs -name chart
 Full reference, including publish-vs-watch and naming rules:
 [docs/cli.md](docs/cli.md).
 
+## Review notes
+
+A human reviewing an artifact in the viewer can leave notes anchored to an
+element or a text range. Agents read them back and close the loop — never
+by editing or deleting a note, only by fixing the thing and replying:
+
+```bash
+scratchpad notes demo/q3-report                # open notes, markdown report
+scratchpad notes resolve demo/q3-report/index.html k7f2ac -m "moved the legend above the plot"
+```
+
+Resolve is the agent's claim, not acceptance — a human reopens or deletes the
+note. Full reference: [docs/notes.md](docs/notes.md).
+
 Markdown is first-class — any `.md` renders as a styled page — so watching a
 docs or plans tree gives you a browsable site of mockups and notes.
 
 ## More
 
 - [docs/cli.md](docs/cli.md) — every command, publish vs watch, naming rules
+- [docs/notes.md](docs/notes.md) — review notes: lifecycle, storage, CLI,
+  HTTP API, anchoring
 - [docs/ignore-rules.md](docs/ignore-rules.md) — `.scratchpadignore` and what
   is hidden by default
 - [docs/internals.md](docs/internals.md) — layout, security model, deployment,
