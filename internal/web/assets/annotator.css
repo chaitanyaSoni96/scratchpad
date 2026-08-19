@@ -292,7 +292,17 @@ body.anno-annotating-text {
 
 /* ------------------------------------------------------- focus + motion */
 
-#__anno-layer :focus-visible { outline: 2px solid var(--anno-accent); outline-offset: 2px; }
+/* Buttons only. The mockup's rule is a bare `:focus-visible` (specificity
+   0,1,0), which loses to `.bubble-body[contenteditable] { outline: none }`
+   — the composer is deliberately chromeless, reading exactly like the note
+   preview it replaces. Scoping ours under #__anno-layer (1,1,0) beat that
+   override and drew a ring around the text box that the mockup never had,
+   so name the buttons instead of every focusable descendant. */
+#__anno-layer button:focus-visible { outline: 2px solid var(--anno-accent); outline-offset: 2px; }
+/* Belt and braces for the one focusable non-button: some engines paint
+   their own default ring on a focused contenteditable. */
+#__anno-layer .anno-bubble-body:focus,
+#__anno-layer .anno-bubble-body:focus-visible { outline: none; box-shadow: none; }
 @media (prefers-reduced-motion: reduce) {
   .anno-flash, .anno-marker { animation-duration: 0.001ms !important; transition-duration: 0.001ms !important; }
 }
