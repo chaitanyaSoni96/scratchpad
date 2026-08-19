@@ -45,9 +45,10 @@ make install-skill   # CLI on PATH + skill for claude/pi
 
 `scratchpad` goes on `~/.local/bin`, and an [Agent
 Skills](https://agentskills.io)-format [`skill/SKILL.md`](skill/SKILL.md)
-teaches agents to build a folder and `publish -dir` it. Installed to
-`~/.claude/skills/` and `~/.pi/agent/skills/`; any agent that reads Agent
-Skills — or just runs shell commands — works the same way.
+teaches agents to `watch` the project's `.scratchpad/` folder and then simply
+write artifact folders into it, keeping `publish` for frozen snapshots. It is
+installed to `~/.claude/skills/` and `~/.pi/agent/skills/`; any agent that
+reads Agent Skills — or just runs shell commands — works the same way.
 
 There is no MCP server. One existed early on and was removed: it duplicated the
 CLI, forced files through a JSON envelope, and split the guardrails across two
