@@ -338,9 +338,36 @@
     return (el || document.body).getBoundingClientRect();
   }
 
+  var MARKER_GAP = 3; // px of air between stacked marker chips
+
+  // Two notes anchored to the same element — or to two runs of text on the
+  // same line — resolve to the same gutter coordinate, and the later chip
+  // would sit exactly on top of the earlier one: one note invisible, and its
+  // clicks swallowed by the chip above it. `placed` is what this render has
+  // already put down; each collider is pushed one row further down the
+  // gutter until it clears them all, so notes stack in document order. The
+  // loop re-checks the whole set after every step — moving down can bring a
+  // chip into a neighbour it had already passed.
+  function stackTop(placed, left, top, w, h) {
+    for (var guard = 0; guard < 200; guard++) {
+      var hit = false;
+      for (var i = 0; i < placed.length; i++) {
+        var p = placed[i];
+        if (Math.abs(p.left - left) < (w + p.w) / 2 && Math.abs(p.top - top) < (h + p.h) / 2 + MARKER_GAP) {
+          hit = true;
+          break;
+        }
+      }
+      if (!hit) break;
+      top += h + MARKER_GAP;
+    }
+    return top;
+  }
+
   function renderMarkers() {
     measureOrigin();
     var ns = notesArr;
+    var placedChips = []; // {left, top, w, h} in layer coords, this render only
     for (var i = 0; i < ns.length; i++) {
       var a = ns[i];
       var r = resolved[a.id];
@@ -367,7 +394,6 @@
       chip.textContent = isOpen ? String(r.num) : "✓";
       chip.title = a.body;
       chip.setAttribute("data-anno-id", a.id);
-      chip.style.top = tl.top + "px";
       // An element anchor is pinned to its own left edge. A text mark is not:
       // it usually starts mid-line, so its own edge would drop the number on
       // top of the words just before it. Pin those to the left edge of the
@@ -376,8 +402,15 @@
       // supplies the gutter; clamp so the chip can never run off the
       // document's own left edge.
       var anchorLeft = r.kind === "element" ? tl.left : toLayer(blockRect(r.marks[0])).left;
-      chip.style.left = Math.max(4, anchorLeft) + "px";
+      var chipLeft = Math.max(4, anchorLeft);
+      chip.style.left = chipLeft + "px";
       layer.appendChild(chip);
+      // Measured after insertion rather than assumed: .anno-marker is sized
+      // in rem, so its box depends on the artifact's own root font-size.
+      var cw = chip.offsetWidth || 22, ch = chip.offsetHeight || 22;
+      var chipTop = stackTop(placedChips, chipLeft, tl.top, cw, ch);
+      chip.style.top = chipTop + "px";
+      placedChips.push({ left: chipLeft, top: chipTop, w: cw, h: ch });
     }
     renderBubble();
     highlightActive();
