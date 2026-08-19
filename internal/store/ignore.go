@@ -359,6 +359,16 @@ func Visible(dir, name string, isDir bool) bool {
 		decide(defaultRules(), []string{name}) // outside the store: no files apply
 		return visible
 	}
+	// The top-level .annotations directory is system metadata (note sidecar
+	// files), not user content: it must never be reachable no matter what a
+	// .scratchpadignore says. It isn't in defaultIgnores because that ruleset
+	// is meant to be overridable by a "!" line, and this must not be. Checked
+	// on name alone (not isDir) so a path is refused even before anything is
+	// on disk to stat — e.g. VisiblePath on a not-yet-created sidecar. A
+	// .annotations directory nested deeper than the root is ordinary content.
+	if rel == "." && name == AnnotationsDir {
+		return false
+	}
 	var segs []string
 	if rel != "." {
 		segs = strings.Split(rel, string(filepath.Separator))

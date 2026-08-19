@@ -614,6 +614,10 @@ func Unwatch(project, name string) error {
 		return err
 	}
 	pruneEmpty(root, dir)
+	// A name freed by unwatch is reusable (publish/watch is create-only), so
+	// any notes left over from the unwatched folder must go with it or a
+	// same-named artifact published later would inherit them.
+	removeNotesFor((Artifact{Project: project, Name: name}).RelPath())
 	return nil
 }
 
@@ -671,5 +675,9 @@ func Delete(project, name string) error {
 		}
 	}
 	pruneEmpty(root, dir)
+	// Names are reusable once a human deletes here (Publish/Watch are
+	// create-only), so a re-published/re-watched artifact of the same name
+	// must start with a clean slate rather than inheriting the old one's notes.
+	removeNotesFor((Artifact{Project: project, Name: name}).RelPath())
 	return nil
 }
