@@ -114,9 +114,10 @@ func TestWatch(t *testing.T) {
 	if _, err := Watch("", "linked-art", src); err != nil {
 		t.Fatal(err)
 	}
-	// create-only, same as publish
-	if _, err := Watch("", "linked-art", src); err == nil || !strings.Contains(err.Error(), "already exists") {
-		t.Fatalf("re-watch should fail with already-exists, got %v", err)
+	// re-watching the same folder under the same name is a no-op, so the
+	// call can be made unconditionally
+	if _, err := Watch("", "linked-art", src); err != nil {
+		t.Fatalf("re-watch of the same target should be a no-op, got %v", err)
 	}
 
 	list, err := List()
@@ -154,6 +155,32 @@ func TestWatch(t *testing.T) {
 	}
 	if err := Delete("tree", "one"); err == nil {
 		t.Error("artifact inside watched tree must not be deletable")
+	}
+}
+
+// The no-op in TestWatch is the *only* relaxation of create-only: the name
+// still cannot be taken over by anything else.
+func TestWatchCreateOnly(t *testing.T) {
+	testRoot(t)
+	src, other := t.TempDir(), t.TempDir()
+	for _, d := range []string{src, other} {
+		os.WriteFile(filepath.Join(d, "index.html"), []byte("<p>"), 0o644)
+	}
+	if _, err := Watch("", "taken", src); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Watch("", "taken", other); err == nil || !strings.Contains(err.Error(), "already exists") {
+		t.Fatalf("watch of a different target should fail with already-exists, got %v", err)
+	}
+	if _, err := Publish("", "taken", map[string][]byte{"index.html": []byte("<p>")}); err == nil {
+		t.Error("publish over a watch link should fail")
+	}
+	// ...and a real directory is never adopted as if it were the link
+	if _, err := Publish("", "solid", map[string][]byte{"index.html": []byte("<p>")}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Watch("", "solid", src); err == nil || !strings.Contains(err.Error(), "already exists") {
+		t.Fatalf("watch over a published artifact should fail, got %v", err)
 	}
 }
 

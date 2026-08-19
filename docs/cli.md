@@ -54,6 +54,9 @@ stays yours:
 
 - A watched folder with no top-level `.html` is a project tree; only the
   subfolders containing html show up as artifacts.
+- The name is create-only like publish, with one exception: re-watching the
+  same folder under the same name is a no-op, so the command is safe to
+  repeat. Any *other* target — or a real directory of that name — is refused.
 - Watching a folder already inside the scratchpad is refused.
 - `unwatch` (or the button on any watched card) removes only the link. Files
   inside a watched folder can't be deleted through scratchpad at all, and the

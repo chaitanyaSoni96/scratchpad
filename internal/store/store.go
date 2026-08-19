@@ -469,7 +469,9 @@ func Publish(project, name string, files map[string][]byte) (Artifact, error) {
 
 // Watch symlinks an external directory into the store so it is hosted
 // live. The target may be a single artifact folder (contains html) or a
-// whole tree of artifact folders. Create-only, like Publish.
+// whole tree of artifact folders. Create-only like Publish, with one
+// exception: re-watching the same folder under the same name is a no-op
+// rather than an error, so the call is safe to repeat.
 func Watch(project, name, target string) (string, error) {
 	abs, err := filepath.Abs(target)
 	if err != nil {
@@ -506,17 +508,42 @@ func Watch(project, name, target string) (string, error) {
 	if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
 		return "", err
 	}
-	// os.Symlink is atomic like os.Mkdir in Publish: EEXIST if taken.
+	// os.Symlink is atomic like os.Mkdir in Publish: EEXIST if taken. The one
+	// exception is a link that already points at this exact folder — that is
+	// the state the caller asked for, so re-watching is a no-op and an agent
+	// can run watch unconditionally instead of probing `watches` first.
 	if err := os.Symlink(abs, link); err != nil {
-		if os.IsExist(err) {
+		if !os.IsExist(err) {
+			return "", err
+		}
+		if !linksTo(link, abs) {
 			return "", fmt.Errorf("%q already exists — delete it in the web UI or pick a different name", strings.TrimPrefix(link[len(root):], string(filepath.Separator)))
 		}
-		return "", err
 	}
 	if !hasHTML(abs) {
 		fmt.Fprintln(os.Stderr, "note: no top-level .html in the watched folder — it will be treated as a project tree; only subfolders containing .html will show up")
 	}
 	return link, nil
+}
+
+// linksTo reports whether link is a symlink already resolving to abs. A real
+// directory never qualifies: a published artifact must not be silently
+// adopted as a watch of a folder that happens to sit elsewhere.
+func linksTo(link, abs string) bool {
+	fi, err := os.Lstat(link)
+	if err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		return false
+	}
+	if dest, err := os.Readlink(link); err == nil && dest == abs {
+		return true
+	}
+	// ...or the same folder reached through further symlinks on either side.
+	real, err := filepath.EvalSymlinks(link)
+	if err != nil {
+		return false
+	}
+	realAbs, err := filepath.EvalSymlinks(abs)
+	return err == nil && real == realAbs
 }
 
 // WatchLink is one watch symlink in the store.
