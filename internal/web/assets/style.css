@@ -347,6 +347,10 @@ button.delete:hover { color: var(--danger); border-color: var(--danger); }
   padding: 0 2rem 0.9rem;
   border-bottom: 1px solid var(--border);
 }
+/* No chips to show (a single-document artifact): the bar exists only to
+   host #banners, so it takes up no room until one appears. */
+.docbar.bare { padding: 0 2rem; border-bottom: 0; }
+.docbar.bare:has(.banner) { padding: 0 2rem 0.9rem; border-bottom: 1px solid var(--border); }
 .docchips { display: flex; gap: 0.35rem; flex-wrap: wrap; }
 .chip {
   background: none;

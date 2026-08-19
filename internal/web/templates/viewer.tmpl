@@ -12,11 +12,17 @@
               hx-on:click="viewerClose()">✕</button>
     </div>
   </header>
-  {{if .Docs}}
+  {{if .Doc}}
   <!-- Doc switcher: general viewer chrome for any multi-document artifact,
        shown regardless of whether any document has notes. Each chip carries
-       its own document's open count — notes are per document. -->
-  <div class="docbar">
+       its own document's open count — notes are per document.
+
+       The bar itself is rendered for every annotatable document, chips or
+       not: #banners is where annotations.js reports an unanchored note or a
+       save that didn't land, and a single-document artifact (the common
+       shape) has to be able to say those things too. With no chips and no
+       banner it collapses to nothing — see .docbar.bare in style.css. -->
+  <div class="docbar{{if not .Docs}} bare{{end}}">
     <div class="docchips" role="tablist" aria-label="documents in this artifact">
       {{range .Docs}}
       <button class="chip" hx-get="{{.Href}}" hx-target="#viewer" role="tab"
