@@ -126,3 +126,38 @@ installed without root, so the click-through in the plan's Verification section
 was run on Chromium only. `contenteditable`, `getSelection`/`Range`, and
 `document.execCommand("insertText")` in the bubble composer are the parts most
 likely to differ and are still worth a manual pass in Safari.
+
+## Follow-up (2026-08-19, after the first human review pass)
+
+Three defects the human review turned up, all in the viewer half, all fixed
+and re-verified in headless Chromium against a live `scratchpad-web`:
+
+- **A focus ring the mockup never had.** `#__anno-layer :focus-visible`
+  (specificity 1,1,0) outranked `.anno-bubble-body[contenteditable] {
+  outline: none }` (0,2,0), so the composer drew a 2px accent outline the
+  moment it took focus. The mockup's rule is a bare `:focus-visible` (0,1,0)
+  and loses that fight, which is exactly why its composer reads as plain
+  text. Narrowed ours to `#__anno-layer button:focus-visible` and pinned an
+  explicit `outline: none` on the body for engines that ring a focused
+  contenteditable on their own.
+- **Stacked notes buried each other.** Two notes on one element resolve to
+  one gutter coordinate, so the later chip landed exactly on the earlier one
+  — invisible, and swallowing its clicks. That is what made an existing note
+  un-editable: there was no way back to it, only a way to write another one
+  on top. `renderMarkers` now measures each chip and pushes colliders down a
+  row (`stackTop`), so every note keeps a reachable marker.
+- **No way to dismiss a bubble by clicking away.** Added a `mousedown`
+  handler that closes an open bubble when the click lands outside it and the
+  composer has nothing unsaved (`bubbleDirty`); a dirty draft or an unsaved
+  edit stays put, since ✕ and Esc are the deliberate discard. Bound on
+  mousedown, not click, so it settles before the same gesture's element pick
+  or selection-driven draft. Dismissing a saved note's bubble pulls only the
+  bubble node — a full render would unwrap and rewrap every `<mark>` under a
+  selection the human may still be dragging.
+
+Also fixed while checking for other divergences: `#banners` lived inside the
+docbar, which the template rendered only for multi-document artifacts, so on
+a single-document artifact — the common shape — the "N notes no longer
+anchor" warning and every save-failure message had nowhere to go and were
+silently dropped. The bar is now rendered for any annotatable document and
+collapses to zero height until it has a banner (`.docbar.bare`).
