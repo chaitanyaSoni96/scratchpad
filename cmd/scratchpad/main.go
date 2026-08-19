@@ -36,42 +36,37 @@ func webAlive() bool {
 	return resp.StatusCode < 500
 }
 
-const usage = `scratchpad - filesystem artifact store CLI
+const usage = `scratchpad — host html artifacts straight from the filesystem
+
+Any folder under ~/.scratchpad (override: SCRATCHPAD_ROOT) that directly
+contains an .html file is hosted at http://localhost:8737/a/<project>/<name>/
+(override: SCRATCHPAD_URL). The site refreshes as files change; .md files
+render as styled pages.
 
 Usage:
+  scratchpad watch <folder> [-name <name>] [-project <p/ath>]
+  scratchpad watches
+  scratchpad unwatch <path> | -name <name> [-project <p/ath>]
   scratchpad publish -name <name> [-project <p/ath>] -dir <folder>
   scratchpad publish -name <name> [-project <p/ath>] -html <file> [-css <file>] [-js <file>]
-  scratchpad watch <folder> [-name <name>] [-project <p/ath>]
-  scratchpad unwatch <path> | -name <name> [-project <p/ath>]
-  scratchpad watches
   scratchpad list [-json]
   scratchpad delete -name <name> [-project <p/ath>]
   scratchpad notes [<path>] [-all] [-json]
   scratchpad notes resolve <doc-path> <id> -m "what changed"
-  scratchpad notes reply <doc-path> <id> -m "text"
+  scratchpad notes reply   <doc-path> <id> -m "text"
 
-publish is CREATE-ONLY: it fails if the name already exists. -dir publishes a
-whole folder (any files; needs a top-level .html). Pass "-" as -html to read
-HTML from stdin.
+watch symlinks the folder in, so saved edits are live; a folder with no
+top-level .html is hosted as a tree of artifacts. Repeating the same watch is
+a no-op. unwatch removes only the link.
 
-watch symlinks a folder into the scratchpad instead of copying: keep editing
-it in place and the site updates live. -name defaults to the folder's name.
-unwatch removes that link and nothing else — the source folder is never
-touched — and watches lists every link currently in the scratchpad. Files
-inside a watched folder cannot be deleted through scratchpad at all.
+publish copies a frozen snapshot in and is create-only: a taken name is an
+error, never an overwrite. The folder needs a top-level .html; "-" reads a
+file from stdin.
 
-notes are review feedback a human leaves in the viewer, anchored to an
-element or text range. "notes <path>" reports open notes for a document, an
-artifact, or a folder (omit <path> for the whole store); -all also shows
-resolved notes, -json prints the raw structure instead of the markdown
-report. Fix each open note, then close it with "resolve" and a one-line
-summary of the change; use "reply" instead when a note needs clarification
-rather than a fix. There is deliberately no create, edit, delete, or reopen:
-an agent can answer and close feedback but can never author it, erase it, or
-overrule a human's reopen — those stay the human's, in the web UI.
-
-Artifacts land in ~/.scratchpad (override: SCRATCHPAD_ROOT) and are served
-at http://localhost:8737/a/<project>/<name>/ by scratchpad-web.`
+notes reads review feedback left in the viewer ("notes <path>", or no path
+for the whole store) and closes it: resolve marks a note done with a summary
+of the change, reply comments without closing. Creating, editing, deleting
+and reopening notes happen in the web UI only.`
 
 const notesUsage = `scratchpad notes [<path>] [-all] [-json]
 scratchpad notes resolve <doc-path> <id> -m "what changed"
@@ -120,6 +115,8 @@ func main() {
 		os.Exit(2)
 	}
 	switch os.Args[1] {
+	case "-h", "--help", "help":
+		fmt.Println(usage)
 	case "publish":
 		fs := flag.NewFlagSet("publish", flag.ExitOnError)
 		project := fs.String("project", "", "optional project path (e.g. demos/charts)")
