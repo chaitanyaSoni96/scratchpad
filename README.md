@@ -22,7 +22,7 @@ whole subtree is that artifact's assets. Every folder above it is project path,
 each level browsable as its own page. The filesystem is the sole source of
 truth, so anything that writes a folder (agents, `cp -r`, this repo's CLI)
 publishes an artifact. Publishing is **create-only**: a taken name is an error,
-never an overwrite, and deleting is a human action in the web UI.
+never an overwrite, and deleting is the user's action in the web UI.
 
 ## Run
 
@@ -71,7 +71,7 @@ Full reference, including publish-vs-watch and naming rules:
 
 ## Review notes
 
-A human reviewing an artifact in the viewer can leave notes anchored to an
+The user, reviewing an artifact in the viewer, can leave notes anchored to an
 element or a text range. Agents read them back and close the loop — never
 by editing or deleting a note, only by fixing the thing and replying:
 
@@ -80,7 +80,7 @@ scratchpad notes demo/q3-report                # open notes, markdown report
 scratchpad notes resolve demo/q3-report/index.html k7f2ac -m "moved the legend above the plot"
 ```
 
-Resolve is the agent's claim, not acceptance — a human reopens or deletes the
+Resolve is the agent's claim, not acceptance — the user reopens or deletes the
 note. Full reference: [docs/notes.md](docs/notes.md).
 
 Markdown is first-class — any `.md` renders as a styled page — so watching a

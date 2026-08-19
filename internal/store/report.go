@@ -10,7 +10,7 @@ import (
 // that produce it — `scratchpad notes` and GET /notes/{path} — must render the
 // same bytes, so it lives here with the domain rather than in either caller.
 // It is markdown because it has one audience twice over: an agent reading it
-// off curl or a pipe, and a human opening the same URL in a browser, where the
+// off curl or a pipe, and the user opening the same URL in a browser, where the
 // web layer runs it through the same goldmark page every other .md gets.
 //
 // Anchored-vs-unanchored is deliberately absent: whether a selector or quote
@@ -97,11 +97,11 @@ func FormatReport(docs []DocNotes, opts ReportOptions) string {
 	fmt.Fprintf(&b, "scratchpad notes resolve %s <id> -m \"what changed\"\n", shown[0].doc)
 	fmt.Fprintf(&b, "scratchpad notes reply   %s <id> -m \"a question, when the note needs clarifying instead of a fix\"\n", shown[0].doc)
 	b.WriteString("```\n")
-	b.WriteString("\nOnly a human can create, edit, reopen or delete a note.\n")
+	b.WriteString("\nOnly the user can create, edit, reopen or delete a note.\n")
 	return b.String()
 }
 
-// writeNote renders one annotation: the human's text first (it is the point),
+// writeNote renders one annotation: the user's text first (it is the point),
 // then where it is anchored, when it happened, and the thread so far.
 func writeNote(b *strings.Builder, a Annotation) {
 	fmt.Fprintf(b, "\n### %s · %s\n\n", a.ID, a.Status)

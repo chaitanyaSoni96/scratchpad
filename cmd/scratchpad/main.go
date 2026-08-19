@@ -1,5 +1,5 @@
 // scratchpad is a small CLI over the artifact store — the interface for
-// humans at the terminal and for agents, which drive it via bash (see
+// the user at the terminal and for agents, which drive it via bash (see
 // skill/SKILL.md).
 package main
 
@@ -79,8 +79,8 @@ reply comments without closing (e.g. a clarifying question). -m/-message is
 required for both.
 
 There is no create, edit, delete, or reopen here: an agent can answer and
-close feedback but can never author it, erase it, or overrule a human's
-reopen — those are the human's, in the web UI.`
+close feedback but can never author it, erase it, or overrule the user's
+reopen — those are the user's, in the web UI.`
 
 func readInput(path string) ([]byte, error) {
 	if path == "-" {
@@ -270,12 +270,12 @@ func main() {
 			notesReply(os.Args[3:])
 			break
 		}
-		// Anything else is a <path> — except the human-only verbs, which are
+		// Anything else is a <path> — except the user-only verbs, which are
 		// absent on purpose and so must say so. Read as a path they would
 		// quietly report "no notes", which reads like the note is gone rather
 		// than like the command does not exist.
-		if len(os.Args) > 2 && humanOnlyVerbs[os.Args[2]] {
-			fmt.Fprintf(os.Stderr, "scratchpad notes has no %q: creating, editing, reopening and deleting notes are the human's, in the web UI.\n\n%s\n",
+		if len(os.Args) > 2 && userOnlyVerbs[os.Args[2]] {
+			fmt.Fprintf(os.Stderr, "scratchpad notes has no %q: creating, editing, reopening and deleting notes are the user's, in the web UI.\n\n%s\n",
 				os.Args[2], notesUsage)
 			os.Exit(2)
 		}
@@ -310,11 +310,11 @@ func fatal(err error) {
 // be a document, an artifact, a project folder, or omitted entirely (the
 // whole store), and — like watch/unwatch — may appear before or after the
 // flags.
-// humanOnlyVerbs are the note verbs the CLI deliberately does not implement:
+// userOnlyVerbs are the note verbs the CLI deliberately does not implement:
 // an agent can answer and close feedback but can never author it, erase it, or
-// overrule a human's reopen. Named here only so a typo'd attempt gets that
+// overrule the user's reopen. Named here only so a typo'd attempt gets that
 // answer instead of being silently read as a path.
-var humanOnlyVerbs = map[string]bool{
+var userOnlyVerbs = map[string]bool{
 	"create": true, "new": true, "add": true,
 	"edit": true, "update": true,
 	"delete": true, "rm": true, "remove": true,
@@ -395,7 +395,7 @@ func notesReply(args []string) {
 // watch/unwatch, may sit before or after the flags — and the required
 // -m/-message summary shared by resolve and reply. It exits 2 with
 // notesUsage on any shape error, since resolve/reply without a summary is
-// exactly the case that would leave the human with nothing to read next.
+// exactly the case that would leave the user with nothing to read next.
 func parseNoteArgs(verb string, args []string) (doc, id, msg string) {
 	fs := flag.NewFlagSet("notes "+verb, flag.ExitOnError)
 	m := fs.String("m", "", "summary of what changed (required)")
@@ -420,7 +420,7 @@ func parseNoteArgs(verb string, args []string) (doc, id, msg string) {
 		msg = *alias
 	}
 	if msg == "" {
-		fmt.Fprintf(os.Stderr, "error: -m is required — a %s with no summary of what changed is what the human reviewing this reads next\n", verb)
+		fmt.Fprintf(os.Stderr, "error: -m is required — a %s with no summary of what changed is what the user reviewing this reads next\n", verb)
 		os.Exit(2)
 	}
 	return doc, id, msg

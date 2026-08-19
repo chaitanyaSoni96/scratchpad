@@ -406,7 +406,7 @@ func ValidateFilePath(p string) error {
 
 // Publish creates a new artifact from a set of relative-path files. It is
 // create-only: publishing over an existing directory is an error — deletion
-// is a human action in the web UI. At least one top-level .html is required.
+// is the user's action in the web UI. At least one top-level .html is required.
 func Publish(project, name string, files map[string][]byte) (Artifact, error) {
 	entryFound := false
 	for p := range files {
@@ -443,7 +443,7 @@ func Publish(project, name string, files map[string][]byte) (Artifact, error) {
 	// publishes and existing artifacts both surface as EEXIST.
 	if err := os.Mkdir(dir, 0o755); err != nil {
 		if os.IsExist(err) {
-			return Artifact{}, fmt.Errorf("%q already exists — names are not reusable until a human deletes the old artifact in the web UI; pick a different name (see `scratchpad list`)", strings.TrimPrefix(dir[len(root):], string(filepath.Separator)))
+			return Artifact{}, fmt.Errorf("%q already exists — names are not reusable until the user deletes the old artifact in the web UI; pick a different name (see `scratchpad list`)", strings.TrimPrefix(dir[len(root):], string(filepath.Separator)))
 		}
 		return Artifact{}, err
 	}
@@ -702,7 +702,7 @@ func Delete(project, name string) error {
 		}
 	}
 	pruneEmpty(root, dir)
-	// Names are reusable once a human deletes here (Publish/Watch are
+	// Names are reusable once the user deletes here (Publish/Watch are
 	// create-only), so a re-published/re-watched artifact of the same name
 	// must start with a clean slate rather than inheriting the old one's notes.
 	removeNotesFor((Artifact{Project: project, Name: name}).RelPath())

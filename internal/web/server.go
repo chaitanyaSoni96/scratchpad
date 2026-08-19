@@ -51,7 +51,7 @@ func NewServer(hub *watch.Hub) http.Handler {
 	mux.HandleFunc("DELETE /a/{path...}", handleDelete)
 	mux.HandleFunc("DELETE /watch/{path...}", handleUnwatch)
 	// Same trust tier as DELETE /a/{path...}: no auth, local tool. Reads
-	// serve humans and agents alike; writes are viewer-driven (the CLI edits
+	// serve the user and agents alike; writes are viewer-driven (the CLI edits
 	// sidecar files directly instead of calling these).
 	mux.HandleFunc("GET /notes/{path...}", handleNotesRead)
 	mux.HandleFunc("PUT /notes/{path...}", handleNotesWrite)

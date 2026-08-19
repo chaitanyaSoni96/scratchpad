@@ -427,7 +427,7 @@ func OpenNoteCount(prefix string) int {
 // ancestor directories up to (not including) .annotations, and never
 // escapes .annotations — an invalid rel simply has nothing to clean up.
 //
-// Called from Delete and Unwatch: a name freed by a human delete or an
+// Called from Delete and Unwatch: a name freed by a user delete or an
 // unwatch must never let a re-published/re-watched artifact of the same
 // name inherit the old one's notes.
 func removeNotesFor(rel string) error {

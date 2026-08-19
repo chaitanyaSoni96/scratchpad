@@ -53,7 +53,7 @@ func TestPublishCreateOnly(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "already exists") {
 		t.Fatalf("republish should fail with already-exists, got %v", err)
 	}
-	// after human delete, the name is reusable
+	// after the user deletes, the name is reusable
 	if err := Delete("", "once"); err != nil {
 		t.Fatal(err)
 	}
@@ -220,7 +220,7 @@ func TestUnwatch(t *testing.T) {
 	if err := Unwatch("", "missing"); err == nil {
 		t.Error("unwatch of a missing entry should fail")
 	}
-	// an entry inside a watched tree points the human at the link itself
+	// an entry inside a watched tree points the user at the link itself
 	err = Unwatch("tree", "one")
 	if err == nil || !strings.Contains(err.Error(), `watched folder "tree"`) {
 		t.Errorf("unwatch inside a watched tree = %v, want a pointer to the link", err)

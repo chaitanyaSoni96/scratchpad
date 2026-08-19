@@ -39,7 +39,7 @@ and later edits to the source do nothing.
 
 **Publishing is create-only.** A taken name is an error, never an overwrite;
 `os.Mkdir` claims the name atomically, so a race and an existing name surface
-the same way. Deleting is a human action in the web UI — agents pick a fresh
+the same way. Deleting is the user's action in the web UI — agents pick a fresh
 name instead.
 
 Names, project segments, and every path segment inside a published folder must
@@ -85,9 +85,9 @@ artifact path, and the `id` the report prints; `-m`/`-message` is required
 for both.
 
 There is no `create`, `edit`, `delete`, or `reopen`: an agent can answer and
-close feedback but can never author it, erase it, or overrule a human's
+close feedback but can never author it, erase it, or overrule the user's
 reopen — same trust tier as `delete` above, and those verbs stay the
-human's, in the web UI. Full reference, including storage, the HTTP API,
+user's, in the web UI. Full reference, including storage, the HTTP API,
 and anchoring: [docs/notes.md](notes.md).
 
 ## Markdown

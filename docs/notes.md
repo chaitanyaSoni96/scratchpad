@@ -1,6 +1,6 @@
 # Review notes
 
-A **note** is one comment a human leaves in the viewer, anchored to a target
+A **note** is one comment the user leaves in the viewer, anchored to a target
 inside one document — an element of an `.html` page, a text range of a
 `.md` doc. Notes are review feedback *about* an artifact, never part of it:
 nothing on disk under the artifact itself is touched when one is created,
@@ -18,9 +18,9 @@ puts it back to `open` with the thread explaining why:
 - **open** — outstanding feedback. New notes start here.
 - **resolved** — the agent's *claim* that it fixed the thing, made by
   replying with `resolve`. Resolve is not acceptance.
-- **reopen** (human only) — the human contests the claim; the note goes back
+- **reopen** (user only) — the user contests the claim; the note goes back
   to open.
-- **delete** (human only) — the human accepts the fix and removes the note.
+- **delete** (user only) — the user accepts the fix and removes the note.
 
 Every reply — a plain comment, a resolve, or a reopen — lands in the same
 ordered thread under the note, so the back-and-forth reads in one place
@@ -28,7 +28,7 @@ instead of being split across a status field and a comment log.
 
 ### Who may do what
 
-| Verb | Human (viewer) | Agent (CLI) |
+| Verb | User (viewer) | Agent (CLI) |
 |---|---|---|
 | create / edit note | yes | no |
 | reply | yes | yes |
@@ -37,17 +37,17 @@ instead of being split across a status field and a comment log.
 | delete | yes | no |
 
 The asymmetry is the point: an agent can *claim* something is fixed but can
-never make feedback disappear (no delete, no editing a human's text), and it
-can never undo the human's verdict (no reopening a note it lost an appeal
-on). Destruction stays a human action — the same trust tier as artifact
+never make feedback disappear (no delete, no editing the user's text), and it
+can never undo the user's verdict (no reopening a note it lost an appeal
+on). Destruction stays the user's action — the same trust tier as artifact
 delete.
 
 **Resolve-vs-delete is the load-bearing decision here.** An agent closing
 feedback it was given is what lets the review loop run unattended, but
 "closed" and "accepted" have to be different states or the agent ends up
 grading its own work. Resolve is the claim, reopen is the appeal, delete is
-the human's final word — never collapse resolve and delete into one verb,
-and never treat a resolved note as done until a human has looked at it.
+the user's final word — never collapse resolve and delete into one verb,
+and never treat a resolved note as done until the user has looked at it.
 
 ## Storage and visibility
 
@@ -93,7 +93,7 @@ scratchpad notes reply   <doc-path> <id> -m "text"
   question) without changing status. Both take the **document** path
   (`demo/q3-report/index.html`), not the artifact path, plus the note `id`
   from the report. `-m`/`-message` is required for both — a resolve or
-  reply with no summary is exactly what the human reads next.
+  reply with no summary is exactly what the user reads next.
 - There is deliberately no `create`, `edit`, `delete`, or `reopen`. Typing
   one of those as the first argument after `notes` is rejected with an
   explanation rather than silently read as a path (so a typo doesn't get
