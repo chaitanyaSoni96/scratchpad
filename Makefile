@@ -52,6 +52,10 @@ install: build install-skill
 	mkdir -p $(HOME)/.config/systemd/user
 	install -m 0644 systemd/scratchpad-web.service $(HOME)/.config/systemd/user/scratchpad-web.service
 	systemctl --user daemon-reload
+# daemon-reload only re-reads unit files — an already-running service keeps
+# serving the old binary until it is restarted. try-restart is a no-op when
+# the service is not running, so a first install still just prints the hint.
+	systemctl --user try-restart scratchpad-web
 	@echo "Start at login and run now with:"
 	@echo "  systemctl --user enable --now scratchpad-web"
 	@echo "To also start at boot without logging in first:"
