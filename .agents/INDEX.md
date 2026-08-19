@@ -5,9 +5,9 @@ All project artifacts across directories. One line per entry.
 ## Requirements
 
 ## Specs
-- [Artifact Annotations](spec/artifact-annotations.md) — draft (unversioned; agent read via HTTP + CLI)
+- [Artifact Annotations](spec/artifact-annotations.md) — implemented (unversioned; agent read via HTTP + CLI)
 
 ## Plans
-- [Artifact Annotations](plans/todo/artifact-annotations/) — todo
+- [Artifact Annotations](plans/completed/artifact-annotations/) — completed
 
 ## Documents

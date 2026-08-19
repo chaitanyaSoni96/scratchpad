@@ -1,8 +1,8 @@
 ---
 title: Artifact Annotations
-status: draft
+status: implemented
 created: 2026-08-18
-links: [../plans/todo/artifact-annotations/]
+links: [../plans/completed/artifact-annotations/]
 ---
 
 # Artifact Annotations
@@ -203,4 +203,4 @@ No version pill, no rounds ledger, no frozen states. An artifact with no notes s
 
 ## Next step
 
-The mockup at `~/.scratchpad/scratchpad/annotations` demonstrates the unversioned model with the full lifecycle (open notes, agent-resolved notes with threads, a reopened note, reopen/delete verbs, bubble-as-composer, margin placement). Implementation plan: [`plans/todo/artifact-annotations/`](../plans/todo/artifact-annotations/artifact-annotations.md).
+The mockup at `~/.scratchpad/scratchpad/annotations` demonstrates the unversioned model with the full lifecycle (open notes, agent-resolved notes with threads, a reopened note, reopen/delete verbs, bubble-as-composer, margin placement). Implementation plan: [`plans/completed/artifact-annotations/`](../plans/completed/artifact-annotations/artifact-annotations.md).
