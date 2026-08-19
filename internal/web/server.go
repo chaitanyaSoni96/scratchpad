@@ -50,6 +50,12 @@ func NewServer(hub *watch.Hub) http.Handler {
 	mux.HandleFunc("GET /a/{path...}", handleArtifact)
 	mux.HandleFunc("DELETE /a/{path...}", handleDelete)
 	mux.HandleFunc("DELETE /watch/{path...}", handleUnwatch)
+	// Same trust tier as DELETE /a/{path...}: no auth, local tool. Reads
+	// serve humans and agents alike; writes are viewer-driven (the CLI edits
+	// sidecar files directly instead of calling these).
+	mux.HandleFunc("GET /notes/{path...}", handleNotesRead)
+	mux.HandleFunc("PUT /notes/{path...}", handleNotesWrite)
+	mux.HandleFunc("DELETE /notes/{path...}", handleNotesDelete)
 	mux.HandleFunc("GET /events", handleEvents(hub))
 	assets, err := fs.Sub(assetFS, "assets")
 	if err != nil {
@@ -458,6 +464,16 @@ func handleFolderPage(w http.ResponseWriter, r *http.Request) {
 		if folder, ok := resolveView(f); ok {
 			view, f = f, folder
 		} else if _, isCollection := resolveCollection(f); !isCollection && !folderExists(f) {
+			// Nothing real resolves at f. /p/{path}/notes is the convenience
+			// form of GET /notes/{path}: it lives here, after every real
+			// resolution has already failed, so content actually named
+			// "notes" (an artifact, a folder, a doc) keeps shadowing it —
+			// that's the whole point of the convenience form existing
+			// alongside the canonical /notes/{path...} route.
+			if segs := strings.Split(f, "/"); segs[len(segs)-1] == "notes" {
+				serveNotesRead(w, r, strings.Join(segs[:len(segs)-1], "/"))
+				return
+			}
 			http.NotFound(w, r)
 			return
 		}

@@ -73,11 +73,22 @@ func serveMarkdown(w http.ResponseWriter, r *http.Request, path, title string) {
 		http.NotFound(w, r)
 		return
 	}
+	if err := writeMarkdownPage(w, title, src); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+}
+
+// writeMarkdownPage renders src (markdown source) into the same standalone
+// HTML shell serveMarkdown uses, so any caller with markdown bytes — a file
+// on disk, or a report assembled in memory (the notes endpoint) — gets a
+// browser the identical styled page every .md doc gets. It sets
+// Content-Type itself; the caller is responsible for any other headers.
+func writeMarkdownPage(w http.ResponseWriter, title string, src []byte) error {
 	var buf bytes.Buffer
 	if err := md.Convert(src, &buf); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+		return err
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	fmt.Fprintf(w, mdShell, html.EscapeString(title), buf.String())
+	return nil
 }
