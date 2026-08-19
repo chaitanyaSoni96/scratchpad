@@ -38,6 +38,7 @@
       <div class="row">
         {{if .Preview.Dir}}<time>{{.Preview.ModTime.Format "Jan 2 15:04"}}</time>{{else}}<span></span>{{end}}
         <span class="row-right">
+          {{if gt .OpenNotes 0}}<span class="notes-badge" title="open review notes">{{.OpenNotes}} open</span>{{end}}
           <span class="badge">{{.Count}} {{.Unit}}</span>
           {{with .Unwatch}}
           <button class="delete" hx-delete="/watch/{{.Path}}"
@@ -64,7 +65,10 @@
       </div>
       <div class="row">
         <time>{{.PageMod.Format "Jan 2 15:04"}}</time>
-        <span class="row-right"><span class="fsize">{{size .PageSize}}</span></span>
+        <span class="row-right">
+          {{if gt .OpenNotes 0}}<span class="notes-badge" title="open review notes">{{.OpenNotes}} open</span>{{end}}
+          <span class="fsize">{{size .PageSize}}</span>
+        </span>
       </div>
     </div>
   </article>
@@ -84,6 +88,7 @@
       <div class="row">
         <time>{{.Artifact.ModTime.Format "Jan 2 15:04"}}</time>
         <span class="row-right">
+          {{if gt .OpenNotes 0}}<span class="notes-badge" title="open review notes">{{.OpenNotes}} open</span>{{end}}
           <span class="fsize">{{size .Artifact.Size}}</span>
           {{if .Unwatch}}
           {{if ne .Unwatch.Path .Artifact.RelPath}}

@@ -1,0 +1,298 @@
+/* Artifact annotations — injected into an arbitrary artifact's own document
+   alongside annotator.js (see that file's header). Everything here is
+   namespaced `anno-` so it neither leaks into the artifact's styling nor
+   gets accidentally overridden by it (an artifact's own `.marker`, `.box`,
+   `.bubble`, etc. must never collide with ours).
+
+   Ported from the mockup's "highlights + markers", "element picker" and
+   "bubble" sections (~line 238, 310, 313-436 of style.css respectively).
+   The chrome/docbar/panel/statusbar sections are NOT here — that's the
+   parent scratchpad page's chrome, owned by another agent.
+
+   Custom properties are prefixed --anno- for the same reason: defining them
+   on :root is unavoidable (mark.anno-mark lives inside the artifact's own
+   content, outside #__anno-layer, so it can't read layer-scoped variables),
+   but a --anno- prefix makes collision with an artifact's own tokens
+   vanishingly unlikely. */
+
+:root {
+  --anno-ink: #6fd0e2;
+  --anno-ink-soft: rgba(111, 208, 226, 0.16);
+  --anno-ink-line: rgba(111, 208, 226, 0.55);
+  --anno-accent: #ffb454;
+  --anno-danger: #ff6b6b;
+  --anno-bg: #101014;
+  --anno-surface: #18181f;
+  --anno-border: #2a2a35;
+  --anno-text: #e8e8ee;
+  --anno-muted: #8b8b9a;
+  --anno-mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace;
+}
+@media (prefers-color-scheme: light) {
+  :root:not([data-anno-theme="dark"]) {
+    --anno-ink: #0d7b91;
+    --anno-ink-soft: rgba(13, 123, 145, 0.13);
+    --anno-ink-line: rgba(13, 123, 145, 0.5);
+    --anno-accent: #b6690a;
+    --anno-danger: #c0392b;
+    --anno-bg: #f6f5f2;
+    --anno-surface: #ffffff;
+    --anno-border: #e2e0da;
+    --anno-text: #1c1c22;
+    --anno-muted: #77756e;
+  }
+}
+
+/* ---------------------------------------------------------------- layer */
+
+/* Positioning is also set inline by annotator.js (belt and suspenders —
+   script and stylesheet are injected together but load order isn't
+   guaranteed). Typography is reset explicitly here and on .anno-bubble
+   below: this element must never inherit font/color/line-height/direction
+   from the artifact's own body rules. */
+#__anno-layer {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 0;
+  height: 0;
+  z-index: 2147483000;
+  font: 13px/1.4 var(--anno-mono);
+  color: var(--anno-text);
+  text-align: left;
+  direction: ltr;
+}
+#__anno-layer, #__anno-layer * {
+  box-sizing: border-box;
+}
+#__anno-layer button {
+  font: inherit;
+  cursor: pointer;
+}
+
+/* -------------------------------------------------- highlights + markers */
+
+/* Element highlights are drawn as boxes in the layer rather than as an
+   outline on the element itself: outlines don't reliably paint on table
+   rows or SVG groups, either of which might be annotated. Children of the
+   layer are position:absolute so they scroll with the document for free —
+   annotator.js places them in layer-local (document) coordinates. */
+.anno-box {
+  position: absolute;
+  border: 2px solid var(--anno-ink-line);
+  border-radius: 3px;
+  background: var(--anno-ink-soft);
+  pointer-events: none;
+}
+.anno-box.active { border-color: var(--anno-ink); }
+
+.anno-pick {
+  position: absolute;
+  display: none;
+  border: 2px dashed var(--anno-ink);
+  border-radius: 3px;
+  pointer-events: none;
+}
+
+/* mark.anno-mark lives inside the artifact's own content (it wraps real
+   text nodes), so — unlike everything else in this file — it cannot be
+   scoped under #__anno-layer. The class-qualified selector (specificity
+   0,1,1) beats a bare `mark` rule the artifact might define (0,0,1), and
+   every visual property that matters is set explicitly so nothing artifact
+   CSS declares for bare `mark` wins by inheritance either. */
+mark.anno-mark {
+  background: var(--anno-ink-soft);
+  color: inherit;
+  border-bottom: 2px solid var(--anno-ink-line);
+  padding: 0.05em 0;
+  border-radius: 2px;
+  font: inherit;
+}
+mark.anno-mark.active { border-bottom-color: var(--anno-ink); }
+
+@keyframes anno-flash {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(111, 208, 226, 0); }
+  20%, 60% { box-shadow: 0 0 0 6px var(--anno-ink-soft); }
+}
+.anno-flash { animation: anno-flash 1.1s ease-out; }
+
+.anno-marker {
+  position: absolute;
+  pointer-events: auto;
+  width: 1.35rem;
+  height: 1.35rem;
+  margin: 0 0 0 -1.9rem; /* the "gutter": shifts the chip left of the coordinate JS set */
+  border-radius: 50%;
+  border: 1px solid var(--anno-ink-line);
+  background: var(--anno-bg);
+  color: var(--anno-ink);
+  font: 600 0.72rem/1.25rem var(--anno-mono);
+  text-align: center;
+  padding: 0;
+  transition: transform 0.12s ease, background 0.12s ease;
+}
+.anno-marker:hover, .anno-marker.active {
+  background: var(--anno-ink);
+  color: var(--anno-bg);
+  transform: scale(1.12);
+}
+/* resolved notes: dimmed check chips — a returning reviewer walks exactly
+   these to check the agent's claims */
+.anno-marker.done {
+  border-color: var(--anno-border);
+  color: var(--anno-muted);
+}
+.anno-marker.done:hover, .anno-marker.done.active {
+  background: var(--anno-muted);
+  border-color: var(--anno-muted);
+  color: var(--anno-bg);
+}
+
+/* ------------------------------------------------------------ picker/cursor */
+
+/* Two separate classes, not one: element mode wants a crosshair over
+   anything pickable, text mode wants a text caret over the prose. Added/
+   removed via classList so the artifact's own body classes are never
+   clobbered (a plain body.className = "…" would erase them). */
+body.anno-annotating-element,
+body.anno-annotating-element * {
+  cursor: crosshair;
+}
+body.anno-annotating-text {
+  cursor: text;
+}
+
+/* ---------------------------------------------------------------- bubble */
+
+/* The inline comment bubble: lives in the layer, in the same content-
+   coordinate space as the markers, so it scrolls with the document. One
+   open at a time. Explicit font/color/line-height/direction again, for the
+   same reason as #__anno-layer — must never inherit from the artifact. */
+.anno-bubble {
+  position: absolute;
+  pointer-events: auto;
+  z-index: 20;
+  width: 17rem;
+  max-width: calc(100vw - 2rem);
+  background: var(--anno-surface);
+  border: 1px solid var(--anno-ink-line);
+  border-radius: 8px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+  padding: 0.55rem 0.65rem;
+  font: 0.82rem/1.5 var(--anno-mono);
+  color: var(--anno-text);
+  text-align: left;
+  direction: ltr;
+}
+/* The pointer notch aims at the note's gutter number, whichever way the
+   bubble sat: right edge when it lives in the margin left of the anchor
+   (the preferred, overlap-free spot), top when it fell below the marker,
+   bottom when it went above, left when it had to sit right of the marker.
+   Which two borders show is what makes the rotated square point. */
+.anno-bubble::before {
+  content: "";
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  background: var(--anno-surface);
+  transform: rotate(45deg);
+}
+.anno-bubble.anno-from-right::before { right: -6px; top: 14px; border-right: 1px solid var(--anno-ink-line); border-top: 1px solid var(--anno-ink-line); }
+.anno-bubble.anno-from-left::before { left: -6px; top: 14px; border-left: 1px solid var(--anno-ink-line); border-bottom: 1px solid var(--anno-ink-line); }
+.anno-bubble.anno-from-top::before { top: -6px; left: 14px; border-left: 1px solid var(--anno-ink-line); border-top: 1px solid var(--anno-ink-line); }
+.anno-bubble.anno-from-bottom::before { bottom: -6px; left: 14px; border-right: 1px solid var(--anno-ink-line); border-bottom: 1px solid var(--anno-ink-line); }
+
+.anno-bubble-head { display: flex; align-items: center; gap: 0.5rem; white-space: nowrap; }
+.anno-bubble-when {
+  color: var(--anno-muted);
+  font-size: 0.7rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+/* both carry margin-left:auto — whichever comes first (delete when present,
+   else close) absorbs the flex space, so close always sits at the right
+   edge without knowing whether delete is present */
+.anno-bubble-close {
+  margin-left: auto;
+  background: none;
+  border: 0;
+  color: var(--anno-muted);
+  font-size: 0.8rem;
+  padding: 0 0.2rem;
+}
+.anno-bubble-close:hover { color: var(--anno-text); }
+.anno-bubble-del {
+  margin-left: auto;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  color: var(--anno-muted);
+  font-size: 0.7rem;
+  padding: 0 0.3rem;
+}
+.anno-bubble-del:hover { color: var(--anno-danger); border-color: var(--anno-danger); }
+
+.anno-bubble-body { margin: 0.4rem 0 0.2rem; white-space: pre-wrap; }
+/* the body doubles as the editor (composing and editing alike) — it must
+   look exactly like the read-only preview did, so no chrome beyond the caret */
+.anno-bubble-body[contenteditable] { outline: none; cursor: text; min-height: 1.2em; }
+.anno-bubble-body[contenteditable]:empty::before { content: attr(data-ph); color: var(--anno-muted); }
+.anno-bubble-meta { margin: 0.3rem 0 0; font-size: 0.68rem; color: var(--anno-muted); word-break: break-all; }
+
+/* the check-mark save chip: bottom-right, present only while the text is unsaved */
+.anno-bubble-save { display: none; }
+.anno-bubble.anno-dirty { padding-bottom: 2rem; }
+.anno-bubble.anno-dirty .anno-bubble-save {
+  display: block;
+  position: absolute;
+  right: 0.45rem;
+  bottom: 0.45rem;
+  width: 1.5rem;
+  height: 1.5rem;
+  border-radius: 50%;
+  border: 1px solid var(--anno-ink-line);
+  background: var(--anno-ink);
+  color: var(--anno-bg);
+  font: 600 0.8rem/1.35rem var(--anno-mono);
+  text-align: center;
+  padding: 0;
+}
+.anno-bubble.anno-dirty .anno-bubble-save:hover { transform: scale(1.1); }
+
+/* the thread under a note: agent replies and resolve/reopen events */
+.anno-reply {
+  margin-top: 0.45rem;
+  padding: 0.35rem 0.45rem;
+  background: var(--anno-bg);
+  border: 1px solid var(--anno-border);
+  border-radius: 6px;
+  font-size: 0.78rem;
+}
+.anno-reply.agent { border-left: 2px solid var(--anno-ink-line); }
+.anno-reply.user { border-left: 2px solid var(--anno-accent); }
+.anno-reply-head { display: flex; align-items: baseline; gap: 0.45rem; font-size: 0.68rem; color: var(--anno-muted); }
+.anno-reply-head .anno-who.agent { color: var(--anno-ink); font-weight: 600; }
+.anno-reply-head .anno-who.user { color: var(--anno-accent); font-weight: 600; }
+.anno-reply-head .anno-act.reopen { color: var(--anno-danger); }
+.anno-reply-head .anno-when { margin-left: auto; }
+.anno-reply-body { margin: 0.2rem 0 0; white-space: pre-wrap; }
+
+.anno-bubble-actions { display: flex; align-items: center; gap: 0.5rem; margin-top: 0.5rem; }
+.anno-bubble-reopen {
+  background: none;
+  border: 1px solid var(--anno-border);
+  border-radius: 4px;
+  color: var(--anno-muted);
+  font-size: 0.75rem;
+  padding: 0.1rem 0.5rem;
+}
+.anno-bubble-reopen:hover { color: var(--anno-danger); border-color: var(--anno-danger); }
+.anno-bubble-actions-hint { font-size: 0.68rem; color: var(--anno-muted); }
+
+/* ------------------------------------------------------- focus + motion */
+
+#__anno-layer :focus-visible { outline: 2px solid var(--anno-accent); outline-offset: 2px; }
+@media (prefers-reduced-motion: reduce) {
+  .anno-flash, .anno-marker { animation-duration: 0.001ms !important; transition-duration: 0.001ms !important; }
+}

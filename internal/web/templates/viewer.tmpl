@@ -1,19 +1,52 @@
-<div class="overlay" id="overlay">
+<div class="overlay" id="overlay"{{if .Doc}} data-doc="{{.Doc}}" data-mode="{{.Mode}}"{{end}}>
   <header>
     <h1><a href="/">scratchpad</a>{{range .Crumbs}}<span class="crumb-sep">/</span><span class="crumb-wrap"><span class="sibs" hx-get="/fragments/siblings?path={{urlquery .Rel}}" hx-trigger="mouseenter once from:closest .crumb-wrap"></span><a class="crumb" href="{{.Href}}">{{.Name}}</a></span>{{end}}<span class="crumb-sep">/</span><span class="crumb-wrap"><span class="sibs" hx-get="/fragments/siblings?path={{urlquery .Path}}" hx-trigger="mouseenter once from:closest .crumb-wrap"></span><span class="crumb">{{.Title}}</span></span></h1>
     <div class="overlay-actions">
+      {{if .Doc}}
+      <button class="tool" id="annobtn" aria-pressed="false" title="annotate (e)">✎ <span class="tool-label">annotate</span></button>
+      <button class="tool" id="panelbtn" aria-pressed="false" title="notes panel (n)">▤ <span id="panelcount">0</span></button>
+      {{end}}
       <span class="fsize">{{size .Size}}</span>
       <a href="{{.URL}}" target="_blank" rel="noopener" title="open in new tab">↗ tab</a>
       <button class="close" title="close (Esc)"
               hx-on:click="viewerClose()">✕</button>
     </div>
   </header>
-  <!-- Deliberate open action: same trust as the open-in-tab link, so
-       same-origin (localStorage etc.) is allowed; top-navigation stays
-       blocked so the artifact can't navigate the scratchpad page away. -->
-  <iframe src="{{.URL}}?v={{.ModTime}}" title="{{.Title}}"
-          onload="this.classList.add('loaded')" onerror="this.classList.add('loaded')"
-          sandbox="allow-scripts allow-same-origin allow-forms allow-modals allow-popups allow-downloads"></iframe>
+  {{if .Docs}}
+  <!-- Doc switcher: general viewer chrome for any multi-document artifact,
+       shown regardless of whether any document has notes. Each chip carries
+       its own document's open count — notes are per document. -->
+  <div class="docbar">
+    <div class="docchips" role="tablist" aria-label="documents in this artifact">
+      {{range .Docs}}
+      <button class="chip" hx-get="{{.Href}}" hx-target="#viewer" role="tab"
+              aria-selected="{{if .Current}}true{{else}}false{{end}}">{{.Label}}{{if gt .Open 0}}<span class="dot">{{.Open}} open</span>{{end}}</button>
+      {{end}}
+    </div>
+    <div class="banners" id="banners"></div>
+  </div>
+  {{end}}
+  <div class="stage">
+    <!-- Deliberate open action: same trust as the open-in-tab link, so
+         same-origin (localStorage etc.) is allowed; top-navigation stays
+         blocked so the artifact can't navigate the scratchpad page away.
+         Same-origin is also what lets annotations.js inject the annotator
+         into this document — see /static/annotations.js. -->
+    <iframe src="{{.URL}}?v={{.ModTime}}" title="{{.Title}}"
+            onload="this.classList.add('loaded')" onerror="this.classList.add('loaded')"
+            sandbox="allow-scripts allow-same-origin allow-forms allow-modals allow-popups allow-downloads"></iframe>
+    {{if .Doc}}
+    <aside class="panel collapsed" id="panel" aria-label="annotations">
+      <div class="panel-head">
+        <span class="panel-title">notes</span>
+        <button class="panel-collapse" id="panelclose" title="collapse panel (reopen: edge tab, ▤, or n)">✕</button>
+      </div>
+      <div class="panel-body" id="panelbody"></div>
+    </aside>
+    <!-- Persistent way back once the panel is collapsed (the default view). -->
+    <button class="paneltab" id="paneltab" title="expand notes panel (n)">▤ <span id="paneltabcount">0</span></button>
+    {{end}}
+  </div>
 </div>
 <script>
   (function () {

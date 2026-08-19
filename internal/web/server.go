@@ -111,6 +111,50 @@ type card struct {
 	// instead of embedding it.
 	PreviewBytes int64
 	Heavy        bool
+	// OpenNotes is the number of open review notes under the tile's document
+	// (or documents, for a project/collection tile). Stamped by
+	// withNoteCounts after the cards are built, never threaded through the
+	// individual card constructors above.
+	OpenNotes int
+}
+
+// withNoteCounts stamps each tile with the open notes under it. One walk of
+// the sidecar tree per page render, not one per tile: OpenNoteCount would
+// re-walk for every card on the page.
+func withNoteCounts(cards []card) []card {
+	docs, err := store.WalkNotes("")
+	if err != nil {
+		return cards
+	}
+	open := map[string]int{}
+	for _, d := range docs {
+		for _, a := range d.Notes.Annotations {
+			if a.Status == "open" {
+				open[d.Doc]++
+			}
+		}
+	}
+	for i := range cards {
+		var prefix string
+		switch cards[i].Kind {
+		case "artifact":
+			prefix = cards[i].Artifact.RelPath()
+		case "page":
+			prefix = strings.TrimPrefix(cards[i].PageHref, "/a/")
+		case "project":
+			prefix = strings.TrimPrefix(cards[i].Href, "/p/")
+		default:
+			continue
+		}
+		sum := 0
+		for doc, n := range open {
+			if doc == prefix || strings.HasPrefix(doc, prefix+"/") {
+				sum += n
+			}
+		}
+		cards[i].OpenNotes = sum
+	}
+	return cards
 }
 
 // Card previews are eager by design (see list.tmpl: a lazy iframe that starts
@@ -491,14 +535,14 @@ func handleFolderPage(w http.ResponseWriter, r *http.Request) {
 func buildListView(f string) (listView, error) {
 	view := listView{Folder: f}
 	if a, isCollection := resolveCollection(f); isCollection {
-		view.Cards = pageCards(a)
+		view.Cards = withNoteCounts(pageCards(a))
 		return view, nil
 	}
 	artifacts, err := store.List()
 	if err != nil {
 		return view, err
 	}
-	view.Cards = buildCards(artifacts, f)
+	view.Cards = withNoteCounts(buildCards(artifacts, f))
 	return view, nil
 }
 
@@ -636,6 +680,49 @@ type viewerView struct {
 	// re-render actually reloads it instead of idiomorph leaving an
 	// unchanged src attribute (and therefore the iframe) untouched
 	Crumbs []crumb
+	Doc    string    // store path of the annotatable document, "" when there is none
+	Mode   string    // "element" | "text"
+	Docs   []docChip // doc-switcher chips; nil unless the artifact has >1 document
+}
+
+// docChip is one entry in the viewer's doc switcher: a top-level page of a
+// multi-document artifact, carrying its own document's open note count (the
+// switcher is general viewer chrome, shown on any multi-document artifact,
+// but the count is annotation state).
+type docChip struct {
+	Label   string // file name without extension
+	Href    string // /fragments/viewer/<rel>
+	Open    int    // open notes on that document
+	Current bool
+}
+
+// docMode reports the annotator mode for a store-relative document path:
+// markdown docs are annotated as text ranges, everything else (html) as
+// picked elements.
+func docMode(doc string) string {
+	if strings.HasSuffix(strings.ToLower(doc), ".md") {
+		return "text"
+	}
+	return "element"
+}
+
+// docChips builds the doc-switcher chips for artifact a, marking cur as the
+// page currently being viewed. Returns nil when the artifact has only one
+// top-level page — the switcher is only shown for multi-document artifacts.
+func docChips(a store.Artifact, cur string) []docChip {
+	if len(a.Pages) <= 1 {
+		return nil
+	}
+	chips := make([]docChip, len(a.Pages))
+	for i, p := range a.Pages {
+		chips[i] = docChip{
+			Label:   strings.TrimSuffix(p, filepath.Ext(p)),
+			Href:    "/fragments/viewer/" + a.RelPath() + "/" + p,
+			Open:    store.OpenNoteCount(a.RelPath() + "/" + p),
+			Current: p == cur,
+		}
+	}
+	return chips
 }
 
 func handleViewerFragment(w http.ResponseWriter, r *http.Request) {
@@ -650,6 +737,8 @@ func handleViewerFragment(w http.ResponseWriter, r *http.Request) {
 				Title:  strings.TrimSuffix(segs[len(segs)-1], filepath.Ext(segs[len(segs)-1])),
 				Path:   raw,
 				Crumbs: crumbs(strings.Join(segs[:len(segs)-1], "/")),
+				Doc:    raw, // loose markdown is annotatable too; it never gets doc-switcher chips
+				Mode:   docMode(raw),
 			}
 			for i := range view.Crumbs {
 				view.Crumbs[i].Last = false
@@ -676,6 +765,9 @@ func handleViewerFragment(w http.ResponseWriter, r *http.Request) {
 		view.Path = a.RelPath()
 		view.Size = a.Size
 		view.ModTime = a.ModTime.Unix()
+		view.Doc = a.RelPath() + "/" + a.Entry
+		view.Mode = docMode(a.Entry)
+		view.Docs = docChips(a, a.Entry)
 	} else {
 		// Only top-level html pages get a viewer; other files just serve.
 		page := false
@@ -694,6 +786,9 @@ func handleViewerFragment(w http.ResponseWriter, r *http.Request) {
 			view.Size = fi.Size()
 			view.ModTime = fi.ModTime().Unix()
 		}
+		view.Doc = a.RelPath() + "/" + file
+		view.Mode = docMode(file)
+		view.Docs = docChips(a, file)
 	}
 	if err := tmpl.ExecuteTemplate(w, "viewer.tmpl", view); err != nil {
 		log.Printf("render viewer: %v", err)
