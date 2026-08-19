@@ -795,6 +795,50 @@
   }
   function onDocMouseLeave() { hidePick(); }
 
+  // Whatever the open bubble's composer currently holds, unsaved. The class
+  // is kept in sync by the bubble's own `input` handler (see syncDirty), so
+  // reading it back is cheaper — and always more current — than recomputing
+  // the comparison from notesArr here.
+  function bubbleDirty() {
+    if (!layer) return false;
+    var b = layer.querySelector(".anno-bubble");
+    return !!b && b.className.indexOf("anno-dirty") >= 0;
+  }
+
+  // Clicking away from a bubble dismisses it — but only when there is
+  // nothing unsaved in it. A composer with text in it, or an edit that
+  // hasn't been saved, stays put: closing discards, and a stray click must
+  // never be what throws typing away. Esc and ✕ stay the deliberate discard.
+  //
+  // Bound on mousedown rather than click so it settles before anything else
+  // this gesture triggers: in text mode the selection's mouseup opens a new
+  // draft, and in element mode the click picks an element — both would
+  // otherwise race a click-phase dismissal of the bubble they just opened.
+  function onDocMouseDown(e) {
+    if (!bubbleId) return;
+    if (closestEl(e.target, ".anno-bubble")) return; // inside the bubble: typing or selecting
+    if (closestEl(e.target, ".anno-marker")) return; // markers own their own toggle
+    if (bubbleDirty()) return;
+    dismissBubble();
+  }
+
+  // The dismissal itself. A draft has a marker of its own, so dropping it
+  // needs the full render; an existing note's bubble does not — pulling just
+  // the bubble node avoids clearLayer()'s unwrap/rewrap of every <mark>,
+  // which would rewrite document text nodes under a selection the human is
+  // in the middle of dragging out.
+  function dismissBubble() {
+    if (draftId && draftId === bubbleId) {
+      discardDraft();
+      guardedRender();
+      return;
+    }
+    bubbleId = null;
+    var b = layer && layer.querySelector(".anno-bubble");
+    if (b && b.parentNode) b.parentNode.removeChild(b);
+    notifyState();
+  }
+
   function onDocClick(e) {
     var bub = closestEl(e.target, ".anno-bubble");
     if (bub) {
@@ -962,6 +1006,7 @@
     document.addEventListener("keydown", onKeyDown, true);
     document.addEventListener("mousemove", onDocMouseMove);
     document.addEventListener("mouseleave", onDocMouseLeave);
+    document.addEventListener("mousedown", onDocMouseDown);
     document.addEventListener("click", onDocClick);
     document.addEventListener("mouseup", onDocMouseUp);
 
@@ -988,6 +1033,7 @@
     document.removeEventListener("keydown", onKeyDown, true);
     document.removeEventListener("mousemove", onDocMouseMove);
     document.removeEventListener("mouseleave", onDocMouseLeave);
+    document.removeEventListener("mousedown", onDocMouseDown);
     document.removeEventListener("click", onDocClick);
     document.removeEventListener("mouseup", onDocMouseUp);
 
