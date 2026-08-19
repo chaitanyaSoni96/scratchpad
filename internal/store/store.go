@@ -22,7 +22,7 @@ const RootEnv = "SCRATCHPAD_ROOT"
 type Artifact struct {
 	Project string // slash-separated project path, "" for root-level artifacts
 	Name    string
-	Dir     string // absolute path (may be or traverse a symlink)
+	Dir     string   // absolute path (may be or traverse a symlink)
 	Entry   string   // entry html filename
 	Pages   []string // all top-level html files, sorted
 	Size    int64    // total bytes of all files in the artifact

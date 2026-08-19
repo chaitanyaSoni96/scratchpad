@@ -241,8 +241,8 @@ func TestListAndResolvePath(t *testing.T) {
 	mk("flat/assets/deep/tex.png", "x") // asset subtree, not an artifact
 	mk("x/y/z/art/index.html", "<p>")
 	mk("junk/notes.txt", "x")
-	mk(".git/index.html", "<p>")     // built-in ignore: never scanned
-	mk(".agents/index.html", "<p>")  // ordinary dot-folder: shown
+	mk(".git/index.html", "<p>")    // built-in ignore: never scanned
+	mk(".agents/index.html", "<p>") // ordinary dot-folder: shown
 
 	list, err := List()
 	if err != nil {

@@ -74,12 +74,12 @@ deep/nested
 		isDir     bool
 		want      bool
 	}{
-		{proj, "uploads", true, false},         // bare name matches at any depth
-		{proj, "uploads", false, true},         // "uploads/" is directories only
-		{proj, "keep", true, true},             // untouched
-		{proj, "build.log", false, false},      // glob on the basename
-		{root, "toplevel", true, false},        // anchored at the ignore file's dir
-		{proj, "toplevel", true, true},         // ...so not here
+		{proj, "uploads", true, false},                      // bare name matches at any depth
+		{proj, "uploads", false, true},                      // "uploads/" is directories only
+		{proj, "keep", true, true},                          // untouched
+		{proj, "build.log", false, false},                   // glob on the basename
+		{root, "toplevel", true, false},                     // anchored at the ignore file's dir
+		{proj, "toplevel", true, true},                      // ...so not here
 		{filepath.Join(proj, "deep"), "nested", true, true}, // "deep/nested" is anchored at root
 		{root, "deep", true, true},
 	}
