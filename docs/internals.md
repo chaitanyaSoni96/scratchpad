@@ -49,6 +49,13 @@ the delete endpoint. Clicking a card opens the artifact in a viewer overlay
 with same-origin allowed — a deliberate open grants the same trust as the ↗
 new-tab link.
 
+One consequence is worth knowing when an artifact misbehaves: a preview
+iframe has an opaque origin and the server sends no CORS headers, so an
+artifact whose JS `fetch`es a sibling data file works in the viewer and in a
+direct tab but fails in its card preview. Assets pulled in by markup (`img`,
+`link`, `script src`) are unaffected — inline the data a page needs at load,
+or expect a blank tile.
+
 Name validation is split by intent. `validateName` guards what the store
 *creates* (publish, watch) with the strict `^[a-zA-Z0-9][a-zA-Z0-9._-]{0,99}$`;
 lookups of what already exists (URLs, delete, unwatch) are looser, because a
