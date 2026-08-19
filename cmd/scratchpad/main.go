@@ -5,6 +5,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io/fs"
@@ -45,6 +46,9 @@ Usage:
   scratchpad watches
   scratchpad list [-json]
   scratchpad delete -name <name> [-project <p/ath>]
+  scratchpad notes [<path>] [-all] [-json]
+  scratchpad notes resolve <doc-path> <id> -m "what changed"
+  scratchpad notes reply <doc-path> <id> -m "text"
 
 publish is CREATE-ONLY: it fails if the name already exists. -dir publishes a
 whole folder (any files; needs a top-level .html). Pass "-" as -html to read
@@ -56,8 +60,32 @@ unwatch removes that link and nothing else — the source folder is never
 touched — and watches lists every link currently in the scratchpad. Files
 inside a watched folder cannot be deleted through scratchpad at all.
 
+notes are review feedback a human leaves in the viewer, anchored to an
+element or text range. "notes <path>" reports open notes for a document, an
+artifact, or a folder (omit <path> for the whole store); -all also shows
+resolved notes, -json prints the raw structure instead of the markdown
+report. Fix each open note, then close it with "resolve" and a one-line
+summary of the change; use "reply" instead when a note needs clarification
+rather than a fix. There is deliberately no create, edit, delete, or reopen:
+an agent can answer and close feedback but can never author it, erase it, or
+overrule a human's reopen — those stay the human's, in the web UI.
+
 Artifacts land in ~/.scratchpad (override: SCRATCHPAD_ROOT) and are served
 at http://localhost:8737/a/<project>/<name>/ by scratchpad-web.`
+
+const notesUsage = `scratchpad notes [<path>] [-all] [-json]
+scratchpad notes resolve <doc-path> <id> -m "what changed"
+scratchpad notes reply   <doc-path> <id> -m "text"
+
+<path> is a document, an artifact, or a folder (omit it for the whole
+store). -all includes resolved notes; -json prints raw JSON instead of the
+markdown report. resolve closes a note with a summary of what changed;
+reply comments without closing (e.g. a clarifying question). -m/-message is
+required for both.
+
+There is no create, edit, delete, or reopen here: an agent can answer and
+close feedback but can never author it, erase it, or overrule a human's
+reopen — those are the human's, in the web UI.`
 
 func readInput(path string) ([]byte, error) {
 	if path == "-" {
@@ -236,6 +264,25 @@ func main() {
 			fatal(err)
 		}
 		fmt.Println("deleted")
+	case "notes":
+		if len(os.Args) > 2 && os.Args[2] == "resolve" {
+			notesResolve(os.Args[3:])
+			break
+		}
+		if len(os.Args) > 2 && os.Args[2] == "reply" {
+			notesReply(os.Args[3:])
+			break
+		}
+		// Anything else is a <path> — except the human-only verbs, which are
+		// absent on purpose and so must say so. Read as a path they would
+		// quietly report "no notes", which reads like the note is gone rather
+		// than like the command does not exist.
+		if len(os.Args) > 2 && humanOnlyVerbs[os.Args[2]] {
+			fmt.Fprintf(os.Stderr, "scratchpad notes has no %q: creating, editing, reopening and deleting notes are the human's, in the web UI.\n\n%s\n",
+				os.Args[2], notesUsage)
+			os.Exit(2)
+		}
+		notesRead(os.Args[2:])
 	default:
 		fmt.Fprintln(os.Stderr, usage)
 		os.Exit(2)
@@ -260,4 +307,145 @@ func printWatches(empty string) {
 func fatal(err error) {
 	fmt.Fprintln(os.Stderr, "error:", err)
 	os.Exit(1)
+}
+
+// notesRead implements `scratchpad notes [<path>] [-all] [-json]`. <path> may
+// be a document, an artifact, a project folder, or omitted entirely (the
+// whole store), and — like watch/unwatch — may appear before or after the
+// flags.
+// humanOnlyVerbs are the note verbs the CLI deliberately does not implement:
+// an agent can answer and close feedback but can never author it, erase it, or
+// overrule a human's reopen. Named here only so a typo'd attempt gets that
+// answer instead of being silently read as a path.
+var humanOnlyVerbs = map[string]bool{
+	"create": true, "new": true, "add": true,
+	"edit": true, "update": true,
+	"delete": true, "rm": true, "remove": true,
+	"reopen": true,
+}
+
+func notesRead(args []string) {
+	fs := flag.NewFlagSet("notes", flag.ExitOnError)
+	all := fs.Bool("all", false, "include resolved notes")
+	asJSON := fs.Bool("json", false, "raw JSON instead of the markdown report")
+	var path string
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		path, args = args[0], args[1:]
+	}
+	fs.Parse(args)
+	if path == "" && fs.NArg() > 0 {
+		path = fs.Arg(0)
+	}
+	docs, err := store.WalkNotes(path)
+	if err != nil {
+		fatal(err)
+	}
+	if *asJSON {
+		if !*all {
+			docs = openOnly(docs)
+		}
+		if docs == nil {
+			docs = []store.DocNotes{}
+		}
+		json.NewEncoder(os.Stdout).Encode(docs)
+		return
+	}
+	fmt.Print(store.FormatReport(docs, store.ReportOptions{Path: path, All: *all}))
+}
+
+// openOnly filters docs down to their open annotations, dropping any
+// document left with none — the same shape FormatReport's default view
+// shows, so --json and the report agree on what they display.
+func openOnly(docs []store.DocNotes) []store.DocNotes {
+	var out []store.DocNotes
+	for _, d := range docs {
+		var open []store.Annotation
+		for _, a := range d.Notes.Annotations {
+			if a.Status == "open" {
+				open = append(open, a)
+			}
+		}
+		if len(open) > 0 {
+			nf := d.Notes
+			nf.Annotations = open
+			out = append(out, store.DocNotes{Doc: d.Doc, Notes: nf})
+		}
+	}
+	return out
+}
+
+// notesResolve implements `scratchpad notes resolve <doc-path> <id> -m msg`.
+func notesResolve(args []string) {
+	doc, id, msg := parseNoteArgs("resolve", args)
+	a, err := store.ResolveNote(doc, id, msg)
+	if err != nil {
+		noteFatal(err, doc)
+	}
+	fmt.Printf("resolved %s on %s: %s\n", id, doc, oneLineTrunc(a.Body, 80))
+}
+
+// notesReply implements `scratchpad notes reply <doc-path> <id> -m msg`.
+func notesReply(args []string) {
+	doc, id, msg := parseNoteArgs("reply", args)
+	_, err := store.ReplyNote(doc, id, msg)
+	if err != nil {
+		noteFatal(err, doc)
+	}
+	fmt.Printf("replied to %s on %s\n", id, doc)
+}
+
+// parseNoteArgs pulls the two positional args (doc-path, id) — which, like
+// watch/unwatch, may sit before or after the flags — and the required
+// -m/-message summary shared by resolve and reply. It exits 2 with
+// notesUsage on any shape error, since resolve/reply without a summary is
+// exactly the case that would leave the human with nothing to read next.
+func parseNoteArgs(verb string, args []string) (doc, id, msg string) {
+	fs := flag.NewFlagSet("notes "+verb, flag.ExitOnError)
+	m := fs.String("m", "", "summary of what changed (required)")
+	alias := fs.String("message", "", "alias for -m")
+
+	var positional []string
+	i := 0
+	for i < len(args) && len(positional) < 2 && !strings.HasPrefix(args[i], "-") {
+		positional = append(positional, args[i])
+		i++
+	}
+	fs.Parse(args[i:])
+	positional = append(positional, fs.Args()...)
+
+	if len(positional) < 2 {
+		fmt.Fprintln(os.Stderr, notesUsage)
+		os.Exit(2)
+	}
+	doc, id = positional[0], positional[1]
+	msg = *m
+	if msg == "" {
+		msg = *alias
+	}
+	if msg == "" {
+		fmt.Fprintf(os.Stderr, "error: -m is required — a %s with no summary of what changed is what the human reviewing this reads next\n", verb)
+		os.Exit(2)
+	}
+	return doc, id, msg
+}
+
+// noteFatal reports store errors from resolve/reply, special-casing
+// ErrNoteNotFound with a pointer at how to list the doc's ids.
+func noteFatal(err error, doc string) {
+	if errors.Is(err, store.ErrNoteNotFound) {
+		fmt.Fprintf(os.Stderr, "error: no such note on %s — run `scratchpad notes %s` to list its ids\n", doc, doc)
+		os.Exit(1)
+	}
+	fatal(err)
+}
+
+// oneLineTrunc folds s onto one line and truncates it to n runes, so it
+// cannot break the line it is printed inside.
+func oneLineTrunc(s string, n int) string {
+	s = strings.Join(strings.Fields(s), " ")
+	r := []rune(s)
+	if len(r) > n {
+		return string(r[:n]) + "…"
+	}
+	return s
 }
