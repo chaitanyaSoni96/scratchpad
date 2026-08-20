@@ -1,8 +1,7 @@
 # CLI
 
-The `scratchpad` binary is the only interface to the store — the web site
-reads what it writes, and agents drive it through the same commands via
-[`skill/SKILL.md`](../skill/SKILL.md).
+The `scratchpad` binary is the only interface to the store; the web site
+reads what it writes.
 
 ```bash
 scratchpad publish -name hello -dir ./hello-folder
@@ -20,8 +19,8 @@ scratchpad notes resolve <doc-path> <id> -m "what changed"
 scratchpad notes reply   <doc-path> <id> -m "text"
 ```
 
-Every publish prints the artifact URL on stdout. A warning on stderr means the
-artifact was saved but the hosting server is not running.
+Every publish prints the artifact URL on stdout. A warning on stderr means
+the artifact was saved but the hosting server is not running.
 
 ## publish
 
@@ -29,22 +28,23 @@ Copies a **snapshot**. Use it for finished output: the hosted copy is frozen,
 and later edits to the source do nothing.
 
 - `-dir` publishes a folder. It must contain at least one top-level `.html`;
-  `index.html` becomes the entry page, and several html files without an
-  `index.html` render as a multi-page collection.
+  `index.html` becomes the entry page, and several pages without an
+  `index.html` render as a multi-page collection (loose `.md` files in the
+  folder count as pages too).
 - `-html` / `-css` / `-js` publish a single page, landing as `index.html`,
   `style.css`, and `script.js`. `-` reads that file from stdin.
 - `-project` groups the artifact under a slash-separated path of any depth.
-  Each level is browsable as its own page. You cannot publish under a project
-  path that is itself an artifact — artifacts don't nest.
+  Each level is browsable as its own page. Artifacts don't nest: a project
+  path that is itself an artifact is refused.
 
 **Publishing is create-only.** A taken name is an error, never an overwrite;
-`os.Mkdir` claims the name atomically, so a race and an existing name surface
-the same way. Deleting is the user's action in the web UI — agents pick a fresh
-name instead.
+deleting is the user's action in the web UI — agents pick a fresh name
+instead.
 
-Names, project segments, and every path segment inside a published folder must
-match `^[a-zA-Z0-9][a-zA-Z0-9._-]{0,99}$`. One bad filename (`.gitignore`,
-`my file.png`) fails the whole publish, so build a clean folder.
+Names, project segments, and every path segment inside a published folder
+must match `^[a-zA-Z0-9][a-zA-Z0-9._-]{0,99}$`. One bad filename
+(`.gitignore`, `my file.png`) fails the whole publish, so build a clean
+folder.
 
 ## watch / unwatch
 
@@ -63,35 +63,25 @@ stays yours:
   container mounts `$HOME` read-only, so the web process physically cannot
   modify a watched source.
 
-Lookups of things that already exist — URLs, delete, unwatch — use looser
-validation than publish, because a watched repo names its own folders. They
-still reject traversal and control characters, and hidden paths never resolve.
+Lookups of what already exists — URLs, delete, unwatch — validate looser than
+publish (a watched repo names its own folders) but still reject traversal.
 
 ## notes
 
-```bash
-scratchpad notes [<path>] [-all] [-json]
-scratchpad notes resolve <doc-path> <id> -m "what changed"
-scratchpad notes reply   <doc-path> <id> -m "text"
-```
-
 `<path>` is a document, an artifact, or a project folder (omit it for the
-whole store). The read form reports open notes as a markdown report by
-default; `-all` includes resolved notes; `-json` prints the raw structure
-instead. `resolve` appends a reply and marks the note resolved — the normal
-way it gets closed; `reply` appends a comment (e.g. a clarifying question)
-without closing it. Both take the note's **document** path, not the
-artifact path, and the `id` the report prints; `-m`/`-message` is required
-for both.
+whole store). The read form reports open notes as a markdown report; `-all`
+includes resolved notes, `-json` prints the raw structure instead. `resolve`
+marks a note fixed with a summary — the normal way one gets closed; `reply`
+comments without closing (e.g. a clarifying question). Both take the note's
+**document** path, not the artifact path, plus the `id` the report prints;
+`-m`/`-message` is required for both.
 
-There is no `create`, `edit`, `delete`, or `reopen`: an agent can answer and
-close feedback but can never author it, erase it, or overrule the user's
-reopen — same trust tier as `delete` above, and those verbs stay the
-user's, in the web UI. Full reference, including storage, the HTTP API,
-and anchoring: [docs/notes.md](notes.md).
+There is no `create`, `edit`, `delete`, or `reopen` — those verbs are the
+user's, in the web UI. Lifecycle, storage, and the HTTP API:
+[docs/notes.md](notes.md).
 
 ## Markdown
 
-Any `.md` renders as a styled page (`?raw=1` for source). Loose `.md` files get
-their own cards, so watching a docs or plans tree gives you a browsable site of
-mockups and notes alongside the html.
+Any `.md` renders as a styled page (`?raw=1` for source). Loose `.md` files
+get their own cards, so watching a docs or plans tree gives you a browsable
+site of mockups and notes alongside the html.

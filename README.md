@@ -4,7 +4,7 @@ Self-hosted artifact hosting for coding agents. Agents publish html/css/js
 artifacts with the `scratchpad` CLI; every artifact folder under
 `~/.scratchpad` is served instantly on an auto-refreshing htmx site.
 
-![The scratchpad index: a grid of live artifact previews](docs/screenshot.png)
+![The scratchpad home page: live artifact previews alongside a watched folder, a multi-page collection, project folders, and open-note badges](docs/screenshots/index.png)
 
 ```
 ~/.scratchpad/
@@ -17,12 +17,11 @@ artifacts with the `scratchpad` CLI; every artifact folder under
         └── index.html
 ```
 
-A folder is an **artifact** when it directly contains an `.html` file — its
-whole subtree is that artifact's assets. Every folder above it is project path,
-each level browsable as its own page. The filesystem is the sole source of
-truth, so anything that writes a folder (agents, `cp -r`, this repo's CLI)
-publishes an artifact. Publishing is **create-only**: a taken name is an error,
-never an overwrite, and deleting is the user's action in the web UI.
+The filesystem is the sole source of truth: anything that writes a folder
+there (agents, `cp -r`, this repo's CLI) publishes an artifact. Publishing is
+**create-only** — a taken name is an error, never an overwrite — and deleting
+is the user's action in the web UI. Markdown is first-class: any `.md`
+renders as a styled page, so watching a docs tree gives you a browsable site.
 
 ## Run
 
@@ -43,16 +42,12 @@ the moment anything is published. `make install` runs it natively under
 make install-skill   # CLI on PATH + skill for claude/pi
 ```
 
-`scratchpad` goes on `~/.local/bin`, and an [Agent
-Skills](https://agentskills.io)-format [`skill/SKILL.md`](skill/SKILL.md)
-teaches agents to `watch` the project's `.scratchpad/` folder and then simply
-write artifact folders into it, keeping `publish` for frozen snapshots. It is
-installed to `~/.claude/skills/` and `~/.pi/agent/skills/`; any agent that
-reads Agent Skills — or just runs shell commands — works the same way.
-
-There is no MCP server. One existed early on and was removed: it duplicated the
-CLI, forced files through a JSON envelope, and split the guardrails across two
-places. `make install-skill` also clears registrations left by older installs.
+An [Agent Skills](https://agentskills.io)-format
+[`skill/SKILL.md`](skill/SKILL.md), installed to `~/.claude/skills/` and
+`~/.pi/agent/skills/`, teaches agents to `watch` the project's `.scratchpad/`
+folder and simply write artifact folders into it, keeping `publish` for
+frozen snapshots. Any agent that can run shell commands works the same way —
+there is no MCP server, on purpose.
 
 ## CLI
 
@@ -66,32 +61,28 @@ scratchpad list [-json]
 scratchpad delete -project lab/graphs -name chart
 ```
 
-Full reference, including publish-vs-watch and naming rules:
-[docs/cli.md](docs/cli.md).
-
 ## Review notes
 
-The user, reviewing an artifact in the viewer, can leave notes anchored to an
-element or a text range. Agents read them back and close the loop — never
-by editing or deleting a note, only by fixing the thing and replying:
+The user, reviewing an artifact in the viewer, leaves notes anchored to an
+element or a text range. Agents read them back and close the loop — never by
+editing or deleting a note, only by fixing the thing and replying:
+
+![Numbered gutter markers on an artifact, with an open note's bubble showing the original comment and the agent's reply](docs/screenshots/notes-viewer.png)
 
 ```bash
 scratchpad notes demo/q3-report                # open notes, markdown report
 scratchpad notes resolve demo/q3-report/index.html k7f2ac -m "moved the legend above the plot"
 ```
 
-Resolve is the agent's claim, not acceptance — the user reopens or deletes the
-note. Full reference: [docs/notes.md](docs/notes.md).
+Resolve is the agent's claim, not acceptance — the user reopens or deletes
+the note.
 
-Markdown is first-class — any `.md` renders as a styled page — so watching a
-docs or plans tree gives you a browsable site of mockups and notes.
-
-## More
+## Docs
 
 - [docs/cli.md](docs/cli.md) — every command, publish vs watch, naming rules
-- [docs/notes.md](docs/notes.md) — review notes: lifecycle, storage, CLI,
-  HTTP API, anchoring
+- [docs/notes.md](docs/notes.md) — review notes: lifecycle, storage, HTTP
+  API, anchoring
 - [docs/ignore-rules.md](docs/ignore-rules.md) — `.scratchpadignore` and what
   is hidden by default
-- [docs/internals.md](docs/internals.md) — layout, security model, deployment,
-  env vars
+- [docs/internals.md](docs/internals.md) — layout, security model,
+  deployment, env vars

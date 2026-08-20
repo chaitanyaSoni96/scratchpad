@@ -4,8 +4,8 @@
 built-in ruleset is short and covers two things only: directories whose cost
 would sink a watched repo (`.git`, `node_modules`, `.venv`, `dist`, …) and
 files whose contents shouldn't be one URL away from a server on your LAN
-(`.env*`, `.netrc`, `*.pem`, `.ssh/`, `.aws/`). Ordinary dot-folders like
-`.agents` or `.github` are content, and stay visible.
+(`.env`, `.env.*`, `.netrc`, `*.pem`, `.ssh/`, `.aws/`). Ordinary dot-folders
+like `.agents` or `.github` are content, and stay visible.
 
 Drop a **`.scratchpadignore`** at the scratchpad root or in any folder below it
 — including inside a watched source repo, next to the `.gitignore` it can pull
