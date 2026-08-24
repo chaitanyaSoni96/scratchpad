@@ -17,6 +17,11 @@ artifacts with the `scratchpad` CLI; every artifact folder under
         └── index.html
 ```
 
+Project paths nest arbitrarily deep; artifacts don't. The shallowest folder on
+a path holding an `.html` is the artifact and its whole subtree is assets — a
+subfolder with its own `.html` is served, never listed as an artifact of its
+own.
+
 The filesystem is the sole source of truth: anything that writes a folder
 there (agents, `cp -r`, this repo's CLI) publishes an artifact. Publishing is
 **create-only** — a taken name is an error, never an overwrite — and deleting

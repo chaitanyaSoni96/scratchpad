@@ -18,8 +18,9 @@ scratchpad watch .scratchpad -name <project>  # -name required: ".scratchpad" is
 ```
 
 Both lines are safe to repeat — re-watching the same folder under the same
-name is a no-op. With no top-level `.html` the folder is hosted as a project
-tree: each subfolder containing an `.html` is its own artifact.
+name is a no-op. Keep `.scratchpad/` itself free of `.html`: with no top-level
+`.html` the folder is hosted as a project tree, and the first folder down each
+path that holds an `.html` is its own artifact.
 
 From then on an artifact is just files: write
 `.scratchpad/<artifact>/index.html` plus relative css, js, images and `.md`,
@@ -69,6 +70,10 @@ erasing and reopening are the user's, in the web UI.
   opaque-origin sandbox: a `fetch()` of a sibling file fails there (it works
   in the viewer and a direct tab), and an entry page over 1 MiB draws a
   placeholder instead of a preview.
-- Artifacts cannot nest.
+- One artifact per folder: the shallowest folder on a path holding an `.html`
+  is the artifact and everything below it is its assets. A subfolder with its
+  own `.html` is *not* a second artifact, and an `.html` at the top of a
+  watched tree collapses the whole tree into one. A `-project` path that is
+  itself an artifact is refused.
 - `delete` and `unwatch` are the user's — run them only when explicitly asked,
   never to recycle a name.

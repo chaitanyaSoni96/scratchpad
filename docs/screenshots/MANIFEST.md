@@ -3,7 +3,7 @@
 Captures taken against a throwaway `SCRATCHPAD_ROOT` with hand-authored mock
 artifacts (no real user data), via `scratchpad-web` on `localhost:8899`.
 Chrome headless, driven over CDP, 1440px-wide viewport at 2x device scale
-(matching `docs/screenshot.png`); heights vary per shot to avoid dead space.
+(matching `docs/screenshots/screenshot.png`); heights vary per shot to avoid dead space.
 
 | File | Dimensions | Feature | Caption |
 | --- | --- | --- | --- |
@@ -17,7 +17,7 @@ Chrome headless, driven over CDP, 1440px-wide viewport at 2x device scale
 | `notes-report.png` | 2880x3014 | Review notes — markdown report | The notes report at `/notes/<path>`, rendered as a styled page, summarizing open and resolved notes across documents. |
 | `markdown-doc.png` | 2880x1360 | Markdown document rendering | A loose `.md` file rendered as a styled standalone page via goldmark. |
 
-`docs/screenshot.png` (the original, pre-existing capture) is left untouched.
+`docs/screenshots/screenshot.png` (the original, pre-existing capture) is left untouched.
 
 Note: `notes-panel.png` and `notes-report.png` were re-shot later than the
 rest, against a rebuilt mock. The `checkout-funnel` artifact renders slightly

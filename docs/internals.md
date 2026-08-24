@@ -28,6 +28,25 @@ that writes a folder there publishes an artifact.
   through untouched. `notes.go` is the review-notes HTTP surface
   ([notes.md](notes.md)).
 
+## Artifact resolution
+
+An artifact is any directory directly containing an `.html` file, and the
+*shallowest* such directory on a path wins: `ResolvePath` stops at the first
+one and reads the rest of the URL as a file inside it, while `List`,
+`Watches` and the folder-page walks never descend past one. Everything below
+an artifact is its assets — served as published, with ignore rules no longer
+consulted.
+
+Artifacts therefore cannot nest, and the store holds that line at both ends.
+`Publish` and `Watch` refuse a project path whose own directory holds an
+`.html`. Nesting that arrives by another route — a watched source tree, a
+`cp -r`, an agent writing straight into the root — is absorbed rather than
+refused, since the filesystem is the source of truth and there is no call to
+intercept: the inner folder simply becomes assets of the outer one. The
+visible edge case is a watched project tree that gains a top-level `.html`,
+which collapses the whole tree into one artifact and drops every artifact
+under it from the listing.
+
 ## Preview weight
 
 Card previews are eager: a lazy iframe that starts hidden may never load in

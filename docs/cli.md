@@ -35,7 +35,9 @@ and later edits to the source do nothing.
   `style.css`, and `script.js`. `-` reads that file from stdin.
 - `-project` groups the artifact under a slash-separated path of any depth.
   Each level is browsable as its own page. Artifacts don't nest: a project
-  path that is itself an artifact is refused.
+  path whose own folder holds an `.html` is refused (`watch -project` too).
+  Subfolders *inside* the published folder are not refused — they are assets,
+  even when they carry their own `.html`.
 
 **Publishing is create-only.** A taken name is an error, never an overwrite;
 deleting is the user's action in the web UI — agents pick a fresh name
@@ -52,16 +54,24 @@ folder.
 them — so every saved edit shows up live. The source stays where it is and
 stays yours:
 
-- A watched folder with no top-level `.html` is a project tree; only the
-  subfolders containing html show up as artifacts.
+- A watched folder with no top-level `.html` is a project tree; the first
+  folder down each path that holds an `.html` shows up as an artifact.
+- The shallowest `.html` on a path wins, and a tree that already nests
+  artifacts is absorbed rather than refused: the outer folder is the artifact
+  and everything below it is its assets — still served by URL, never listed as
+  a card of its own. So adding an `index.html` at the top of a watched tree
+  collapses the whole tree into one artifact and drops every artifact under it
+  from the listing.
 - The name is create-only like publish, with one exception: re-watching the
   same folder under the same name is a no-op, so the command is safe to
   repeat. Any *other* target — or a real directory of that name — is refused.
 - Watching a folder already inside the scratchpad is refused.
 - `unwatch` (or the button on any watched card) removes only the link. Files
-  inside a watched folder can't be deleted through scratchpad at all, and the
-  container mounts `$HOME` read-only, so the web process physically cannot
-  modify a watched source.
+  inside a watched folder can't be deleted through scratchpad at all, and
+  under `make web` the container mounts `$HOME` read-only, so the web process
+  physically cannot modify a watched source. The native `make install` runs
+  with your own permissions and has no such guarantee — see
+  [internals.md](internals.md#deployment).
 
 Lookups of what already exists — URLs, delete, unwatch — validate looser than
 publish (a watched repo names its own folders) but still reject traversal.
