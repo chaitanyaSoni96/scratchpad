@@ -1,15 +1,17 @@
 package store
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 // AnnotationsDir is the top-level directory holding every document's note
@@ -89,6 +91,74 @@ func annotationsRoot() (string, error) {
 	return filepath.Join(root, AnnotationsDir), nil
 }
 
+type annotationLock struct {
+	f   *os.File
+	ann *annotationFS
+}
+
+func (l *annotationLock) Close() error {
+	if l == nil || l.f == nil {
+		return nil
+	}
+	err := unix.Flock(int(l.f.Fd()), unix.LOCK_UN)
+	var closeErr error
+	if l.ann != nil {
+		closeErr = l.ann.close()
+	} else {
+		closeErr = l.f.Close()
+	}
+	if err != nil {
+		return err
+	}
+	return closeErr
+}
+
+// lockAnnotations coordinates every annotation operation with artifact
+// cleanup. Normal operations take a shared lock; Delete and Unwatch hold the
+// exclusive form across removing both content and its annotation history.
+func lockAnnotations(exclusive bool) (*annotationLock, error) {
+	ann, err := openAnnotationFS()
+	if err != nil {
+		return nil, err
+	}
+	// The store-root inode is stable even if a hostile process renames and
+	// replaces .annotations, so all operations still rendezvous on one flock.
+	f := ann.storeRoot
+	how := unix.LOCK_SH
+	if exclusive {
+		how = unix.LOCK_EX
+	}
+	if err := unix.Flock(int(f.Fd()), how); err != nil {
+		ann.close()
+		return nil, err
+	}
+	return &annotationLock{f: f, ann: ann}, nil
+}
+
+func lockDocument(ann *annotationFS, doc string) (*annotationLock, error) {
+	_, err := notesSegments(doc)
+	if err != nil {
+		return nil, err
+	}
+	locks, err := ann.openDir([]string{".locks"}, true)
+	if err != nil {
+		return nil, err
+	}
+	defer unix.Close(locks)
+	// A fixed-size key avoids filesystem name limits for deeply nested docs.
+	name := fmt.Sprintf("%x", sha256.Sum256([]byte(strings.Trim(doc, "/"))))
+	fd, err := unix.Openat(locks, name+".lock", unix.O_CREAT|unix.O_RDWR|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	f := os.NewFile(uintptr(fd), name+".lock")
+	if err := unix.Flock(int(f.Fd()), unix.LOCK_EX); err != nil {
+		f.Close()
+		return nil, err
+	}
+	return &annotationLock{f: f}, nil
+}
+
 // hasDocExt reports whether name's extension marks it as an annotatable
 // document (the last path segment of a doc path).
 func hasDocExt(name string) bool {
@@ -126,6 +196,16 @@ func notesPath(doc string) (string, error) {
 	return p + ".json", nil
 }
 
+func notesSegments(doc string) ([]string, error) {
+	if _, err := notesPath(doc); err != nil {
+		return nil, err
+	}
+	doc = strings.Trim(doc, "/")
+	segs := strings.Split(doc, "/")
+	segs[len(segs)-1] += ".json"
+	return segs, nil
+}
+
 // DocExists reports whether doc names a real, visible document: a top-level
 // page of a published or watched artifact, or a loose markdown file in a
 // project folder. It is built entirely on ResolvePath/ResolveDoc, which
@@ -156,11 +236,25 @@ func DocExists(doc string) bool {
 // on disk, so a missing file is not an error: it reports the zero
 // NotesFile{} (Rev 0, no annotations).
 func LoadNotes(doc string) (NotesFile, error) {
-	p, err := notesPath(doc)
+	guard, err := lockAnnotations(false)
 	if err != nil {
 		return NotesFile{}, err
 	}
-	data, err := os.ReadFile(p)
+	defer guard.Close()
+	lock, err := lockDocument(guard.ann, doc)
+	if err != nil {
+		return NotesFile{}, err
+	}
+	defer lock.Close()
+	return loadNotesRaw(guard.ann, doc)
+}
+
+func loadNotesRaw(ann *annotationFS, doc string) (NotesFile, error) {
+	segs, err := notesSegments(doc)
+	if err != nil {
+		return NotesFile{}, err
+	}
+	data, err := ann.readFile(segs)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return NotesFile{}, nil
@@ -179,115 +273,98 @@ func LoadNotes(doc string) (NotesFile, error) {
 // never observes a half-written sidecar. The temp file is best-effort
 // cleaned up on any failure. These files are meant to be human-readable, so
 // they are indented and newline-terminated.
-func writeNotesFile(p string, f NotesFile) error {
+func writeNotesFile(ann *annotationFS, segs []string, f NotesFile) error {
 	data, err := json.MarshalIndent(f, "", "  ")
 	if err != nil {
 		return err
 	}
 	data = append(data, '\n')
-	tmp, err := os.CreateTemp(filepath.Dir(p), ".notes-*.tmp")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-	ok := false
-	defer func() {
-		if !ok {
-			os.Remove(tmpName)
-		}
-	}()
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Chmod(tmpName, 0o644); err != nil {
-		return err
-	}
-	if err := os.Rename(tmpName, p); err != nil {
-		return err
-	}
-	ok = true
-	return nil
+	return ann.writeFile(segs, data)
 }
 
 // SaveNotes replaces doc's notes file, enforcing that doc is a real
 // document and that expectRev still matches what is on disk (optimistic
 // concurrency: the viewer PUT and the CLI's read-modify-write both go
-// through this). Saving zero annotations deletes the sidecar instead of
-// writing an empty one, keeping "has notes" a cheap stat.
+// through this). Saving zero annotations writes an empty revision tombstone;
+// WalkNotes omits it, but stale writers still observe the latest revision.
 func SaveNotes(doc string, f NotesFile, expectRev int) (NotesFile, error) {
+	guard, err := lockAnnotations(false)
+	if err != nil {
+		return NotesFile{}, err
+	}
+	defer guard.Close()
+	lock, err := lockDocument(guard.ann, doc)
+	if err != nil {
+		return NotesFile{}, err
+	}
+	defer lock.Close()
 	if !DocExists(doc) {
 		return NotesFile{}, fmt.Errorf("save notes: no such document %q", doc)
 	}
-	return saveNotesRaw(doc, f, expectRev)
+	return saveNotesRaw(guard.ann, doc, f, expectRev)
 }
 
 // saveNotesRaw is SaveNotes without the DocExists requirement, used by
 // ResolveNote/ReplyNote: an agent must be able to close out notes on a
 // document that has since changed or been removed.
-func saveNotesRaw(doc string, f NotesFile, expectRev int) (NotesFile, error) {
-	p, err := notesPath(doc)
+func saveNotesRaw(ann *annotationFS, doc string, f NotesFile, expectRev int) (NotesFile, error) {
+	segs, err := notesSegments(doc)
 	if err != nil {
 		return NotesFile{}, err
 	}
-	cur, err := LoadNotes(doc)
+	cur, err := loadNotesRaw(ann, doc)
 	if err != nil {
 		return NotesFile{}, err
 	}
 	if cur.Rev != expectRev {
 		return NotesFile{}, fmt.Errorf("%w: %q is at rev %d, not %d", ErrRevMismatch, doc, cur.Rev, expectRev)
 	}
-	if len(f.Annotations) == 0 {
-		if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
-			return NotesFile{}, err
-		}
-		annRoot, err := annotationsRoot()
-		if err != nil {
-			return NotesFile{}, err
-		}
-		pruneEmpty(annRoot, p)
-		return NotesFile{Rev: expectRev + 1}, nil
-	}
 	f.Rev = expectRev + 1
-	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-		return NotesFile{}, err
-	}
-	if err := writeNotesFile(p, f); err != nil {
+	if err := writeNotesFile(ann, segs, f); err != nil {
 		return NotesFile{}, err
 	}
 	return f, nil
 }
 
-// DeleteNotes removes all of doc's notes (its sidecar file), pruning any
-// project directories under .annotations left empty by the removal. Deleting
-// an already-noteless doc is not an error.
+// DeleteNotes removes all of doc's notes while preserving its next revision in
+// an empty tombstone. Deleting a never-annotated doc is not an error.
 func DeleteNotes(doc string) error {
-	p, err := notesPath(doc)
+	guard, err := lockAnnotations(false)
 	if err != nil {
 		return err
 	}
-	if err := os.Remove(p); err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return err
-	}
-	annRoot, err := annotationsRoot()
+	defer guard.Close()
+	lock, err := lockDocument(guard.ann, doc)
 	if err != nil {
 		return err
 	}
-	pruneEmpty(annRoot, p)
-	return nil
+	defer lock.Close()
+	cur, err := loadNotesRaw(guard.ann, doc)
+	if err != nil {
+		return err
+	}
+	if len(cur.Annotations) == 0 && cur.Rev == 0 {
+		return nil
+	}
+	_, err = saveNotesRaw(guard.ann, doc, NotesFile{}, cur.Rev)
+	return err
 }
 
 // appendReply is the read-modify-write shared by ResolveNote and ReplyNote:
 // load doc's notes, find the annotation by id, append reply (optionally
 // changing status), and save at the file's own current rev.
 func appendReply(doc, id string, reply Reply, setStatus string) (Annotation, error) {
-	f, err := LoadNotes(doc)
+	guard, err := lockAnnotations(false)
+	if err != nil {
+		return Annotation{}, err
+	}
+	defer guard.Close()
+	lock, err := lockDocument(guard.ann, doc)
+	if err != nil {
+		return Annotation{}, err
+	}
+	defer lock.Close()
+	f, err := loadNotesRaw(guard.ann, doc)
 	if err != nil {
 		return Annotation{}, err
 	}
@@ -305,7 +382,7 @@ func appendReply(doc, id string, reply Reply, setStatus string) (Annotation, err
 	if setStatus != "" {
 		f.Annotations[idx].Status = setStatus
 	}
-	saved, err := saveNotesRaw(doc, f, f.Rev)
+	saved, err := saveNotesRaw(guard.ann, doc, f, f.Rev)
 	if err != nil {
 		return Annotation{}, err
 	}
@@ -337,6 +414,11 @@ func ReplyNote(doc, id, msg string) (Annotation, error) {
 // *.json file back to its doc path. Unreadable or malformed sidecar files
 // are skipped silently. Results are sorted by Doc.
 func WalkNotes(prefix string) ([]DocNotes, error) {
+	guard, err := lockAnnotations(false)
+	if err != nil {
+		return nil, err
+	}
+	defer guard.Close()
 	prefix = strings.Trim(prefix, "/")
 	var segs []string
 	if prefix != "" {
@@ -348,54 +430,32 @@ func WalkNotes(prefix string) ([]DocNotes, error) {
 		}
 	}
 	if prefix != "" && hasDocExt(segs[len(segs)-1]) {
-		p, err := notesPath(prefix)
+		f, err := loadNotesRaw(guard.ann, prefix)
 		if err != nil {
-			return nil, err
-		}
-		if _, err := os.Stat(p); err != nil {
 			if os.IsNotExist(err) {
 				return nil, nil
 			}
 			return nil, err
 		}
-		f, err := LoadNotes(prefix)
-		if err != nil {
-			return nil, err
+		if len(f.Annotations) == 0 {
+			return nil, nil
 		}
 		return []DocNotes{{Doc: prefix, Notes: f}}, nil
 	}
-	annRoot, err := annotationsRoot()
-	if err != nil {
-		return nil, err
-	}
-	walkDir := annRoot
-	if prefix != "" {
-		walkDir, err = joinInRoot(annRoot, append([]string{annRoot}, segs...))
-		if err != nil {
-			return nil, err
-		}
-	}
 	var out []DocNotes
-	filepath.WalkDir(walkDir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() || !strings.HasSuffix(d.Name(), ".json") {
-			return nil
-		}
-		rel, err := filepath.Rel(annRoot, path)
-		if err != nil {
-			return nil
-		}
-		docPath := filepath.ToSlash(strings.TrimSuffix(rel, ".json"))
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return nil // skip unreadable files silently
-		}
+	if err := guard.ann.walk(segs, func(path []string, data []byte) {
+		docPath := strings.TrimSuffix(strings.Join(path, "/"), ".json")
 		var f NotesFile
 		if err := json.Unmarshal(data, &f); err != nil {
-			return nil // skip malformed files silently
+			return
+		}
+		if len(f.Annotations) == 0 {
+			return
 		}
 		out = append(out, DocNotes{Doc: docPath, Notes: f})
-		return nil
-	})
+	}); err != nil {
+		return nil, err
+	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Doc < out[j].Doc })
 	return out, nil
 }
@@ -430,7 +490,7 @@ func OpenNoteCount(prefix string) int {
 // Called from Delete and Unwatch: a name freed by a user delete or an
 // unwatch must never let a re-published/re-watched artifact of the same
 // name inherit the old one's notes.
-func removeNotesFor(rel string) error {
+func removeNotesFor(guard *annotationLock, rel string) error {
 	rel = strings.Trim(rel, "/")
 	if rel == "" {
 		return nil
@@ -441,20 +501,5 @@ func removeNotesFor(rel string) error {
 			return nil
 		}
 	}
-	annRoot, err := annotationsRoot()
-	if err != nil {
-		return err
-	}
-	dir, err := joinInRoot(annRoot, append([]string{annRoot}, segs...))
-	if err != nil {
-		return nil
-	}
-	if err := os.RemoveAll(dir); err != nil {
-		return err
-	}
-	if err := os.Remove(dir + ".json"); err != nil && !os.IsNotExist(err) {
-		return err
-	}
-	pruneEmpty(annRoot, dir)
-	return nil
+	return guard.ann.removeSubtree(segs)
 }

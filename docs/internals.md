@@ -19,8 +19,12 @@ that writes a folder there publishes an artifact.
   `report.go` renders the markdown report shared by the CLI and the HTTP
   read endpoint).
 - `internal/watch` — fsnotify over the whole root (following symlinks, with
-  cycle guards), debounced 250ms into a fan-out hub the `/events` SSE handler
-  subscribes to.
+  cycle guards), debounced 250ms with a 1s maximum latency into a fan-out hub
+  the `/events` SSE handler subscribes to. Initial registration is synchronous
+  and fatal on failure. Each refresh reconciles missing and stale watches;
+  event overflow triggers an immediate reconcile, while any unrecoverable
+  backend or reconcile error stops the web server so the process supervisor
+  can restart a service that would otherwise appear live but stale.
 - `internal/web` — handlers and view-model building. Templates and static
   assets (htmx, sse, idiomorph) are `go:embed`ded, so there are no runtime
   file dependencies. Responses pass through `withGzip`, which compresses text
@@ -78,11 +82,24 @@ Name validation is split by intent. `validateName` guards what the store
 delete, unwatch) are looser, because a watched repo names its own folders,
 but still traversal-safe.
 
+Filesystem containment is likewise explicit. Store-created project ancestors
+must be real directories, never symlinks. Resolution may cross one symlink
+rooted in the store because that is a deliberate `watch`, but will not follow
+another symlink inside the watched source; listing, markdown discovery, folder
+browsing, delete, and unwatch all preserve that boundary. Annotation paths
+reject symlink components under `.annotations` as well.
+
 Visibility is one decision function, `store.Visible` — every scan, the
 watcher, and every listing helper route through it, so nothing drifts out of
 sync. See [ignore-rules.md](ignore-rules.md); the one hard-coded exception,
 the top-level `.annotations` directory, is explained in
 [notes.md](notes.md#storage-and-visibility).
+
+Parsed ignore rules are cached briefly and revalidated by modification time
+and size. Content hashing was deliberately not added: it would reread every
+ignore file on each cache check, while same-size replacements that preserve an
+mtime are an unlikely configuration-freshness edge case rather than a security
+boundary.
 
 The notes API carries the same trust asymmetry as artifact delete: the
 unauthenticated `PUT`/`DELETE /notes/{path...}` writes are the viewer's, and
@@ -92,7 +109,9 @@ the CLI can only `resolve` and `reply` — see [notes.md](notes.md).
 
 `make web` builds the container (a `scratch` image holding two static
 binaries) and runs it with `~/.scratchpad` mounted at `/data` and `$HOME`
-mounted read-only, so the web process can never modify a watched source.
+mounted read-only, so the web process can never modify a watched source. The
+published port binds `127.0.0.1` by default; use `make web LAN=1` to bind all
+interfaces.
 
 `make install` is the native alternative: CLI, skill, and `scratchpad-web` as
 a `systemd --user` unit. No container and no sudo, but also no read-only
@@ -100,6 +119,28 @@ a `systemd --user` unit. No container and no sudo, but also no read-only
 you want that guarantee back. It prints the `systemctl --user enable --now`
 line to finish, plus the `loginctl enable-linger` needed to start at boot
 rather than at login.
+
+The native service also binds `127.0.0.1:8737` by default; `make install LAN=1`
+installs it with `0.0.0.0:8737`. There is no authentication: LAN mode exposes
+all hosted content and lets reachable clients invoke user-trusted mutations,
+including artifact deletion and notes `PUT`/`DELETE`. Use it only on a trusted
+network with an appropriate firewall.
+
+Without Make, the equivalent explicit forms are:
+
+```bash
+scratchpad-web --addr 127.0.0.1:8737       # native loopback
+scratchpad-web --addr 0.0.0.0:8737         # native LAN
+podman run -p 127.0.0.1:8737:8737 \
+  -v "$HOME/.scratchpad:/data:z" -v "$HOME:$HOME:ro" \
+  localhost/scratchpad:latest
+podman run -p 0.0.0.0:8737:8737 \
+  -v "$HOME/.scratchpad:/data:z" -v "$HOME:$HOME:ro" \
+  localhost/scratchpad:latest                 # LAN
+```
+
+The container command listens on `:8737` internally; host port publication is
+the exposure boundary.
 
 ## Environment
 

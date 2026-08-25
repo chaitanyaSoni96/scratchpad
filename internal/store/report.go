@@ -94,11 +94,17 @@ func FormatReport(docs []DocNotes, opts ReportOptions) string {
 	b.WriteString("\n---\n\n")
 	b.WriteString("Fix each open note, then close it with a one-line summary of the change:\n\n")
 	b.WriteString("```bash\n")
-	fmt.Fprintf(&b, "scratchpad notes resolve %s <id> -m \"what changed\"\n", shown[0].doc)
-	fmt.Fprintf(&b, "scratchpad notes reply   %s <id> -m \"a question, when the note needs clarifying instead of a fix\"\n", shown[0].doc)
+	doc := shellQuote(shown[0].doc)
+	fmt.Fprintf(&b, "scratchpad notes resolve %s <id> -m \"what changed\"\n", doc)
+	fmt.Fprintf(&b, "scratchpad notes reply   %s <id> -m \"a question, when the note needs clarifying instead of a fix\"\n", doc)
 	b.WriteString("```\n")
 	b.WriteString("\nOnly the user can create, edit, reopen or delete a note.\n")
 	return b.String()
+}
+
+// shellQuote produces one POSIX shell word, including for paths with quotes.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
 
 // writeNote renders one annotation: the user's text first (it is the point),

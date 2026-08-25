@@ -30,9 +30,11 @@ and later edits to the source do nothing.
 - `-dir` publishes a folder. It must contain at least one top-level `.html`;
   `index.html` becomes the entry page, and several pages without an
   `index.html` render as a multi-page collection (loose `.md` files in the
-  folder count as pages too).
+  folder count as pages too). Every entry must be a regular file or directory;
+  symlinks, FIFOs, devices, and other special files reject the whole publish.
 - `-html` / `-css` / `-js` publish a single page, landing as `index.html`,
-  `style.css`, and `script.js`. `-` reads that file from stdin.
+  `style.css`, and `script.js`. `-` reads that input from the process's stdin;
+  at most one of the three inputs may use `-`.
 - `-project` groups the artifact under a slash-separated path of any depth.
   Each level is browsable as its own page. Artifacts don't nest: a project
   path whose own folder holds an `.html` is refused (`watch -project` too).
@@ -42,6 +44,11 @@ and later edits to the source do nothing.
 **Publishing is create-only.** A taken name is an error, never an overwrite;
 deleting is the user's action in the web UI — agents pick a fresh name
 instead.
+
+Exactly one of `-dir` and `-html` is required. `-css` and `-js` are valid only
+with `-html`; `publish` accepts no positional arguments. Other commands also
+reject surplus positional arguments rather than silently ignoring them, and
+CLI usage errors exit with status 2.
 
 Names, project segments, and every path segment inside a published folder
 must match `^[a-zA-Z0-9][a-zA-Z0-9._-]{0,99}$`. One bad filename
@@ -66,6 +73,9 @@ stays yours:
   same folder under the same name is a no-op, so the command is safe to
   repeat. Any *other* target — or a real directory of that name — is refused.
 - Watching a folder already inside the scratchpad is refused.
+- A watch link is the only permitted symlink boundary. Browsing and listing
+  may cross that link, but do not follow further symlinks inside its source;
+  publish, delete, and unwatch never operate through a symlinked project path.
 - `unwatch` (or the button on any watched card) removes only the link. Files
   inside a watched folder can't be deleted through scratchpad at all, and
   under `make web` the container mounts `$HOME` read-only, so the web process

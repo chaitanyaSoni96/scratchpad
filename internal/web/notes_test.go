@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"scratchpad/internal/store"
@@ -140,6 +141,59 @@ func TestNotesWriteHappyPathBumpsRev(t *testing.T) {
 	}
 	if len(docs) != 1 || docs[0].Doc != doc || len(docs[0].Notes.Annotations) != 1 {
 		t.Fatalf("GET docs = %+v, want one doc with one annotation", docs)
+	}
+}
+
+func TestConcurrentNotesWritesExactlyOneSucceeds(t *testing.T) {
+	root := testRoot(t)
+	doc := seedArtifact(t, root, "demo/q3")
+	mux := notesMux(t)
+	start := make(chan struct{})
+	codes := make(chan int, 2)
+	var wg sync.WaitGroup
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			body, _ := json.Marshal(store.NotesFile{Rev: 0, Annotations: []store.Annotation{{ID: string(rune('a' + i)), Status: "open"}}})
+			<-start
+			codes <- doReq(t, mux, "PUT", "/notes/"+doc, body, nil).Code
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+	close(codes)
+	counts := map[int]int{}
+	for code := range codes {
+		counts[code]++
+	}
+	if counts[http.StatusOK] != 1 || counts[http.StatusConflict] != 1 {
+		t.Fatalf("statuses = %v, want one 200 and one 409", counts)
+	}
+}
+
+func TestConcurrentNotesPutAndDeleteCannotRecreateStaleNotes(t *testing.T) {
+	root := testRoot(t)
+	doc := seedArtifact(t, root, "demo/q3")
+	mux := notesMux(t)
+	if _, err := store.SaveNotes(doc, store.NotesFile{Annotations: []store.Annotation{{ID: "old", Status: "open"}}}, 0); err != nil {
+		t.Fatal(err)
+	}
+	body, _ := json.Marshal(store.NotesFile{Rev: 1, Annotations: []store.Annotation{{ID: "stale", Status: "open"}}})
+	start := make(chan struct{})
+	codes := make(chan int, 2)
+	go func() { <-start; codes <- doReq(t, mux, http.MethodPut, "/notes/"+doc, body, nil).Code }()
+	go func() { <-start; codes <- doReq(t, mux, http.MethodDelete, "/notes/"+doc, nil, nil).Code }()
+	close(start)
+	for i := 0; i < 2; i++ {
+		code := <-codes
+		if code != http.StatusOK && code != http.StatusConflict {
+			t.Fatalf("unexpected status %d", code)
+		}
+	}
+	f, err := store.LoadNotes(doc)
+	if err != nil || f.Rev < 2 || len(f.Annotations) != 0 {
+		t.Fatalf("PUT/delete race left notes: %+v, %v", f, err)
 	}
 }
 

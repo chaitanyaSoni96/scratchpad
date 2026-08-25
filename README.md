@@ -32,6 +32,7 @@ renders as a styled page, so watching a docs tree gives you a browsable site.
 
 ```bash
 make web        # build the image and run the site at http://localhost:8737
+make web LAN=1  # explicitly expose the unauthenticated site on the LAN
 make stop       # stop it
 ```
 
@@ -40,6 +41,9 @@ artifacts newest-first with sandboxed live previews and per-card delete
 buttons; an fsnotify watcher streams changes over SSE, so the list refreshes
 the moment anything is published. `make install` runs it natively under
 `systemd --user` instead — see [docs/internals.md](docs/internals.md).
+Both deployments bind loopback by default. `make install LAN=1` is the native
+LAN equivalent; LAN mode exposes artifact contents and unauthenticated delete
+and notes-write endpoints to every host that can reach port 8737.
 
 ## Connect your agents
 

@@ -15,9 +15,21 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 const RootEnv = "SCRATCHPAD_ROOT"
+
+// testStoreOpHook makes validation/use race tests deterministic. It is nil in
+// production and deliberately sits after the parent descriptor is pinned.
+var testStoreOpHook func(string)
+
+func runStoreOpHook(op string) {
+	if testStoreOpHook != nil {
+		testStoreOpHook(op)
+	}
+}
 
 type Artifact struct {
 	Project string // slash-separated project path, "" for root-level artifacts
@@ -138,6 +150,42 @@ func VisiblePath(p string) bool {
 	return visibleSegments(root, strings.Split(p, "/"))
 }
 
+// ResolveFolder resolves a visible project folder. It permits crossing one
+// symlink rooted in the store (a deliberate watch), but never follows another
+// symlink inside that watched source tree.
+func ResolveFolder(p string) (*os.File, bool) {
+	root, err := Root()
+	if err != nil || filepath.IsAbs(p) || strings.HasPrefix(p, "/") || strings.Contains(p, `\`) {
+		return nil, false
+	}
+	var segs []string
+	if p != "" {
+		segs = strings.Split(p, "/")
+	}
+	for _, s := range segs {
+		if err := validateSegment(s); err != nil {
+			return nil, false
+		}
+	}
+	if !visibleSegments(root, segs) {
+		return nil, false
+	}
+	rfs, err := openRootedFS(false)
+	if err != nil {
+		return nil, false
+	}
+	defer rfs.close()
+	fd, err := rfs.openBrowsableDir(segs)
+	if err != nil {
+		return nil, false
+	}
+	if dirHasHTMLFD(fd) {
+		unix.Close(fd)
+		return nil, false
+	}
+	return os.NewFile(uintptr(fd), p), true
+}
+
 // SplitProject validates a slash-separated project path and returns its
 // segments ([] for the empty path).
 func SplitProject(project string) ([]string, error) {
@@ -191,6 +239,56 @@ func joinInRoot(root string, parts []string) (string, error) {
 		return "", fmt.Errorf("path escapes root")
 	}
 	return dir, nil
+}
+
+// ensureProjectDir creates missing project directories while refusing existing
+// symlink ancestors. The component-by-component checks are portable; a hostile
+// local process can still swap a checked component before the following call.
+func ensureProjectDir(root string, segs []string) (string, error) {
+	dir := root
+	for i, seg := range segs {
+		dir = filepath.Join(dir, seg)
+		fi, err := os.Lstat(dir)
+		switch {
+		case err == nil && fi.Mode()&os.ModeSymlink != 0:
+			return "", fmt.Errorf("project ancestor %q is a symlink", strings.Join(segs[:i+1], "/"))
+		case err == nil && !fi.IsDir():
+			return "", fmt.Errorf("project ancestor %q is not a directory", strings.Join(segs[:i+1], "/"))
+		case err == nil:
+			if hasHTML(dir) {
+				return "", fmt.Errorf("%q is an artifact, not a project", strings.Join(segs[:i+1], "/"))
+			}
+		case os.IsNotExist(err):
+			if err := os.Mkdir(dir, 0o755); err != nil {
+				return "", err
+			}
+		default:
+			return "", err
+		}
+	}
+	return dir, nil
+}
+
+func rejectSymlinkParents(root, dir string) error {
+	rel, err := filepath.Rel(root, filepath.Dir(dir))
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("path escapes root")
+	}
+	cur := root
+	if rel == "." {
+		return nil
+	}
+	for _, seg := range strings.Split(rel, string(filepath.Separator)) {
+		cur = filepath.Join(cur, seg)
+		fi, err := os.Lstat(cur)
+		if err != nil {
+			return err
+		}
+		if fi.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("path crosses symlink %q", seg)
+		}
+	}
+	return nil
 }
 
 // hasHTML reports whether dir directly contains a regular *.html file.
@@ -298,8 +396,8 @@ func List() ([]Artifact, error) {
 	}
 	var out []Artifact
 	visited := map[string]bool{} // symlink-cycle guard
-	var walk func(dir, project string)
-	walk = func(dir, project string) {
+	var walk func(dir, project string, crossedLink bool)
+	walk = func(dir, project string, crossedLink bool) {
 		if real, err := filepath.EvalSymlinks(dir); err != nil || visited[real] {
 			return
 		} else {
@@ -310,7 +408,8 @@ func List() ([]Artifact, error) {
 			return
 		}
 		for _, e := range entries {
-			if !entryIsDir(dir, e) || !Visible(dir, e.Name(), true) {
+			isLink := e.Type()&os.ModeSymlink != 0
+			if !entryIsDir(dir, e) || !Visible(dir, e.Name(), true) || isLink && crossedLink {
 				continue
 			}
 			sub := filepath.Join(dir, e.Name())
@@ -322,10 +421,10 @@ func List() ([]Artifact, error) {
 			if project != "" {
 				child = project + "/" + e.Name()
 			}
-			walk(sub, child)
+			walk(sub, child, crossedLink || isLink)
 		}
 	}
-	walk(root, "")
+	walk(root, "", false)
 	sort.Slice(out, func(i, j int) bool { return out[i].ModTime.After(out[j].ModTime) })
 	return out, nil
 }
@@ -355,16 +454,27 @@ func ResolvePath(segs []string) (a Artifact, file string, ok bool) {
 	if !visibleSegments(root, segs) {
 		return Artifact{}, "", false
 	}
+	rfs, err := openRootedFS(false)
+	if err != nil {
+		return Artifact{}, "", false
+	}
+	defer rfs.close()
 	for i, s := range segs {
-		dir := filepath.Join(append([]string{root}, segs[:i+1]...)...)
-		if hasHTML(dir) {
+		fd, openErr := rfs.openBrowsableDir(segs[:i+1])
+		if openErr != nil {
+			return Artifact{}, "", false
+		}
+		if dirHasHTMLFD(fd) {
 			project := strings.Join(segs[:i], "/")
-			a, ok := loadArtifact(project, s, dir)
+			a, ok := loadArtifact(project, s, fdPath(fd))
+			unix.Close(fd)
 			if !ok {
 				return Artifact{}, "", false
 			}
+			a.Dir = filepath.Join(append([]string{root}, segs[:i+1]...)...)
 			return a, strings.Join(segs[i+1:], "/"), true
 		}
+		unix.Close(fd)
 	}
 	return Artifact{}, "", false
 }
@@ -382,12 +492,12 @@ func ResolveDoc(segs []string) (string, bool) {
 	if !visibleSegments(root, segs) {
 		return "", false
 	}
-	p := filepath.Join(append([]string{root}, segs...)...)
-	fi, err := os.Stat(p)
-	if err != nil || fi.IsDir() {
+	f, ok := OpenDocument(segs)
+	if !ok {
 		return "", false
 	}
-	return p, true
+	f.Close()
+	return filepath.Join(append([]string{root}, segs...)...), true
 }
 
 // ValidateFilePath checks a relative asset path for a published file: every
@@ -428,38 +538,41 @@ func Publish(project, name string, files map[string][]byte) (Artifact, error) {
 	if err != nil {
 		return Artifact{}, err
 	}
-	// No ancestor may itself be an artifact: artifacts cannot nest.
 	segs, _ := SplitProject(project)
-	for i := range segs {
-		anc := filepath.Join(append([]string{root}, segs[:i+1]...)...)
-		if hasHTML(anc) {
-			return Artifact{}, fmt.Errorf("%q is an artifact, not a project — artifacts cannot contain artifacts", strings.Join(segs[:i+1], "/"))
-		}
-	}
-	if err := os.MkdirAll(filepath.Dir(dir), 0o755); err != nil {
+	rfs, err := openRootedFS(true)
+	if err != nil {
 		return Artifact{}, err
 	}
+	defer rfs.close()
+	parent, err := rfs.openRealDir(segs, true, true)
+	if err != nil {
+		return Artifact{}, err
+	}
+	defer unix.Close(parent)
+	runStoreOpHook("publish-claim")
 	// os.Mkdir (not MkdirAll) atomically claims the name: concurrent
 	// publishes and existing artifacts both surface as EEXIST.
-	if err := os.Mkdir(dir, 0o755); err != nil {
-		if os.IsExist(err) {
+	if err := unix.Mkdirat(parent, name, 0o755); err != nil {
+		if errors.Is(err, unix.EEXIST) {
 			return Artifact{}, fmt.Errorf("%q already exists — names are not reusable until the user deletes the old artifact in the web UI; pick a different name (see `scratchpad list`)", strings.TrimPrefix(dir[len(root):], string(filepath.Separator)))
 		}
 		return Artifact{}, err
 	}
-	cleanup := func() { os.RemoveAll(dir) }
+	artifactFD, err := openDirAt(parent, name)
+	if err != nil {
+		_ = unix.Unlinkat(parent, name, unix.AT_REMOVEDIR)
+		return Artifact{}, err
+	}
+	defer unix.Close(artifactFD)
+	cleanup := func() { _ = removeTreeAt(parent, name) }
 	for p, content := range files {
-		abs := filepath.Join(dir, filepath.FromSlash(p))
-		if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
-			cleanup()
-			return Artifact{}, err
-		}
-		if err := os.WriteFile(abs, content, 0o644); err != nil {
+		if err := writeFileAt(artifactFD, strings.Split(p, "/"), content); err != nil {
 			cleanup()
 			return Artifact{}, err
 		}
 	}
-	a, ok := loadArtifact(project, name, dir)
+	a, ok := loadArtifact(project, name, fdPath(artifactFD))
+	a.Dir = dir
 	if !ok {
 		cleanup()
 		return Artifact{}, errors.New("publish verification failed")
@@ -500,23 +613,28 @@ func Watch(project, name, target string) (string, error) {
 		return "", err
 	}
 	segs, _ := SplitProject(project)
-	for i := range segs {
-		if hasHTML(filepath.Join(append([]string{root}, segs[:i+1]...)...)) {
-			return "", fmt.Errorf("%q is an artifact, not a project", strings.Join(segs[:i+1], "/"))
-		}
-	}
-	if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
+	rfs, err := openRootedFS(true)
+	if err != nil {
 		return "", err
 	}
+	defer rfs.close()
+	parent, err := rfs.openRealDir(segs, true, true)
+	if err != nil {
+		return "", err
+	}
+	defer unix.Close(parent)
+	runStoreOpHook("watch-link")
 	// os.Symlink is atomic like os.Mkdir in Publish: EEXIST if taken. The one
 	// exception is a link that already points at this exact folder — that is
 	// the state the caller asked for, so re-watching is a no-op and an agent
 	// can run watch unconditionally instead of probing `watches` first.
-	if err := os.Symlink(abs, link); err != nil {
-		if !os.IsExist(err) {
+	if err := unix.Symlinkat(abs, parent, name); err != nil {
+		if !errors.Is(err, unix.EEXIST) {
 			return "", err
 		}
-		if !linksTo(link, abs) {
+		buf := make([]byte, 4096)
+		n, readErr := unix.Readlinkat(parent, name, buf)
+		if readErr != nil || string(buf[:n]) != abs {
 			return "", fmt.Errorf("%q already exists — delete it in the web UI or pick a different name", strings.TrimPrefix(link[len(root):], string(filepath.Separator)))
 		}
 	}
@@ -618,34 +736,56 @@ func Watches() ([]WatchLink, error) {
 // destroy stored files — and it works for watched project trees, which are
 // not artifacts and therefore not reachable through Delete.
 func Unwatch(project, name string) error {
+	annotationGuard, err := lockAnnotations(true)
+	if err != nil {
+		return err
+	}
+	defer annotationGuard.Close()
 	root, err := Root()
 	if err != nil {
 		return err
 	}
-	dir, err := existingDir(root, project, name)
+	_, err = existingDir(root, project, name)
 	if err != nil {
 		return err
 	}
 	rel := (Artifact{Project: project, Name: name}).RelPath()
-	fi, err := os.Lstat(dir)
-	if err != nil {
+	segs := strings.Split(strings.Trim(project, "/"), "/")
+	if project == "" {
+		segs = nil
+	}
+	rfs, openErr := openRootedFS(false)
+	if openErr != nil {
+		return openErr
+	}
+	defer rfs.close()
+	parent, openErr := rfs.openRealDir(segs, false, false)
+	if openErr != nil {
+		if link := WatchLinkFor(rel); link != "" {
+			return fmt.Errorf("%s is not a watch link — it lives inside watched folder %q; unwatch that instead", rel, link)
+		}
+		return fmt.Errorf("refusing to unwatch through a symlinked project: %w", openErr)
+	}
+	defer unix.Close(parent)
+	runStoreOpHook("unwatch")
+	var st unix.Stat_t
+	if err := unix.Fstatat(parent, name, &st, unix.AT_SYMLINK_NOFOLLOW); err != nil {
 		return fmt.Errorf("%s not found", rel)
 	}
-	if fi.Mode()&os.ModeSymlink == 0 {
+	if st.Mode&unix.S_IFMT != unix.S_IFLNK {
 		if link := WatchLinkFor(rel); link != "" {
 			return fmt.Errorf("%s is not a watch link — it lives inside watched folder %q; unwatch that instead", rel, link)
 		}
 		return fmt.Errorf("%s is not a watched folder", rel)
 	}
-	if err := os.Remove(dir); err != nil {
+	if err := unix.Unlinkat(parent, name, 0); err != nil {
 		return err
 	}
-	pruneEmpty(root, dir)
+	pruneAt(rfs, segs)
 	// A name freed by unwatch is reusable (publish/watch is create-only), so
 	// any notes left over from the unwatched folder must go with it or a
 	// same-named artifact published later would inherit them.
-	removeNotesFor((Artifact{Project: project, Name: name}).RelPath())
-	return nil
+	return removeNotesFor(annotationGuard, (Artifact{Project: project, Name: name}).RelPath())
 }
 
 // pruneEmpty removes project directories left empty above a removed entry.
@@ -664,47 +804,56 @@ func pruneEmpty(root, dir string) {
 // above it. Watched folders (symlinks) are only unlinked — the source is
 // never touched — and nothing inside a watched folder can be deleted here.
 func Delete(project, name string) error {
+	annotationGuard, err := lockAnnotations(true)
+	if err != nil {
+		return err
+	}
+	defer annotationGuard.Close()
 	root, err := Root()
 	if err != nil {
 		return err
 	}
-	dir, err := existingDir(root, project, name)
+	_, err = existingDir(root, project, name)
 	if err != nil {
 		return err
 	}
-	// Refuse when any parent component is a symlink: the files belong to
-	// the watched source folder.
-	cur := root
-	for _, seg := range strings.Split(strings.TrimPrefix(dir[len(root):], string(filepath.Separator)), string(filepath.Separator)) {
-		cur = filepath.Join(cur, seg)
-		if cur == dir {
-			break
-		}
-		if fi, err := os.Lstat(cur); err == nil && fi.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("%s is inside watched folder %q — its files live at the source; unwatch the link instead", (Artifact{Project: project, Name: name}).RelPath(), strings.TrimPrefix(cur[len(root):], string(filepath.Separator)))
-		}
+	segs := strings.Split(strings.Trim(project, "/"), "/")
+	if project == "" {
+		segs = nil
 	}
-	if fi, err := os.Lstat(dir); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+	rfs, openErr := openRootedFS(false)
+	if openErr != nil {
+		return openErr
+	}
+	defer rfs.close()
+	parent, openErr := rfs.openRealDir(segs, false, false)
+	if openErr != nil {
+		return fmt.Errorf("%s is inside a watched folder — its files live at the source; unwatch the link instead", (Artifact{Project: project, Name: name}).RelPath())
+	}
+	defer unix.Close(parent)
+	runStoreOpHook("delete")
+	var st unix.Stat_t
+	if err := unix.Fstatat(parent, name, &st, unix.AT_SYMLINK_NOFOLLOW); err == nil && st.Mode&unix.S_IFMT == unix.S_IFLNK {
 		// Unwatch: remove only the link, never the source.
-		if err := os.Remove(dir); err != nil {
+		if err := unix.Unlinkat(parent, name, 0); err != nil {
 			return err
 		}
 	} else {
-		a, ok, err := Resolve(project, name)
-		if err != nil {
-			return err
-		}
-		if !ok {
+		artifactFD, err := openDirAt(parent, name)
+		if err != nil || !dirHasHTMLFD(artifactFD) {
+			if err == nil {
+				unix.Close(artifactFD)
+			}
 			return fmt.Errorf("artifact %s not found", (Artifact{Project: project, Name: name}).RelPath())
 		}
-		if err := os.RemoveAll(a.Dir); err != nil {
+		unix.Close(artifactFD)
+		if err := removeTreeAt(parent, name); err != nil {
 			return err
 		}
 	}
-	pruneEmpty(root, dir)
+	pruneAt(rfs, segs)
 	// Names are reusable once the user deletes here (Publish/Watch are
 	// create-only), so a re-published/re-watched artifact of the same name
 	// must start with a clean slate rather than inheriting the old one's notes.
-	removeNotesFor((Artifact{Project: project, Name: name}).RelPath())
-	return nil
+	return removeNotesFor(annotationGuard, (Artifact{Project: project, Name: name}).RelPath())
 }

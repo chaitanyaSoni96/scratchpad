@@ -4,10 +4,13 @@ package watch
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io/fs"
-	"log"
 	"os"
 	"path/filepath"
+	"sort"
+	"syscall"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
@@ -15,107 +18,281 @@ import (
 	"scratchpad/internal/store"
 )
 
-const debounce = 250 * time.Millisecond
+const (
+	debounce   = 250 * time.Millisecond
+	maxLatency = time.Second
+)
 
-// Run watches the whole tree under root recursively, broadcasting one hub
-// signal per burst of events. Blocks until ctx is done.
-func Run(ctx context.Context, root string, hub *Hub) error {
-	w, err := fsnotify.NewWatcher()
+type backend interface {
+	Add(string) error
+	Remove(string) error
+	WatchList() []string
+	Events() <-chan fsnotify.Event
+	Errors() <-chan error
+	Close() error
+}
+
+type fsBackend struct{ *fsnotify.Watcher }
+
+func (b fsBackend) Events() <-chan fsnotify.Event { return b.Watcher.Events }
+func (b fsBackend) Errors() <-chan error          { return b.Watcher.Errors }
+
+// Watcher recursively watches a store tree and broadcasts changes.
+type Watcher struct {
+	root       string
+	hub        *Hub
+	backend    backend
+	debounce   time.Duration
+	maxLatency time.Duration
+	registered map[string]dirIdentity
+}
+
+type dirIdentity struct {
+	dev uint64
+	ino uint64
+}
+
+type desiredDir struct {
+	path string
+	id   dirIdentity
+}
+
+// New creates a watcher and synchronously registers the complete initial tree.
+// The caller must call Run and treat any error it returns as fatal.
+func New(root string, hub *Hub) (*Watcher, error) {
+	b, err := fsnotify.NewWatcher()
 	if err != nil {
-		return err
+		return nil, fmt.Errorf("create filesystem watcher: %w", err)
 	}
-	defer w.Close()
+	w, err := newWatcher(root, hub, fsBackend{b}, debounce, maxLatency)
+	if err != nil {
+		b.Close()
+		return nil, err
+	}
+	return w, nil
+}
 
-	// watchTree adds dir and every directory below it, following symlinks
-	// (watched external folders) with a cycle guard. Called for the root at
-	// startup, for any newly created directory (a dir can arrive with
-	// children already inside via mkdir -p, mv, cp -r, ln -s, so one Create
-	// event must hook the whole subtree), and again after every debounced
-	// burst to repair watches fsnotify dropped along the way.
-	//
-	// That repair matters because of a case fsnotify itself won't report: if
-	// a watched directory's own inode is replaced (a build tool cleaning and
-	// regenerating its output dir, rsync resyncing a tree, etc.), the old
-	// watch dies with it. Ordinarily that'd surface as a Remove event on the
-	// directory's own path, but fsnotify deliberately swallows that specific
-	// event whenever the parent directory is also watched — which, since
-	// watchTree watches every level, is always true here — on the assumption
-	// that the parent's own delete event already covers it. That assumption
-	// doesn't hold across a symlink boundary (a watched folder is a symlink
-	// to elsewhere): replacing the symlink's target leaves the symlink's
-	// dentry in its parent untouched, so no such parent-level event ever
-	// comes. Re-walking after every burst sidesteps the swallowed event
-	// instead of trying to detect it: w.Add on a path still standing is a
-	// cheap no-op, and EvalSymlinks freshly resolves anything replaced.
-	watchTree := func(top string) {
-		visited := map[string]bool{} // cycle guard, fresh per traversal
-		var add func(dir string)
-		add = func(dir string) {
-			real, err := filepath.EvalSymlinks(dir)
-			if err != nil || visited[real] {
-				return
-			}
-			visited[real] = true
-			if err := w.Add(dir); err != nil {
-				log.Printf("watch %s: %v", dir, err)
-				return
-			}
-			entries, err := os.ReadDir(dir)
-			if err != nil {
-				return
-			}
-			for _, e := range entries {
-				p := filepath.Join(dir, e.Name())
-				isDir := e.IsDir()
-				if !isDir && e.Type()&fs.ModeSymlink != 0 {
-					if fi, err := os.Stat(p); err == nil && fi.IsDir() {
-						isDir = true
-					}
-				}
-				// Ignore rules keep scanning and watching in step: a folder
-				// the UI never shows is not worth an inotify watch either.
-				if !isDir || !store.Visible(dir, e.Name(), true) {
-					continue
-				}
-				add(p)
-			}
+func newWatcher(root string, hub *Hub, b backend, debounce, maxLatency time.Duration) (*Watcher, error) {
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		return nil, fmt.Errorf("resolve watch root %q: %w", root, err)
+	}
+	w := &Watcher{root: abs, hub: hub, backend: b, debounce: debounce, maxLatency: maxLatency, registered: make(map[string]dirIdentity)}
+	if err := w.reconcile(); err != nil {
+		return nil, fmt.Errorf("register initial watch tree %q: %w", root, err)
+	}
+	return w, nil
+}
+
+// Run processes filesystem events until cancellation or a backend failure.
+func (w *Watcher) Run(ctx context.Context) error {
+	defer w.backend.Close()
+
+	var trailing, maximum *time.Timer
+	var trailingC, maximumC <-chan time.Time
+	stopTimers := func() {
+		if trailing != nil {
+			trailing.Stop()
 		}
-		add(top)
+		if maximum != nil {
+			maximum.Stop()
+		}
 	}
-	watchTree(root)
+	defer stopTimers()
 
-	var timer *time.Timer
-	var timerC <-chan time.Time
+	refresh := func() error {
+		if err := w.reconcile(); err != nil {
+			return fmt.Errorf("reconcile watch tree: %w", err)
+		}
+		w.hub.Broadcast()
+		return nil
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case ev, ok := <-w.Events:
+		case ev, ok := <-w.backend.Events():
 			if !ok {
-				return nil
+				return errors.New("filesystem watcher event channel closed")
 			}
-			// fsnotify drops watches on removal by itself.
+			// A directory can arrive already populated. Reconcile immediately so
+			// changes below it are not missed while the debounce timer is running.
 			if ev.Op.Has(fsnotify.Create) {
 				if fi, err := os.Stat(ev.Name); err == nil && fi.IsDir() {
-					watchTree(ev.Name)
+					if err := w.reconcile(); err != nil {
+						return fmt.Errorf("watch created subtree %q: %w", ev.Name, err)
+					}
 				}
 			}
-			if timer == nil {
-				timer = time.NewTimer(debounce)
-				timerC = timer.C
+			if trailing == nil {
+				trailing = time.NewTimer(w.debounce)
+				trailingC = trailing.C
+				maximum = time.NewTimer(w.maxLatency)
+				maximumC = maximum.C
 			} else {
-				timer.Reset(debounce)
+				if !trailing.Stop() {
+					select {
+					case <-trailing.C:
+					default:
+					}
+				}
+				trailing.Reset(w.debounce)
+				if maximum == nil {
+					maximum = time.NewTimer(w.maxLatency)
+					maximumC = maximum.C
+				}
 			}
-		case err, ok := <-w.Errors:
+		case err, ok := <-w.backend.Errors():
 			if !ok {
-				return nil
+				return errors.New("filesystem watcher error channel closed")
 			}
-			log.Printf("watcher error: %v", err)
-		case <-timerC:
-			timer = nil
-			timerC = nil
-			watchTree(root)
-			hub.Broadcast()
+			if errors.Is(err, fsnotify.ErrEventOverflow) {
+				if err := refresh(); err != nil {
+					return fmt.Errorf("recover from filesystem event overflow: %w", err)
+				}
+				continue
+			}
+			return fmt.Errorf("filesystem watcher: %w", err)
+		case <-maximumC:
+			maximum.Stop()
+			maximum = nil
+			maximumC = nil
+			if err := refresh(); err != nil {
+				return err
+			}
+		case <-trailingC:
+			trailing.Stop()
+			trailing = nil
+			trailingC = nil
+			if maximum != nil {
+				maximum.Stop()
+				maximum = nil
+				maximumC = nil
+			}
+			if err := refresh(); err != nil {
+				return err
+			}
 		}
 	}
+}
+
+func (w *Watcher) reconcile() error {
+	desired, err := desiredDirs(w.root)
+	if err != nil {
+		return err
+	}
+
+	current := make(map[string]string)
+	for _, path := range w.backend.WatchList() {
+		canonical, err := canonicalDir(path)
+		if err != nil {
+			// A removed path cannot be canonicalized, but is still a stale watch.
+			canonical = filepath.Clean(path)
+		}
+		current[canonical] = path
+	}
+
+	for canonical, path := range current {
+		want, ok := desired[canonical]
+		if ok && w.registered[canonical] == want.id {
+			continue
+		}
+		if err := w.backend.Remove(path); err != nil && !errors.Is(err, fsnotify.ErrNonExistentWatch) {
+			return fmt.Errorf("remove stale watch %q: %w", path, err)
+		}
+		delete(current, canonical)
+		delete(w.registered, canonical)
+	}
+	keys := make([]string, 0, len(desired))
+	for canonical := range desired {
+		keys = append(keys, canonical)
+	}
+	sort.Strings(keys)
+	for _, canonical := range keys {
+		if _, ok := current[canonical]; ok {
+			continue
+		}
+		if err := w.backend.Add(desired[canonical].path); err != nil {
+			return fmt.Errorf("add watch %q: %w", desired[canonical].path, err)
+		}
+		w.registered[canonical] = desired[canonical].id
+	}
+	return nil
+}
+
+func desiredDirs(root string) (map[string]desiredDir, error) {
+	dirs := make(map[string]desiredDir)
+	var walk func(string, bool, bool) error
+	walk = func(dir string, required, crossedLink bool) error {
+		canonical, err := canonicalDir(dir)
+		if err != nil {
+			if !required && os.IsNotExist(err) {
+				return nil
+			}
+			return fmt.Errorf("resolve directory %q: %w", dir, err)
+		}
+		if _, seen := dirs[canonical]; seen {
+			return nil
+		}
+		id, err := identity(canonical)
+		if err != nil {
+			return fmt.Errorf("identify directory %q: %w", dir, err)
+		}
+		dirs[canonical] = desiredDir{path: canonical, id: id}
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			if !required && os.IsNotExist(err) {
+				return nil
+			}
+			return fmt.Errorf("read directory %q: %w", dir, err)
+		}
+		for _, entry := range entries {
+			path := filepath.Join(dir, entry.Name())
+			isLink := entry.Type()&fs.ModeSymlink != 0
+			isDir := entry.IsDir()
+			if isLink && !crossedLink {
+				if info, err := os.Stat(path); err == nil && info.IsDir() {
+					isDir = true
+				}
+			}
+			if isLink && crossedLink {
+				continue
+			}
+			if isDir && store.Visible(dir, entry.Name(), true) {
+				if err := walk(path, false, crossedLink || isLink); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
+	if err := walk(root, true, false); err != nil {
+		return nil, err
+	}
+	return dirs, nil
+}
+
+func identity(path string) (dirIdentity, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return dirIdentity{}, err
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return dirIdentity{}, fmt.Errorf("filesystem does not expose inode identity")
+	}
+	return dirIdentity{dev: uint64(stat.Dev), ino: uint64(stat.Ino)}, nil
+}
+
+func canonicalDir(path string) (string, error) {
+	real, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return "", err
+	}
+	abs, err := filepath.Abs(real)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Clean(abs), nil
 }

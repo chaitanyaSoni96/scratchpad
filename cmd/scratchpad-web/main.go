@@ -7,6 +7,7 @@ import (
 	"flag"
 	"log"
 	"net/http"
+	"time"
 
 	"scratchpad/internal/store"
 	"scratchpad/internal/watch"
@@ -14,7 +15,7 @@ import (
 )
 
 func main() {
-	addr := flag.String("addr", ":8737", "listen address")
+	addr := flag.String("addr", "127.0.0.1:8737", "listen address")
 	flag.Parse()
 
 	root, err := store.EnsureRoot()
@@ -23,14 +24,44 @@ func main() {
 	}
 
 	hub := watch.NewHub()
-	go func() {
-		if err := watch.Run(context.Background(), root, hub); err != nil && err != context.Canceled {
-			log.Printf("watcher stopped: %v", err)
-		}
-	}()
+	watcher, err := watch.New(root, hub)
+	if err != nil {
+		log.Fatalf("start watcher: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
 	log.Printf("scratchpad serving %s on %s", root, *addr)
-	if err := http.ListenAndServe(*addr, web.NewServer(hub)); err != nil {
-		log.Fatal(err)
+	server := newHTTPServer(*addr, web.NewServer(hub))
+	watchErr := make(chan error, 1)
+	serverErr := make(chan error, 1)
+	go func() { watchErr <- watcher.Run(ctx) }()
+	go func() { serverErr <- server.ListenAndServe() }()
+
+	select {
+	case err := <-watchErr:
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer shutdownCancel()
+		if shutdownErr := server.Shutdown(shutdownCtx); shutdownErr != nil {
+			log.Printf("shutdown server: %v", shutdownErr)
+		}
+		if err != nil && err != context.Canceled {
+			log.Fatalf("watcher stopped: %v", err)
+		}
+	case err := <-serverErr:
+		cancel()
+		<-watchErr
+		if err != nil && err != http.ErrServerClosed {
+			log.Fatal(err)
+		}
+	}
+}
+
+func newHTTPServer(addr string, handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: 5 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 }

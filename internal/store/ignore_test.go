@@ -3,7 +3,9 @@ package store
 import (
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
+	"time"
 )
 
 // writeFile drops a file at root/rel and clears the ignore-parse cache so
@@ -204,6 +206,34 @@ func TestIgnoreFileEditIsPickedUp(t *testing.T) {
 	if !Visible(root, "temp", true) {
 		t.Error("edited rules should take effect")
 	}
+}
+
+func TestIgnoreCacheConcurrentRefresh(t *testing.T) {
+	root := testRoot(t)
+	writeFile(t, root, ".scratchpadignore", "temp\n")
+	if Visible(root, "temp", true) {
+		t.Fatal("rule should apply")
+	}
+
+	ignoreMu.Lock()
+	e := ignoreCache[root]
+	e.checked = time.Time{}
+	ignoreCache[root] = e
+	ignoreMu.Unlock()
+
+	var wg sync.WaitGroup
+	for range 32 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range 100 {
+				if Visible(root, "temp", true) {
+					t.Error("concurrent refresh lost the ignore rule")
+				}
+			}
+		}()
+	}
+	wg.Wait()
 }
 
 func TestIgnoreAffectsListAndLookup(t *testing.T) {
