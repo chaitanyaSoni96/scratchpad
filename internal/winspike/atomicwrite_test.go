@@ -636,22 +636,25 @@ func TestP13NeverRemoveThenRename(t *testing.T) {
 
 		goodRemoved := removedDest(goodActs, "notes.json")
 		badRemoved := removedDest(badActs, "notes.json")
+		same := fmt.Sprint(goodActs) == fmt.Sprint(badActs)
 
-		Report(t, "P13.change_records_control", boolVerdict(badRemoved),
-			"NEGATIVE CONTROL: remove-then-rename produced kernel records %v; a FILE_ACTION_REMOVED naming the destination "+
-				"was observed = %v. The instrument can therefore distinguish the two implementations.", badActs, badRemoved)
 		Report(t, "P13.change_records", boolVerdict(!goodRemoved),
-			"ReadDirectoryChangesW records for AtomicWriteFile: %v. FILE_ACTION_REMOVED naming the destination = %v. "+
-				"The kernel saw a rename, not a delete followed by a rename, so the destination name never left the namespace.",
-			goodActs, goodRemoved)
-		if badRemoved {
-			RequireProperty(t, "P13.change_records", !goodRemoved,
-				"the atomic replace must never produce FILE_ACTION_REMOVED for the destination (records %v)", goodActs)
-		} else {
-			Report(t, "P13.change_records", NotMeasured,
-				"the negative control did NOT produce FILE_ACTION_REMOVED, so this instrument cannot distinguish the two "+
-					"implementations on this runner and the assertion is withheld rather than reported as passing")
-		}
+			"INSTRUMENT INSUFFICIENT, and the reason is a finding. AtomicWriteFile produced %v ; the deliberately-wrong "+
+				"remove-then-rename produced %v ; identical apart from the temp name = %v (both contain "+
+				"FILE_ACTION_REMOVED naming the destination = %v / %v). "+
+				"A POSIX-semantics rename that REPLACES a destination makes the kernel emit FILE_ACTION_REMOVED for the "+
+				"replaced file as part of the atomic rename, so ReadDirectoryChangesW CANNOT distinguish an atomic replace "+
+				"from unlink+rename. The hypothesis that it could is withdrawn; the guard against the degradation is the "+
+				"namespace-removal audit (P13.audit) and the continuous-existence observer (P13.continuous_existence).",
+			goodActs, badActs, same, goodRemoved, badRemoved)
+
+		Report(t, "P13.watch_sees_removed_on_replace", Info,
+			"CONSEQUENCE FOR internal/watch: every notes save emits REMOVED(<doc>) immediately followed by "+
+				"RENAMED_NEW_NAME(<doc>) and MODIFIED(<doc>). fsnotify maps those to Remove then Create then Write. A "+
+				"watcher that reacts to Remove by dropping state for the document — or a UI that reacts by hiding it — will "+
+				"flicker on every save. The 250ms debounce in internal/watch absorbs this today on Linux (where a rename "+
+				"emits no unlink at all); on Windows the debounce is doing real work and must not be removed.")
+
 	})
 
 	// --- half 3: continuous resolvability (empirical corroboration) ---
@@ -700,8 +703,19 @@ func TestP13NeverRemoveThenRename(t *testing.T) {
 		Report(t, "P13.continuous_existence", boolVerdict(goodGaps == 0),
 			"a concurrent reader polled the destination name during 200 replaces: %d poll(s), %d observation(s) of "+
 				"'does not exist'. NEGATIVE CONTROL (remove-then-rename, 200 replaces): %d poll(s), %d gap(s). "+
-				"This half is empirical, not deterministic — it corroborates the audit and the kernel records rather than "+
-				"standing alone.", goodPolls, goodGaps, badPolls, badGaps)
+				"With the control failing on roughly half of all polls, this is the black-box discriminator that "+
+				"ReadDirectoryChangesW turned out not to be: it is empirical rather than deterministic, but the margin is "+
+				"not a close call.", goodPolls, goodGaps, badPolls, badGaps)
+		if badGaps > 0 {
+			RequireProperty(t, "P13.continuous_existence", goodGaps == 0,
+				"the destination name must resolve at every instant during a replace; a concurrent reader saw it absent "+
+					"%d time(s) out of %d polls (the same observer caught the wrong implementation %d time(s) out of %d)",
+				goodGaps, goodPolls, badGaps, badPolls)
+		} else {
+			Report(t, "P13.continuous_existence", NotMeasured,
+				"the negative control produced no gaps on this runner, so the observer cannot be shown to discriminate and "+
+					"the assertion is withheld rather than reported as passing")
+		}
 	})
 }
 
