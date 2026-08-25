@@ -66,6 +66,11 @@ jobs:
           go-version-file: go.mod
       - name: Cross-compile both commands
         run: go build ./cmd/...
+      # P2.7 review finding F6: `go build ./cmd/...` never compiles test
+      # files, so a Windows-broken _test.go stayed invisible to this gate.
+      # Vet the whole module, tests included.
+      - name: Vet everything for Windows (includes test files)
+        run: go vet ./...
 
   # ------------------------------------------------------------------
   # P0.3 / review F1 — Native Windows amd64 FULL-SUITE job on a pinned

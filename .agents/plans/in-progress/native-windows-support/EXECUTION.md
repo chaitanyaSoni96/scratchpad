@@ -310,3 +310,49 @@ P2.1–P2.4 deleted four confirmed-dead functions (`ensureProjectDir`,
 `rejectSymlinkParents`, `pruneEmpty`, `linksTo`). `CLAUDE.md` still described
 `Watch`'s same-target idempotence in terms of `linksTo`; it now describes the
 behaviour without naming the removed helper.
+
+### P2.7 gate review — PASS WITH FINDINGS
+
+Full record in `reviews/P2.7-boundary-review.md`. The boundary itself is sound:
+no interface or VFS was introduced, no helper takes a flags parameter, every
+security-carrying flag (`O_NOFOLLOW`, `O_DIRECTORY`, `O_CLOEXEC`,
+`AT_SYMLINK_NOFOLLOW`, `AT_REMOVEDIR`) survives verbatim, no descriptor-relative
+operation became path-based, and the passing test-name set is byte-identical to
+`36bb133^`.
+
+Closed immediately:
+
+- **F1 (high, latent)** — four Windows stubs whose signatures have no error
+  channel returned benign constants. `dirHasHTMLFD → false` is fail-**open** in
+  two of its three callers, disabling both the artifact-nesting rejection and
+  the single-watch-boundary guard; `fdPath → ""` is CWD-relative because
+  `filepath.Join("", x) == x`. There is no correct constant, so they now panic
+  via `unreachableOnWindows`. `OpenDocument` keeps returning false — there,
+  false is unambiguously fail-closed (a 404).
+- **F6 (low)** — CI only ran `GOOS=windows go build ./cmd/...`, which never
+  compiles test files. Added `GOOS=windows go vet ./...` to the cross-build job.
+
+### Preconditions carried into Phase 3
+
+**Ordering constraint (F4) — binding on P3.1.** `IsLinkEntry`/`IsLinkInfo` have
+a real but junction-blind Windows implementation. Today that is fail-closed: a
+junction reports `ModeIrregular`, so both `IsLinkEntry(e)` and `e.IsDir()` are
+false and `entryIsDir` skips it *before* its follow-through `os.Stat`. Fixing
+the classifier to report junctions **without** simultaneously fixing
+`entryIsDir`'s follow-through `os.Stat` would convert that skip into a
+path-based descent through the junction. A partial fix is worse than none, and
+the plan imposes no ordering. Both must change together.
+
+**Vacuous Windows tests (F3) — binding on P3.11.** Some security tests already
+appear in the windows-2025 PASS list while asserting nothing: they assert only
+`err != nil` and "nothing was created", both trivially true because the stub
+refused at line 1. Confirmed for `TestPublishAndNestedWatchRejectSymlinkProject`,
+`TestSaveNotesRequiresDocExists`, `TestNotesReadHiddenPath404s`,
+`TestListFragmentRejectsInvalidFolders`. These must be made to assert the
+*reason* for the failure before P3.11 removes the `continue-on-error` allowance,
+or the native job will go green while testing nothing.
+
+Also open: F2 (domain policy inherited on the platform side — `dirHasHTMLFD`
+encodes the artifact definition, `openRealDir` owns two user-facing error
+strings, `openBrowsableDir` implements invariant 5) → P3.2/P3.6. F5, F7, F8, F9
+are recorded in the review.

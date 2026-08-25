@@ -17,6 +17,23 @@ import (
 // here should still exist once that lands.
 var errWindowsUnimplemented = errors.New("scratchpad: the Windows store backend is not implemented yet (plan phase 3)")
 
+// unreachableOnWindows panics. It backs the handful of stubs whose Linux
+// signature has no error channel — they return a bool, a string, or nothing
+// at all, so "not implemented" is indistinguishable from a real answer and
+// every available constant is wrong. dirHasHTMLFD is the clearest case: it
+// decides both openRealDir's artifact-nesting rejection and
+// openBrowsableDir's single-watch-boundary guard, so false is fail-OPEN in
+// two callers and fail-closed in a third, and true simply inverts which.
+//
+// Every one of these is downstream of a rootedFS operation that already
+// fails on Windows, so reaching one means that ordering assumption broke.
+// Crashing says so; a benign constant would silently disable a containment
+// rule. P2.7 review finding F1.
+func unreachableOnWindows(fn string) {
+	panic("scratchpad: " + fn + " reached on Windows, but the Windows store backend is not implemented (plan phase 3). " +
+		"Its caller was supposed to fail earlier at openRootedFS or openAnnotationFS; that ordering no longer holds.")
+}
+
 // rootedFS mirrors the Linux type: on Linux it keeps operations anchored to
 // the inode opened as SCRATCHPAD_ROOT via a raw fd; the Windows backend
 // (Phase 3) anchors the same way to a handle opened with
@@ -29,7 +46,7 @@ func openRootedFS(create bool) (*rootedFS, error) {
 	return nil, errWindowsUnimplemented
 }
 
-func (r *rootedFS) close() error { return nil }
+func (r *rootedFS) close() error { unreachableOnWindows("rootedFS.close"); return nil }
 
 // dupFD, fdPath and closeFD exist only to keep storefs_linux.go's fd-based
 // call sites (store.go) compiling identically on both platforms; the
@@ -44,9 +61,11 @@ func dupFD(fd int) (int, error) { return -1, errWindowsUnimplemented }
 // substitute, because it re-resolves a string and reintroduces the TOCTOU
 // the fd removed). Every caller of fdPath is downstream of a rootedFS
 // operation that already fails before reaching it on Windows.
-func fdPath(fd int) string { return "" }
+// The empty string would be actively dangerous: filepath.Join("", x) == x,
+// so a caller would silently operate on a CWD-relative path.
+func fdPath(fd int) string { unreachableOnWindows("fdPath"); return "" }
 
-func closeFD(fd int) {}
+func closeFD(fd int) { unreachableOnWindows("closeFD") }
 
 func mkdirClaim(parent int, name string) error { return errWindowsUnimplemented }
 
@@ -54,7 +73,7 @@ func rmdirAt(parent int, name string) error { return errWindowsUnimplemented }
 
 func openDirAt(parent int, name string) (int, error) { return -1, errWindowsUnimplemented }
 
-func dirHasHTMLFD(fd int) bool { return false }
+func dirHasHTMLFD(fd int) bool { unreachableOnWindows("dirHasHTMLFD"); return false }
 
 func (r *rootedFS) openRealDir(segs []string, create, rejectArtifacts bool) (int, error) {
 	return -1, errWindowsUnimplemented
@@ -72,11 +91,11 @@ func openFileAt(parent int, name string) (*os.File, error) { return nil, errWind
 
 func readAllAt(parent int, name string) ([]byte, error) { return nil, errWindowsUnimplemented }
 
-func pruneAt(r *rootedFS, segs []string) {}
+func pruneAt(r *rootedFS, segs []string) { unreachableOnWindows("pruneAt") }
 
 func openPathFile(segs []string) (*os.File, error) { return nil, errWindowsUnimplemented }
 
-// OpenDocument returns false rather than erroring, matching its Linux
-// signature (bool, not error) and its Linux behavior for "not found" —
-// which is indistinguishable, from this signature, from "not implemented".
+// OpenDocument returns false rather than erroring or panicking: unlike the
+// stubs above, false is unambiguously fail-CLOSED here — it serves a 404,
+// which is the correct answer while there is no backend to open through.
 func OpenDocument(segs []string) (*os.File, bool) { return nil, false }
