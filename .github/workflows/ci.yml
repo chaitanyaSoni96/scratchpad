@@ -42,16 +42,15 @@ jobs:
 
   # ------------------------------------------------------------------
   # P0.2 — Windows cross-compile from Linux (amd64 + arm64).
-  # internal/store has no Windows backend yet, so this build is EXPECTED
-  # to fail (see .agents/plans/in-progress/native-windows-support/EXECUTION.md).
-  # continue-on-error keeps the workflow green until the backend lands.
-  # Phase 2 (P2.6) removes this allowance.
+  # P2.6: the shared code no longer imports Unix APIs and both commands
+  # compile against the Windows platform stubs, so this job is REQUIRED
+  # and its failure allowance is gone. It proves source portability only;
+  # the stubs still return "not implemented" until Phase 3.
   # ------------------------------------------------------------------
   cross-build-windows:
-    name: Cross-build windows/${{ matrix.goarch }} (from Linux) [allowed to fail until P2.6]
+    name: Cross-build windows/${{ matrix.goarch }} (from Linux)
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    continue-on-error: true # expected failure until Phase 2; Phase 2 (P2.6) removes this allowance.
     strategy:
       fail-fast: false
       matrix:
@@ -239,16 +238,13 @@ jobs:
 
   # ------------------------------------------------------------------
   # P0.3 — Native Windows arm64 job (windows-11-arm runner): build-only
-  # coverage for the second architecture. The code does not compile on
-  # Windows yet, so this is EXPECTED to fail. continue-on-error keeps the
-  # workflow green for now; Phase 2 (P2.6) removes this allowance once
-  # both commands cross-compile.
+  # coverage for the second architecture. P2.6 made this REQUIRED: both
+  # commands now compile natively on arm64 against the platform stubs.
   # ------------------------------------------------------------------
   windows-arm64-build:
-    name: Windows arm64 native — build (windows-11-arm) [allowed to fail until P2.6]
+    name: Windows arm64 native — build (windows-11-arm)
     runs-on: windows-11-arm
     timeout-minutes: 15
-    continue-on-error: true # expected failure until Phase 2; Phase 2 (P2.6) removes this allowance.
     env:
       CGO_ENABLED: 0
     steps:

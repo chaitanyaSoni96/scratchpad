@@ -276,3 +276,37 @@ green including the new `TestValidateNamePortable`,
 now-rejected name.
 
 (P0.2/P0.3 CI evidence lives in the Phase 0 sections above.)
+
+### P2.6 — cross-build allowances removed
+
+After P2.1–P2.4 (`36bb133`) both commands compile for `windows/amd64` and
+`windows/arm64`, so `cross-build-windows` and `windows-arm64-build` lost their
+`continue-on-error` and are now required checks. The two native Windows test
+jobs keep theirs — the platform files are stubs that return "not implemented"
+until Phase 3, so the suite cannot pass there yet (P3.11/P4, P4.4).
+
+Compiling is not working. A green cross-build proves source portability only.
+
+### Open gap carried into Phase 3/4: `/proc/self/fd` in the web layer
+
+P2.4 removed every Unix API from shared *store* code, but `internal/web/server.go`
+still formats Linux `/proc/self/fd/%d` paths at four sites (296, 555, 605, 648)
+to turn a pinned directory handle back into a readable path. These **compile on
+Windows and silently misbehave** — they are not caught by the cross-build gate,
+which is exactly the failure mode P2.4's grep was meant to prevent.
+
+This is the same `fdPath` problem the threat model calls the hardest porting
+constraint in the store, surfacing a second time in the web layer. The P1.2
+spike measured that `os.NewFile(dup(handle)).ReadDir` works on Windows, which is
+the natural replacement.
+
+Owner: **P3.6** for the store-side `fdPath` removal, and **P4.6** for these four
+web call sites. Neither may be closed by making the string portable — the point
+of the pin is that it is not re-resolved.
+
+### Doc drift repaired
+
+P2.1–P2.4 deleted four confirmed-dead functions (`ensureProjectDir`,
+`rejectSymlinkParents`, `pruneEmpty`, `linksTo`). `CLAUDE.md` still described
+`Watch`'s same-target idempotence in terms of `linksTo`; it now describes the
+behaviour without naming the removed helper.
