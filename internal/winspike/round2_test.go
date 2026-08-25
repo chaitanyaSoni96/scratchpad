@@ -211,8 +211,8 @@ func TestRR1StdlibWalkAndRemoveThroughJunction(t *testing.T) {
 	}
 	Report(t, "RR1.walkdir", boolVerdict(!descended),
 		"filepath.WalkDir starting AT a junction saw %v -> descended into the target = %v. "+
-			"loadArtifact (store.go:380) walks an artifact this way, so a junction planted as an artifact "+
-			"makes it read an arbitrary external tree.", seen, descended)
+			"loadArtifact (store.go:380) walks artifacts this way; if WalkDir does NOT descend, a junction-backed artifact "+
+			"reports as empty (a silent correctness failure, threat model §3.3b) rather than leaking the target.", seen, descended)
 
 	// (b) os.RemoveAll — the destruction primitive.
 	rmErr := os.RemoveAll(filepath.Join(dir, "art"))
