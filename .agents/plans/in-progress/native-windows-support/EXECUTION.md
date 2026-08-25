@@ -104,3 +104,35 @@ green including the new `TestValidateNamePortable`,
 `TestValidateFilePathRejectsDeviceNames`, and
 `TestValidateSegmentAcceptsDeviceNames`. No existing test or fixture used a
 now-rejected name.
+
+### P0.2 / P0.3 CI evidence
+
+`.github/workflows/ci.yml` — five jobs. Run 1 (`32898457159`, commit `30c34a5`)
+proved the harness itself works on real runners:
+
+| Job | Runner | Conclusion | Expected? |
+|---|---|---|---|
+| Linux amd64 — vet, test, check-make, build | `ubuntu-latest` | success | yes — required gate |
+| Cross-build windows/amd64 | `ubuntu-latest` | failure | yes — `internal/store` has no Windows backend |
+| Cross-build windows/arm64 | `ubuntu-latest` | failure | yes — same cause |
+| Windows amd64 native — vet, test | `windows-2025` | failure | yes — same cause |
+| Windows arm64 native — build | `windows-11-arm` | failure | yes — same cause |
+
+Every Windows failure was confirmed from the logs to be the recorded
+known-failure list (`undefined: annotationFS`, `undefined: unix.Flock`, …), not
+a harness defect. Go `1.26.5` resolves and installs from `go-version-file:
+go.mod` on all four runners, and all four `runs-on` labels are valid.
+
+The native job's symlink probe reported capability present and exported
+`SCRATCHPAD_TEST_SYMLINKS=1`, so `testutil.RequireSymlinks` will not silently
+skip the security tests on that runner once the code compiles.
+
+Run 2 (`32898956148`, commit `1ed3992`) repeated the same pattern with the P2.5
+name change in place: Linux still green, Windows jobs still failing on the same
+known cause.
+
+The four Windows jobs carry `continue-on-error` with a comment naming the task
+that removes it (P2.6 for the builds, P3.11/P4 for the native test job).
+
+Not yet in CI, deliberately: `-count=20` repetition and `-race`, which the plan
+places in P6.1/P6.6.
