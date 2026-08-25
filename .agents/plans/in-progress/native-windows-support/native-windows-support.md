@@ -56,18 +56,18 @@ Claude Opus 5 from the other family when available.
 changes. **Gate:** current Linux tests pass and Windows compile failures are
 captured as expected evidence.
 
-- [ ] **P0.1 [CX] Record baseline.** Run `make test` and capture `GOOS=windows`
+- [x] **P0.1 [CX] Record baseline.** Run `make test` and capture `GOOS=windows`
   compiler failures in the execution tracker. Do not edit behavior.
-- [ ] **P0.2 [CX] Add Windows build job.** Add CI that cross-compiles both commands
+- [x] **P0.2 [CX] Add Windows build job.** Add CI that cross-compiles both commands
   for `windows/amd64` and `windows/arm64`; initially allow only known failures,
   then make it required in Phase 2.
-- [ ] **P0.3 [CS] Add native Windows test job.** Run `go test ./...` on a pinned
+- [x] **P0.3 [CS] Add native Windows test job.** Run `go test ./...` on a pinned
   supported Windows runner. Separate ordinary tests from tests requiring
   symlink capability and print explicit skip reasons.
-- [ ] **P0.4 [CS] Classify tests.** Move Unix-only assumptions behind test helper
+- [x] **P0.4 [CS] Classify tests.** Move Unix-only assumptions behind test helper
   files or build tags without changing assertions. Define reusable helpers for
   link capability, NTFS requirement, and race hooks.
-- [ ] **P0.5 [CO review] Baseline review.** Confirm CI covers Linux, Windows
+- [x] **P0.5 [CO review] Baseline review.** Confirm CI covers Linux, Windows
   cross-build, native Windows, amd64, and at least compile coverage for arm64.
 
 **Exit evidence:** baseline tracker entry, CI links, known-failure list, and no
@@ -127,7 +127,7 @@ behavior. **Gate:** Linux suite passes and both Windows commands cross-compile.
 - [ ] **P2.4 [CX] Remove shared Unix imports.** Eliminate direct `x/sys/unix` and
   `syscall.Stat_t` references from untagged files. Keep Linux implementations
   mechanically equivalent.
-- [ ] **P2.5 [CS] Add portable name validation.** Implement accepted reserved-name
+- [x] **P2.5 [CS] Add portable name validation.** Implement accepted reserved-name
   and trailing-dot/space rules with table-driven tests on every OS. Document the
   small compatibility change.
 - [ ] **P2.6 [CX] Make cross-build required.** Remove temporary known-failure

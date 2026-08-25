@@ -8,6 +8,13 @@ on:
 permissions:
   contents: read
 
+# F8 (partial) — cancel superseded runs on the same ref; never cancel runs on
+# main so its history keeps complete evidence. The ${{ }} here is a workflow
+# expression, not run-block interpolation: no injection surface is introduced.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 jobs:
   # ------------------------------------------------------------------
   # P0.2 — Linux gate. This is the required baseline: it must stay green
@@ -22,6 +29,8 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      - name: go mod tidy -diff
+        run: go mod tidy -diff
       - name: go vet
         run: go vet ./...
       - name: go test
@@ -60,22 +69,36 @@ jobs:
         run: go build ./cmd/...
 
   # ------------------------------------------------------------------
-  # P0.3 — Native Windows amd64 test job on a pinned runner image
-  # (windows-2025, not the floating windows-latest label).
+  # P0.3 / review F1 — Native Windows amd64 FULL-SUITE job on a pinned
+  # runner image (windows-2025, not the floating windows-latest label).
   #
-  # GitHub-hosted Windows runners can usually create symlinks, but
-  # Developer Mode state is not guaranteed, so the job PROBES for the
-  # capability at runtime and exports SCRATCHPAD_TEST_SYMLINKS=1|0 for
-  # the Go test process (the test helper reads exactly that variable,
-  # distinguishing symlink-dependent tests from ordinary ones).
+  # This is the spec's symlink-CAPABLE job ("Build and release": at least
+  # one Windows CI job must run the full suite in a symlink-capable test
+  # environment). Capability here is MANDATORY, not advisory:
+  #
+  #   1. The probe hard-fails (exit 1) when the runner cannot create a
+  #      directory symlink. GitHub-hosted Windows runners are capable, so
+  #      absence means the harness is broken — not that the security
+  #      tests are optional. Degraded-mode behaviour is exercised by the
+  #      separate windows-degraded-test job, never by this one.
+  #   2. After the suite runs, the job fails if any
+  #      SKIP(symlink-capability) line appears in the -v output, so a
+  #      capability regression (runner image change, stray
+  #      SCRATCHPAD_TEST_SYMLINKS=0 in the environment) turns the job
+  #      red instead of silently erasing the containment suite.
+  #   3. The assertion cannot pass vacuously: the job also fails when the
+  #      output contains no `--- PASS/FAIL/SKIP:` result lines at all
+  #      (e.g. every package failed to build), so "zero skips" can never
+  #      be satisfied by a suite that never ran.
   #
   # The code does not compile on Windows yet, so this job is EXPECTED to
   # fail until the Windows store backend exists. continue-on-error keeps
-  # the workflow green for now; Phase 3 (P3.11) / Phase 4 removes this
-  # allowance and makes the job required.
+  # the workflow green for now; P3.11 / Phase 4 removes this allowance
+  # and makes the job required (note: "required" also needs a branch
+  # protection rule on main naming this check — see EXECUTION.md).
   # ------------------------------------------------------------------
-  windows-native-test:
-    name: Windows amd64 native — vet, test (windows-2025) [allowed to fail until P3.11/P4]
+  windows-symlink-required:
+    name: Windows amd64 native — full suite, symlink-capable (windows-2025) [allowed to fail until P3.11/P4]
     runs-on: windows-2025
     timeout-minutes: 30
     continue-on-error: true # expected failure until the Windows backend lands; P3.11 / P4 removes this allowance.
@@ -86,7 +109,8 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - name: Probe symlink capability
+      - name: Probe symlink capability (mandatory in this job)
+        id: probe
         shell: pwsh
         run: |
           $probe = Join-Path ([System.IO.Path]::GetTempPath()) ("scratchpad-symlink-probe-" + [System.Guid]::NewGuid().ToString("N"))
@@ -94,29 +118,124 @@ jobs:
           $target = Join-Path $probe "target"
           New-Item -ItemType Directory -Path $target | Out-Null
           $link = Join-Path $probe "link"
-          $capable = "0"
           try {
             New-Item -ItemType SymbolicLink -Path $link -Target $target -ErrorAction Stop | Out-Null
-            $capable = "1"
             Write-Host "symlink capability: PRESENT (directory symlink created at $link)"
           } catch {
-            # Greppable skip reason for log triage:
-            Write-Host "SCRATCHPAD-SKIP: symlink capability ABSENT on this runner ($($_.Exception.Message)) - symlink-dependent tests will be skipped"
+            Write-Host "::error::symlink capability ABSENT on this runner ($($_.Exception.Message)). GitHub-hosted Windows runners are symlink-capable, so absence means the harness or image is broken. This job REQUIRES the capability and never runs the suite in degraded mode (that is windows-degraded-test's job)."
+            exit 1
+          } finally {
+            Remove-Item -Recurse -Force $probe -ErrorAction SilentlyContinue
           }
-          Remove-Item -Recurse -Force $probe -ErrorAction SilentlyContinue
-          Add-Content -Path $env:GITHUB_ENV -Value "SCRATCHPAD_TEST_SYMLINKS=$capable"
-          Write-Host "SCRATCHPAD_TEST_SYMLINKS=$capable"
+          Add-Content -Path $env:GITHUB_ENV -Value "SCRATCHPAD_TEST_SYMLINKS=1"
+          Write-Host "SCRATCHPAD_TEST_SYMLINKS=1"
       - name: go vet
         shell: pwsh
         run: go vet ./...
-      - name: go test (ordinary + symlink-gated tests)
+      # review F2: `if: always()` (guarded on the probe) so the test step
+      # executes and its output is observable even while vet fails on the
+      # missing Windows backend. It never runs after a failed probe: this
+      # job must not produce full-suite output from an incapable runner.
+      - name: go test (full suite, -v, symlink capability required)
+        if: ${{ always() && steps.probe.outcome == 'success' }}
         shell: pwsh
         run: |
-          Write-Host "SCRATCHPAD_TEST_SYMLINKS=$env:SCRATCHPAD_TEST_SYMLINKS"
-          if ($env:SCRATCHPAD_TEST_SYMLINKS -ne "1") {
-            Write-Host "SCRATCHPAD-SKIP: symlink capability ABSENT - tests requiring symlink creation will self-skip via SCRATCHPAD_TEST_SYMLINKS=0"
+          $out = Join-Path $env:RUNNER_TEMP "go-test-output.txt"
+          go test ./... -v 2>&1 | Tee-Object -FilePath $out
+          $testExit = $LASTEXITCODE
+          Write-Host "go test exit code: $testExit"
+          $failed = $false
+          # Non-vacuous guard: a run that produced no test result lines
+          # (e.g. every package failed to build) must not let the skip
+          # assertion below succeed by having nothing to scan.
+          $results = @(Select-String -Path $out -Pattern '^--- (PASS|FAIL|SKIP): ')
+          if ($results.Count -eq 0) {
+            Write-Host "::error::no '--- PASS/FAIL/SKIP:' result lines in the go test output - the suite did not actually run, so the symlink-capability assertion would be vacuous."
+            $failed = $true
+          } else {
+            Write-Host "test result lines: $($results.Count)"
           }
-          go test ./...
+          # The capability assertion: in this job NOTHING may skip for
+          # lack of symlink capability. This is what makes it the spec's
+          # symlink-capable job rather than an advisory warning.
+          $capSkips = @(Select-String -Path $out -SimpleMatch 'SKIP(symlink-capability)')
+          if ($capSkips.Count -gt 0) {
+            Write-Host "::error::$($capSkips.Count) test(s) skipped for missing symlink capability in the symlink-REQUIRED job:"
+            $capSkips | ForEach-Object { Write-Host $_.Line }
+            $failed = $true
+          } else {
+            Write-Host "symlink-capability skips: 0 (as required)"
+          }
+          if ($failed -or ($testExit -ne 0)) { exit 1 }
+
+  # ------------------------------------------------------------------
+  # P0.3 / review F1 — Degraded-mode job: deliberately runs the suite
+  # with SCRATCHPAD_TEST_SYMLINKS=0 and asserts that everything else
+  # still passes, i.e. publish-only workflows survive without link
+  # capability while every symlink-dependent test visibly reports
+  # SKIP(symlink-capability). This is the P4.4 "watch failure does not
+  # disable publish-only workflows" evidence in embryo, and it keeps the
+  # =0 off-switch loud: flipping it can only ever move tests from PASS
+  # to a counted, asserted SKIP in this job — never silently erase them
+  # from the required job above.
+  #
+  # The code does not compile on Windows yet, so this job is EXPECTED to
+  # fail. continue-on-error keeps the workflow green for now; P4.4
+  # removes this allowance.
+  # ------------------------------------------------------------------
+  windows-degraded-test:
+    name: Windows amd64 native — degraded mode, no symlinks (windows-2025) [allowed to fail until P4.4]
+    runs-on: windows-2025
+    timeout-minutes: 30
+    continue-on-error: true # expected failure until the Windows backend lands; P4.4 removes this allowance.
+    env:
+      CGO_ENABLED: 0
+      SCRATCHPAD_TEST_SYMLINKS: "0" # deliberate: force the no-capability path for the whole suite
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: go vet
+        shell: pwsh
+        run: go vet ./...
+      # review F2: `if: always()` so the test step executes and its output
+      # is observable even while vet fails on the missing Windows backend.
+      - name: go test (degraded mode, -v, symlink tests must skip)
+        if: ${{ always() }}
+        shell: pwsh
+        run: |
+          Write-Host "SCRATCHPAD_TEST_SYMLINKS=$env:SCRATCHPAD_TEST_SYMLINKS (deliberately 0 in this job)"
+          $out = Join-Path $env:RUNNER_TEMP "go-test-output.txt"
+          go test ./... -v 2>&1 | Tee-Object -FilePath $out
+          $testExit = $LASTEXITCODE
+          Write-Host "go test exit code: $testExit"
+          $failed = $false
+          # Non-vacuous guard, same as the symlink-capable job: "passes in
+          # degraded mode" means nothing if no test actually ran.
+          $results = @(Select-String -Path $out -Pattern '^--- (PASS|FAIL|SKIP): ')
+          if ($results.Count -eq 0) {
+            Write-Host "::error::no '--- PASS/FAIL/SKIP:' result lines in the go test output - the suite did not actually run."
+            $failed = $true
+          } else {
+            Write-Host "test result lines: $($results.Count)"
+          }
+          # The symlink-dependent tests must visibly skip through the
+          # RequireSymlinks guard - zero skips here would mean the =0
+          # off-switch no longer routes through the guard (or the guarded
+          # tests vanished), which is exactly the silent failure mode this
+          # job exists to catch. (If the Phase 1 ADR replaces the probe -
+          # see review F5 / P1.6 - this assertion moves with it.)
+          $capSkips = @(Select-String -Path $out -SimpleMatch 'SKIP(symlink-capability)')
+          if ($capSkips.Count -eq 0) {
+            Write-Host "::error::no SKIP(symlink-capability) lines in degraded mode - the SCRATCHPAD_TEST_SYMLINKS=0 off-switch is no longer visibly routing through the RequireSymlinks guard."
+            $failed = $true
+          } else {
+            Write-Host "symlink-capability skips: $($capSkips.Count) (expected in degraded mode)"
+          }
+          # Everything that is not symlink-gated must still pass: publish,
+          # annotations on real directories, web serving, CLI behavior.
+          if ($failed -or ($testExit -ne 0)) { exit 1 }
 
   # ------------------------------------------------------------------
   # P0.3 — Native Windows arm64 job (windows-11-arm runner): build-only
