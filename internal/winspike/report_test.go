@@ -11,11 +11,11 @@ import (
 // part of the interface: `Select-String 'WINSPIKE|'` must produce a complete,
 // stable table.
 const (
-	Yes         = "YES"          // the property holds
-	No          = "NO"           // the property does not hold
-	Partial     = "PARTIAL"      // holds under stated conditions only
-	NotMeasured = "NOT-MEASURED" // could not be measured here; detail says why
-	Info        = "INFO"         // environment fact, not a yes/no question
+	Yes         = "YES"           // the property holds
+	No          = "NO"            // the property does not hold
+	Partial     = "PARTIAL"       // holds under stated conditions only
+	NotMeasured = "NOT-MEASURED"  // could not be measured here; detail says why
+	Info        = "INFO"          // environment fact, not a yes/no question
 	Violation   = "SECURITY-FAIL" // a REQUIRED security property is contradicted
 )
 

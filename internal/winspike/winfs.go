@@ -716,9 +716,9 @@ func isExist(err error) bool {
 
 // Win32 information classes (SetFileInformationByHandle).
 const (
-	win32FileRenameInfo      = 3  // windows.FileRenameInfo
-	win32FileRenameInfoEx    = 22 // windows.FileRenameInfoEx
-	win32FileDispositionInfo = 4
+	win32FileRenameInfo        = 3  // windows.FileRenameInfo
+	win32FileRenameInfoEx      = 22 // windows.FileRenameInfoEx
+	win32FileDispositionInfo   = 4
 	win32FileDispositionInfoEx = 21
 )
 

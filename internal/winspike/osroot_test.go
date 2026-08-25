@@ -153,10 +153,14 @@ func TestM17OsRootMissingPrimitives(t *testing.T) {
 		"x/sys/windows v0.41.0 exports NtCreateFile/NtSetInformationFile/GetFileInformationByHandleEx/SetFileInformationByHandle/DeviceIoControl and the OBJ_*/FILE_*/STATUS_* constants, "+
 			"but NOT: Openat, Symlinkat, FILE_ATTRIBUTE_TAG_INFO, FILE_ID_INFO, FILE_NAME_INFO, FILE_RENAME_INFO, FILE_DISPOSITION_INFO_EX, "+
 			"SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE, or the NT information-class numbers 65/64. "+
-			"internal/winspike/winfs.go supplies all of them in %d lines of mechanism.", winfsLines)
+			"internal/winspike/winfs.go (%d lines) and links.go (%d lines) supply all of them.", winfsLines, linksLines)
 	_ = windows.InvalidHandle
 }
 
-// winfsLines is a rough size marker so the ADR can quote the cost of the
-// hand-rolled option honestly.
-const winfsLines = 470
+// Size markers so the ADR can quote the cost of the hand-rolled option
+// honestly. Both files are heavily commented; the executable mechanism is
+// roughly half of each.
+const (
+	winfsLines = 790
+	linksLines = 261
+)
