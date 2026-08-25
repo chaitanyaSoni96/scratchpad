@@ -171,47 +171,84 @@ func runWithDeveloperModeOff(t *testing.T) {
 
 func TestRR1UnknownTagDirectoryIsIsDirTrue(t *testing.T) {
 	r, dir := openScratchRoot(t)
-	if err := MkdirAt(r.Handle(), "unktree"); err != nil {
-		t.Skip("mkdir")
-	}
-	// Give it a child BEFORE tagging it, so a descending walk would find one.
-	mustWrite(t, filepath.Join(dir, "unktree", "inside.txt"), "reachable?")
 
+	// FSCTL_SET_REPARSE_POINT refuses a non-empty directory, so an attacker
+	// cannot tag a populated tree in place; the tag has to be applied to an
+	// empty directory. Measured in run 32902629190 as ERROR_DIR_NOT_EMPTY.
+	if err := MkdirAt(r.Handle(), "populated"); err == nil {
+		mustWrite(t, filepath.Join(dir, "populated", "child.txt"), "x")
+		if h, oerr := ntOpenAt(r.Handle(), "populated", windows.FILE_GENERIC_WRITE|windows.FILE_GENERIC_READ,
+			windows.FILE_OPEN, windows.FILE_DIRECTORY_FILE|windows.FILE_OPEN_REPARSE_POINT,
+			windows.OBJ_CASE_INSENSITIVE, 0); oerr == nil {
+			perr := SetUnknownTag(h, 0x00001234)
+			windows.CloseHandle(h)
+			Report(t, "M4.nonempty", boolVerdict(perr != nil),
+				"FSCTL_SET_REPARSE_POINT on a NON-EMPTY directory -> %s. A reparse tag can only be applied to an EMPTY "+
+					"directory, so an attacker cannot convert an existing populated tree into a reparse point in place.",
+				DescribeErr(perr))
+		}
+	}
+
+	if err := MkdirAt(r.Handle(), "unktree"); err != nil {
+		Report(t, "RR1.unknown_tag_isdir", NotMeasured, "mkdir: %s", DescribeErr(err))
+		return
+	}
 	h, err := ntOpenAt(r.Handle(), "unktree", windows.FILE_GENERIC_WRITE|windows.FILE_GENERIC_READ,
 		windows.FILE_OPEN, windows.FILE_DIRECTORY_FILE|windows.FILE_OPEN_REPARSE_POINT,
 		windows.OBJ_CASE_INSENSITIVE, 0)
 	if err != nil {
-		t.Skip("reopen")
+		Report(t, "RR1.unknown_tag_isdir", NotMeasured, "reopen: %s", DescribeErr(err))
+		return
 	}
 	setErr := SetUnknownTag(h, 0x00001234)
 	windows.CloseHandle(h)
 	if setErr != nil {
-		Report(t, "RR1.unknown_tag", NotMeasured, "SetUnknownTag: %s", DescribeErr(setErr))
+		Report(t, "RR1.unknown_tag_isdir", NotMeasured, "SetUnknownTag: %s", DescribeErr(setErr))
 		return
 	}
 
 	p := filepath.Join(dir, "unktree")
 	li, lerr := os.Lstat(p)
+	si, serr := os.Stat(p)
 	isDir := lerr == nil && li.IsDir()
 	entries, rdErr := os.ReadDir(p)
 	at, _ := StatAt(r.Handle(), "unktree")
 
-	Report(t, "RR1.unknown_tag_isdir", boolVerdict(!isDir),
-		"a NON-SURROGATE unknown reparse tag on a directory: os.Lstat.IsDir()=%v mode=%v (err %v) ; os.ReadDir -> %d entries, err=%v ; "+
-			"tag view %s. Go sets ModeDir because IsReparseTagNameSurrogate is FALSE, so ANY walk that decides by IsDir() "+
-			"treats it as an ordinary directory. This is a second RR1 vector the threat model did not enumerate: it assumed "+
-			"the junction (surrogate) case.",
-		isDir, modeOf(li), lerr, len(entries), rdErr, at)
+	// What the parent listing says — this is what store.go:316 entryIsDir sees.
+	entryIsDir, entryType := false, os.FileMode(0)
+	if es, err := os.ReadDir(dir); err == nil {
+		for _, e := range es {
+			if e.Name() == "unktree" {
+				entryIsDir, entryType = e.IsDir(), e.Type()
+			}
+		}
+	}
 
-	// Does the stdlib's recursive delete descend?
+	Report(t, "RR1.unknown_tag_isdir", boolVerdict(!isDir && !entryIsDir),
+		"a NON-SURROGATE unknown reparse tag (0x00001234) on a directory: os.Lstat.IsDir()=%v mode=%v (err %v) ; "+
+			"os.Stat.mode=%v (err %v) ; parent DirEntry.IsDir()=%v Type=%v ; os.ReadDir -> %d entries err=%v ; tag view %s. "+
+			"Go sets ModeDir here because IsReparseTagNameSurrogate is FALSE ($GOROOT/src/os/types_windows.go:190-204), so any "+
+			"walk that decides by IsDir() treats it as an ordinary directory. This is a SECOND RR1 vector: the threat model's "+
+			"analysis assumed the junction (surrogate) case.",
+		isDir, modeOf(li), lerr, modeOf(si), serr, entryIsDir, entryType, len(entries), rdErr, at)
+
+	var walked []string
+	_ = filepath.WalkDir(p, func(q string, d os.DirEntry, err error) error {
+		walked = append(walked, filepath.Base(q))
+		return nil
+	})
 	rmErr := os.RemoveAll(p)
-	_, gone := os.Stat(p)
-	Report(t, "RR1.unknown_tag_removeall", Info,
-		"os.RemoveAll on the unknown-tag directory -> err=%v ; entry gone = %v", rmErr, gone != nil)
+	_, after := os.Stat(p)
+	Report(t, "RR1.unknown_tag_walk", Info,
+		"filepath.WalkDir on it saw %v ; os.RemoveAll -> err=%v ; entry gone = %v. The kernel returns "+
+			"STATUS_IO_REPARSE_TAG_NOT_HANDLED for an open when no filter driver services the tag, which is what limits the "+
+			"damage HERE — but on a machine that HAS the driver (WCI, ProjFS, a vendor filter) the open succeeds and the "+
+			"IsDir()=true classification above is the whole defence.",
+		walked, rmErr, after != nil)
+
 	Report(t, "R4.allowlist_evidence", Info,
-		"CONSEQUENCE for R4: the tag allowlist cannot be 'refuse name surrogates'. It must be 'refuse every tag that is not "+
-			"explicitly allowed', because a non-surrogate third-party tag is reported by Go as a plain directory and, when a "+
-			"filter driver IS present to service it, is genuinely traversable.")
+		"CONSEQUENCE for R4: the tag policy cannot be 'refuse name surrogates'. It must be 'refuse every tag not explicitly "+
+			"allowed', because a non-surrogate third-party tag is reported by Go as a plain directory.")
 }
 
 func modeOf(fi os.FileInfo) string {
