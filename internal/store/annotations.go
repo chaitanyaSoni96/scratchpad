@@ -10,8 +10,6 @@ import (
 	"sort"
 	"strings"
 	"time"
-
-	"golang.org/x/sys/unix"
 )
 
 // AnnotationsDir is the top-level directory holding every document's note
@@ -100,7 +98,7 @@ func (l *annotationLock) Close() error {
 	if l == nil || l.f == nil {
 		return nil
 	}
-	err := unix.Flock(int(l.f.Fd()), unix.LOCK_UN)
+	err := funlockFile(l.f)
 	var closeErr error
 	if l.ann != nil {
 		closeErr = l.ann.close()
@@ -124,11 +122,7 @@ func lockAnnotations(exclusive bool) (*annotationLock, error) {
 	// The store-root inode is stable even if a hostile process renames and
 	// replaces .annotations, so all operations still rendezvous on one flock.
 	f := ann.storeRoot
-	how := unix.LOCK_SH
-	if exclusive {
-		how = unix.LOCK_EX
-	}
-	if err := unix.Flock(int(f.Fd()), how); err != nil {
+	if err := flockFile(f, exclusive); err != nil {
 		ann.close()
 		return nil, err
 	}
@@ -144,15 +138,14 @@ func lockDocument(ann *annotationFS, doc string) (*annotationLock, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer unix.Close(locks)
+	defer closeFD(locks)
 	// A fixed-size key avoids filesystem name limits for deeply nested docs.
 	name := fmt.Sprintf("%x", sha256.Sum256([]byte(strings.Trim(doc, "/"))))
-	fd, err := unix.Openat(locks, name+".lock", unix.O_CREAT|unix.O_RDWR|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0o600)
+	f, err := openLockFileAt(locks, name+".lock")
 	if err != nil {
 		return nil, err
 	}
-	f := os.NewFile(uintptr(fd), name+".lock")
-	if err := unix.Flock(int(f.Fd()), unix.LOCK_EX); err != nil {
+	if err := flockFile(f, true); err != nil {
 		f.Close()
 		return nil, err
 	}

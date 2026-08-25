@@ -56,6 +56,32 @@ func openDirAt(parent int, name string) (int, error) {
 	return unix.Openat(parent, name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 }
 
+// flockFile takes (exclusive=true) or shares (exclusive=false) an advisory
+// lock on f's descriptor. Used both for the store-root rendezvous
+// (lockAnnotations) and, via openLockFileAt, per-document locks.
+func flockFile(f *os.File, exclusive bool) error {
+	how := unix.LOCK_SH
+	if exclusive {
+		how = unix.LOCK_EX
+	}
+	return unix.Flock(int(f.Fd()), how)
+}
+
+// funlockFile releases a lock taken by flockFile.
+func funlockFile(f *os.File) error {
+	return unix.Flock(int(f.Fd()), unix.LOCK_UN)
+}
+
+// openLockFileAt creates or opens name (a per-document lock file) relative
+// to parent, never following a symlink.
+func openLockFileAt(parent int, name string) (*os.File, error) {
+	fd, err := unix.Openat(parent, name, unix.O_CREAT|unix.O_RDWR|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	return os.NewFile(uintptr(fd), name), nil
+}
+
 func (a *annotationFS) openDir(segs []string, create bool) (int, error) {
 	fd, err := unix.Dup(int(a.root.Fd()))
 	if err != nil {

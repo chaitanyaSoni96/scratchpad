@@ -15,11 +15,15 @@ import (
 	"sort"
 	"strings"
 	"time"
-
-	"golang.org/x/sys/unix"
 )
 
 const RootEnv = "SCRATCHPAD_ROOT"
+
+// errExists is the portable "name already claimed" sentinel returned by the
+// platform-private create-only helpers (mkdirClaim, symlinkAt). It lets
+// Publish and Watch recognize a collision with errors.Is without importing
+// an OS-specific errno package (see platform-api-inventory.md).
+var errExists = errors.New("scratchpad: name already exists")
 
 // testStoreOpHook makes validation/use race tests deterministic. It is nil in
 // production and deliberately sits after the parent descriptor is pinned.
@@ -186,7 +190,7 @@ func ResolveFolder(p string) (*os.File, bool) {
 		return nil, false
 	}
 	if dirHasHTMLFD(fd) {
-		unix.Close(fd)
+		closeFD(fd)
 		return nil, false
 	}
 	return os.NewFile(uintptr(fd), p), true
@@ -247,56 +251,6 @@ func joinInRoot(root string, parts []string) (string, error) {
 	return dir, nil
 }
 
-// ensureProjectDir creates missing project directories while refusing existing
-// symlink ancestors. The component-by-component checks are portable; a hostile
-// local process can still swap a checked component before the following call.
-func ensureProjectDir(root string, segs []string) (string, error) {
-	dir := root
-	for i, seg := range segs {
-		dir = filepath.Join(dir, seg)
-		fi, err := os.Lstat(dir)
-		switch {
-		case err == nil && fi.Mode()&os.ModeSymlink != 0:
-			return "", fmt.Errorf("project ancestor %q is a symlink", strings.Join(segs[:i+1], "/"))
-		case err == nil && !fi.IsDir():
-			return "", fmt.Errorf("project ancestor %q is not a directory", strings.Join(segs[:i+1], "/"))
-		case err == nil:
-			if hasHTML(dir) {
-				return "", fmt.Errorf("%q is an artifact, not a project", strings.Join(segs[:i+1], "/"))
-			}
-		case os.IsNotExist(err):
-			if err := os.Mkdir(dir, 0o755); err != nil {
-				return "", err
-			}
-		default:
-			return "", err
-		}
-	}
-	return dir, nil
-}
-
-func rejectSymlinkParents(root, dir string) error {
-	rel, err := filepath.Rel(root, filepath.Dir(dir))
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return fmt.Errorf("path escapes root")
-	}
-	cur := root
-	if rel == "." {
-		return nil
-	}
-	for _, seg := range strings.Split(rel, string(filepath.Separator)) {
-		cur = filepath.Join(cur, seg)
-		fi, err := os.Lstat(cur)
-		if err != nil {
-			return err
-		}
-		if fi.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("path crosses symlink %q", seg)
-		}
-	}
-	return nil
-}
-
 // hasHTML reports whether dir directly contains a regular *.html file.
 func hasHTML(dir string) bool {
 	entries, err := os.ReadDir(dir)
@@ -317,7 +271,7 @@ func entryIsDir(parent string, e os.DirEntry) bool {
 	if e.IsDir() {
 		return true
 	}
-	if e.Type()&os.ModeSymlink == 0 {
+	if !IsLinkEntry(e) {
 		return false
 	}
 	fi, err := os.Stat(filepath.Join(parent, e.Name()))
@@ -326,7 +280,7 @@ func entryIsDir(parent string, e os.DirEntry) bool {
 
 // annotate fills the symlink-related fields of an artifact.
 func annotate(a *Artifact) {
-	if fi, err := os.Lstat(a.Dir); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+	if fi, err := os.Lstat(a.Dir); err == nil && IsLinkInfo(fi) {
 		a.IsLink = true
 		return
 	}
@@ -414,7 +368,7 @@ func List() ([]Artifact, error) {
 			return
 		}
 		for _, e := range entries {
-			isLink := e.Type()&os.ModeSymlink != 0
+			isLink := IsLinkEntry(e)
 			if !entryIsDir(dir, e) || !Visible(dir, e.Name(), true) || isLink && crossedLink {
 				continue
 			}
@@ -473,14 +427,14 @@ func ResolvePath(segs []string) (a Artifact, file string, ok bool) {
 		if dirHasHTMLFD(fd) {
 			project := strings.Join(segs[:i], "/")
 			a, ok := loadArtifact(project, s, fdPath(fd))
-			unix.Close(fd)
+			closeFD(fd)
 			if !ok {
 				return Artifact{}, "", false
 			}
 			a.Dir = filepath.Join(append([]string{root}, segs[:i+1]...)...)
 			return a, strings.Join(segs[i+1:], "/"), true
 		}
-		unix.Close(fd)
+		closeFD(fd)
 	}
 	return Artifact{}, "", false
 }
@@ -554,22 +508,22 @@ func Publish(project, name string, files map[string][]byte) (Artifact, error) {
 	if err != nil {
 		return Artifact{}, err
 	}
-	defer unix.Close(parent)
+	defer closeFD(parent)
 	runStoreOpHook("publish-claim")
-	// os.Mkdir (not MkdirAll) atomically claims the name: concurrent
-	// publishes and existing artifacts both surface as EEXIST.
-	if err := unix.Mkdirat(parent, name, 0o755); err != nil {
-		if errors.Is(err, unix.EEXIST) {
+	// mkdirClaim (os.Mkdir, not MkdirAll) atomically claims the name:
+	// concurrent publishes and existing artifacts both surface as errExists.
+	if err := mkdirClaim(parent, name); err != nil {
+		if errors.Is(err, errExists) {
 			return Artifact{}, fmt.Errorf("%q already exists — names are not reusable until the user deletes the old artifact in the web UI; pick a different name (see `scratchpad list`)", strings.TrimPrefix(dir[len(root):], string(filepath.Separator)))
 		}
 		return Artifact{}, err
 	}
 	artifactFD, err := openDirAt(parent, name)
 	if err != nil {
-		_ = unix.Unlinkat(parent, name, unix.AT_REMOVEDIR)
+		_ = rmdirAt(parent, name)
 		return Artifact{}, err
 	}
-	defer unix.Close(artifactFD)
+	defer closeFD(artifactFD)
 	cleanup := func() { _ = removeTreeAt(parent, name) }
 	for p, content := range files {
 		if err := writeFileAt(artifactFD, strings.Split(p, "/"), content); err != nil {
@@ -628,19 +582,19 @@ func Watch(project, name, target string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer unix.Close(parent)
+	defer closeFD(parent)
 	runStoreOpHook("watch-link")
-	// os.Symlink is atomic like os.Mkdir in Publish: EEXIST if taken. The one
-	// exception is a link that already points at this exact folder — that is
-	// the state the caller asked for, so re-watching is a no-op and an agent
-	// can run watch unconditionally instead of probing `watches` first.
-	if err := unix.Symlinkat(abs, parent, name); err != nil {
-		if !errors.Is(err, unix.EEXIST) {
+	// symlinkAt is atomic like mkdirClaim in Publish: errExists if taken. The
+	// one exception is a link that already points at this exact folder —
+	// that is the state the caller asked for, so re-watching is a no-op and
+	// an agent can run watch unconditionally instead of probing `watches`
+	// first.
+	if err := symlinkAt(parent, abs, name); err != nil {
+		if !errors.Is(err, errExists) {
 			return "", err
 		}
-		buf := make([]byte, 4096)
-		n, readErr := unix.Readlinkat(parent, name, buf)
-		if readErr != nil || string(buf[:n]) != abs {
+		target, readErr := readlinkAt(parent, name)
+		if readErr != nil || target != abs {
 			return "", fmt.Errorf("%q already exists — delete it in the web UI or pick a different name", strings.TrimPrefix(link[len(root):], string(filepath.Separator)))
 		}
 	}
@@ -648,26 +602,6 @@ func Watch(project, name, target string) (string, error) {
 		fmt.Fprintln(os.Stderr, "note: no top-level .html in the watched folder — it will be treated as a project tree; only subfolders containing .html will show up")
 	}
 	return link, nil
-}
-
-// linksTo reports whether link is a symlink already resolving to abs. A real
-// directory never qualifies: a published artifact must not be silently
-// adopted as a watch of a folder that happens to sit elsewhere.
-func linksTo(link, abs string) bool {
-	fi, err := os.Lstat(link)
-	if err != nil || fi.Mode()&os.ModeSymlink == 0 {
-		return false
-	}
-	if dest, err := os.Readlink(link); err == nil && dest == abs {
-		return true
-	}
-	// ...or the same folder reached through further symlinks on either side.
-	real, err := filepath.EvalSymlinks(link)
-	if err != nil {
-		return false
-	}
-	realAbs, err := filepath.EvalSymlinks(abs)
-	return err == nil && real == realAbs
 }
 
 // WatchLink is one watch symlink in the store.
@@ -688,7 +622,7 @@ func WatchLinkFor(rel string) string {
 	cur := root
 	for i, seg := range segs {
 		cur = filepath.Join(cur, seg)
-		if fi, err := os.Lstat(cur); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+		if fi, err := os.Lstat(cur); err == nil && IsLinkInfo(fi) {
 			return strings.Join(segs[:i+1], "/")
 		}
 	}
@@ -719,7 +653,7 @@ func Watches() ([]WatchLink, error) {
 			// Links are reported whatever the ignore rules say: hiding a
 			// watched folder from the UI must not strand its link with no
 			// way to list or unwatch it. Rules only prune the descent.
-			if e.Type()&os.ModeSymlink != 0 {
+			if IsLinkEntry(e) {
 				target, lerr := os.Readlink(sub)
 				fi, serr := os.Stat(sub)
 				if lerr == nil && serr == nil && fi.IsDir() {
@@ -772,19 +706,19 @@ func Unwatch(project, name string) error {
 		}
 		return fmt.Errorf("refusing to unwatch through a symlinked project: %w", openErr)
 	}
-	defer unix.Close(parent)
+	defer closeFD(parent)
 	runStoreOpHook("unwatch")
-	var st unix.Stat_t
-	if err := unix.Fstatat(parent, name, &st, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+	isLink, statErr := isLinkAt(parent, name)
+	if statErr != nil {
 		return fmt.Errorf("%s not found", rel)
 	}
-	if st.Mode&unix.S_IFMT != unix.S_IFLNK {
+	if !isLink {
 		if link := WatchLinkFor(rel); link != "" {
 			return fmt.Errorf("%s is not a watch link — it lives inside watched folder %q; unwatch that instead", rel, link)
 		}
 		return fmt.Errorf("%s is not a watched folder", rel)
 	}
-	if err := unix.Unlinkat(parent, name, 0); err != nil {
+	if err := unlinkAt(parent, name); err != nil {
 		return err
 	}
 	pruneAt(rfs, segs)
@@ -792,18 +726,6 @@ func Unwatch(project, name string) error {
 	// any notes left over from the unwatched folder must go with it or a
 	// same-named artifact published later would inherit them.
 	return removeNotesFor(annotationGuard, (Artifact{Project: project, Name: name}).RelPath())
-}
-
-// pruneEmpty removes project directories left empty above a removed entry.
-func pruneEmpty(root, dir string) {
-	for d := filepath.Dir(dir); d != root && strings.HasPrefix(d, root); d = filepath.Dir(d) {
-		if rem, err := os.ReadDir(d); err != nil || len(rem) > 0 {
-			break
-		}
-		if os.Remove(d) != nil {
-			break
-		}
-	}
 }
 
 // Delete removes an artifact and prunes any project directories left empty
@@ -836,23 +758,22 @@ func Delete(project, name string) error {
 	if openErr != nil {
 		return fmt.Errorf("%s is inside a watched folder — its files live at the source; unwatch the link instead", (Artifact{Project: project, Name: name}).RelPath())
 	}
-	defer unix.Close(parent)
+	defer closeFD(parent)
 	runStoreOpHook("delete")
-	var st unix.Stat_t
-	if err := unix.Fstatat(parent, name, &st, unix.AT_SYMLINK_NOFOLLOW); err == nil && st.Mode&unix.S_IFMT == unix.S_IFLNK {
+	if isLink, statErr := isLinkAt(parent, name); statErr == nil && isLink {
 		// Unwatch: remove only the link, never the source.
-		if err := unix.Unlinkat(parent, name, 0); err != nil {
+		if err := unlinkAt(parent, name); err != nil {
 			return err
 		}
 	} else {
 		artifactFD, err := openDirAt(parent, name)
 		if err != nil || !dirHasHTMLFD(artifactFD) {
 			if err == nil {
-				unix.Close(artifactFD)
+				closeFD(artifactFD)
 			}
 			return fmt.Errorf("artifact %s not found", (Artifact{Project: project, Name: name}).RelPath())
 		}
-		unix.Close(artifactFD)
+		closeFD(artifactFD)
 		if err := removeTreeAt(parent, name); err != nil {
 			return err
 		}

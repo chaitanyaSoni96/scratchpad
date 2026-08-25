@@ -40,6 +40,33 @@ func dupFD(fd int) (int, error) { return unix.FcntlInt(uintptr(fd), unix.F_DUPFD
 
 func fdPath(fd int) string { return fmt.Sprintf("/proc/self/fd/%d", fd) }
 
+// closeFD closes fd, discarding the error like every existing call site
+// already did (most are deferred; the rest are best-effort cleanup on an
+// error path already being reported through a different return value).
+func closeFD(fd int) { unix.Close(fd) }
+
+// mkdirClaim atomically claims name as a new directory relative to the open
+// directory parent: os.Mkdir's create-only guarantee, fd-relative. A
+// collision (a race or an existing artifact) surfaces as errExists so
+// callers never need to import unix to recognize it.
+func mkdirClaim(parent int, name string) error {
+	if err := unix.Mkdirat(parent, name, 0o755); err != nil {
+		if errors.Is(err, unix.EEXIST) {
+			return errExists
+		}
+		return err
+	}
+	return nil
+}
+
+// rmdirAt removes the single empty directory entry name relative to the
+// open directory parent — used to roll back a claim that failed after
+// mkdirClaim succeeded (Publish) so a partially created name is not left
+// behind.
+func rmdirAt(parent int, name string) error {
+	return unix.Unlinkat(parent, name, unix.AT_REMOVEDIR)
+}
+
 func dirHasHTMLFD(fd int) bool {
 	entries, err := readDirFD(fd)
 	if err != nil {

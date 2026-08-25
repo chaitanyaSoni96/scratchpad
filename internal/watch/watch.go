@@ -6,11 +6,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
-	"syscall"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
@@ -235,12 +233,24 @@ func desiredDirs(root string) (map[string]desiredDir, error) {
 		if _, seen := dirs[canonical]; seen {
 			return nil
 		}
-		id, err := identity(canonical)
+		// Identity and the entry listing come from one open handle (rather
+		// than two independent path lookups) so the two questions "what is
+		// this" and "what does it contain" are answered about the same
+		// object — see identity's doc comment and platform-api-inventory.md.
+		f, err := os.Open(dir)
+		if err != nil {
+			if !required && os.IsNotExist(err) {
+				return nil
+			}
+			return fmt.Errorf("open directory %q: %w", dir, err)
+		}
+		defer f.Close()
+		id, err := identity(f)
 		if err != nil {
 			return fmt.Errorf("identify directory %q: %w", dir, err)
 		}
 		dirs[canonical] = desiredDir{path: canonical, id: id}
-		entries, err := os.ReadDir(dir)
+		entries, err := f.ReadDir(-1)
 		if err != nil {
 			if !required && os.IsNotExist(err) {
 				return nil
@@ -249,7 +259,7 @@ func desiredDirs(root string) (map[string]desiredDir, error) {
 		}
 		for _, entry := range entries {
 			path := filepath.Join(dir, entry.Name())
-			isLink := entry.Type()&fs.ModeSymlink != 0
+			isLink := store.IsLinkEntry(entry)
 			isDir := entry.IsDir()
 			if isLink && !crossedLink {
 				if info, err := os.Stat(path); err == nil && info.IsDir() {
@@ -271,18 +281,6 @@ func desiredDirs(root string) (map[string]desiredDir, error) {
 		return nil, err
 	}
 	return dirs, nil
-}
-
-func identity(path string) (dirIdentity, error) {
-	info, err := os.Stat(path)
-	if err != nil {
-		return dirIdentity{}, err
-	}
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok {
-		return dirIdentity{}, fmt.Errorf("filesystem does not expose inode identity")
-	}
-	return dirIdentity{dev: uint64(stat.Dev), ino: uint64(stat.Ino)}, nil
 }
 
 func canonicalDir(path string) (string, error) {

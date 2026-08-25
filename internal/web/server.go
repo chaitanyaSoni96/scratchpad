@@ -235,7 +235,7 @@ func folderUnwatch(rel string) *unwatchAction {
 		return nil
 	}
 	fi, err := os.Lstat(filepath.Join(root, filepath.FromSlash(rel)))
-	if err != nil || fi.Mode()&fs.ModeSymlink == 0 {
+	if err != nil || !store.IsLinkInfo(fi) {
 		return nil
 	}
 	return unwatchLink(rel, rel)
@@ -326,7 +326,7 @@ func entryIsDirFS(parent string, e os.DirEntry) bool {
 	if e.IsDir() {
 		return true
 	}
-	if e.Type()&fs.ModeSymlink == 0 {
+	if !store.IsLinkEntry(e) {
 		return false
 	}
 	fi, err := os.Stat(filepath.Join(parent, e.Name()))
