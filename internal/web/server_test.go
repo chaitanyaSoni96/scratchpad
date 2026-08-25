@@ -8,9 +8,11 @@ import (
 	"testing"
 
 	"scratchpad/internal/store"
+	"scratchpad/internal/testutil"
 )
 
 func TestListFragmentRejectsInvalidFolders(t *testing.T) {
+	testutil.RequireSymlinks(t)
 	root := testRoot(t)
 	if err := os.MkdirAll(filepath.Join(root, "visible"), 0o755); err != nil {
 		t.Fatal(err)
@@ -43,6 +45,7 @@ func TestListFragmentRejectsInvalidFolders(t *testing.T) {
 }
 
 func TestListFragmentBrowsesWatchWithoutFollowingNestedLinks(t *testing.T) {
+	testutil.RequireSymlinks(t)
 	testRoot(t)
 	source := t.TempDir()
 	if err := os.WriteFile(filepath.Join(source, "readme.md"), []byte("# watched"), 0o644); err != nil {

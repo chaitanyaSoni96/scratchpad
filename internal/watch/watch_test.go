@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
+
+	"scratchpad/internal/testutil"
 )
 
 type fakeBackend struct {
@@ -81,6 +83,7 @@ func TestNewWatcherRegistersInitialTreeAndReportsFailure(t *testing.T) {
 }
 
 func TestReconcileAddsPopulatedTreeRemovesStaleAndGuardsCycles(t *testing.T) {
+	testutil.RequireSymlinks(t)
 	root := t.TempDir()
 	b := newFakeBackend()
 	w, err := newWatcher(root, NewHub(), b, time.Hour, time.Hour)
@@ -139,6 +142,7 @@ func TestReconcileReplacesWatchWhenDirectoryIdentityChanges(t *testing.T) {
 }
 
 func TestReconcileReplacesWatchWhenLinkTargetIdentityChanges(t *testing.T) {
+	testutil.RequireSymlinks(t)
 	root := t.TempDir()
 	external := t.TempDir()
 	target := filepath.Join(external, "target")
@@ -173,6 +177,7 @@ func TestReconcileReplacesWatchWhenLinkTargetIdentityChanges(t *testing.T) {
 }
 
 func TestDesiredDirsFollowsWatchLinkButNotNestedDirectorySymlink(t *testing.T) {
+	testutil.RequireSymlinks(t)
 	root := t.TempDir()
 	source := t.TempDir()
 	escape := t.TempDir()
@@ -200,6 +205,7 @@ func TestDesiredDirsFollowsWatchLinkButNotNestedDirectorySymlink(t *testing.T) {
 }
 
 func TestReconcileRemovesTargetWatchAfterUnwatch(t *testing.T) {
+	testutil.RequireSymlinks(t)
 	root := t.TempDir()
 	target := t.TempDir()
 	link := filepath.Join(root, "watch")

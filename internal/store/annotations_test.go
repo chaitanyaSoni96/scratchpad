@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+
+	"scratchpad/internal/testutil"
 )
 
 // publishDoc is a small helper: publish a single-page artifact so its
@@ -130,6 +132,7 @@ func TestConcurrentSameRevisionExactlyOneWins(t *testing.T) {
 }
 
 func TestAnnotationSymlinkComponentsRejected(t *testing.T) {
+	testutil.RequireSymlinks(t)
 	root := testRoot(t)
 	doc := publishDoc(t, "", "art")
 	outside := t.TempDir()
@@ -155,6 +158,7 @@ func TestAnnotationSymlinkComponentsRejected(t *testing.T) {
 }
 
 func TestAnnotationRootSwapDoesNotRedirectOpenHandle(t *testing.T) {
+	testutil.RequireSymlinks(t)
 	root := testRoot(t)
 	ann, err := openAnnotationFS()
 	if err != nil {
@@ -323,6 +327,7 @@ func TestAnnotationsInvisible(t *testing.T) {
 }
 
 func TestDeleteAndUnwatchRemoveNotes(t *testing.T) {
+	testutil.RequireSymlinks(t)
 	testRoot(t)
 	root, _ := Root()
 
@@ -382,6 +387,7 @@ func TestArtifactCleanupRacesCannotLeaveNotes(t *testing.T) {
 	}{
 		{name: "delete", setup: func(t *testing.T) string { return publishDoc(t, "", "art") }, clean: func() error { return Delete("", "art") }},
 		{name: "unwatch", setup: func(t *testing.T) string {
+			testutil.RequireSymlinks(t)
 			src := t.TempDir()
 			if err := os.WriteFile(filepath.Join(src, "index.html"), []byte("x"), 0o644); err != nil {
 				t.Fatal(err)

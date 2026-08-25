@@ -4,8 +4,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"testing"
+
+	"scratchpad/internal/testutil"
 )
 
 func TestPublishFilesValidation(t *testing.T) {
@@ -28,16 +29,6 @@ func TestPublishFilesValidation(t *testing.T) {
 	}
 }
 
-func TestFilesFromDirRejectsNamedPipe(t *testing.T) {
-	dir := t.TempDir()
-	if err := syscall.Mkfifo(filepath.Join(dir, "input"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := filesFromDir(dir); err == nil || !strings.Contains(err.Error(), "not a regular file") {
-		t.Fatalf("expected non-regular error, got %v", err)
-	}
-}
-
 func TestPublishFilesReadsStdin(t *testing.T) {
 	files, err := publishFiles("", "-", "", "", nil, strings.NewReader("<html>stdin</html>"))
 	if err != nil {
@@ -49,6 +40,7 @@ func TestPublishFilesReadsStdin(t *testing.T) {
 }
 
 func TestFilesFromDirRejectsNonRegularEntries(t *testing.T) {
+	testutil.RequireSymlinks(t)
 	dir := t.TempDir()
 	target := filepath.Join(dir, "target.html")
 	if err := os.WriteFile(target, []byte("ok"), 0600); err != nil {

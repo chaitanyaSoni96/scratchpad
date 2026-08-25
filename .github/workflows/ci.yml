@@ -1,0 +1,142 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  # ------------------------------------------------------------------
+  # P0.2 — Linux gate. This is the required baseline: it must stay green
+  # and has NO failure allowance.
+  # ------------------------------------------------------------------
+  linux-test:
+    name: Linux amd64 — vet, test, check-make, build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: go vet
+        run: go vet ./...
+      - name: go test
+        run: go test ./...
+      - name: check-make
+        run: scripts/check-make.sh
+      - name: make build
+        run: make build
+
+  # ------------------------------------------------------------------
+  # P0.2 — Windows cross-compile from Linux (amd64 + arm64).
+  # internal/store has no Windows backend yet, so this build is EXPECTED
+  # to fail (see .agents/plans/in-progress/native-windows-support/EXECUTION.md).
+  # continue-on-error keeps the workflow green until the backend lands.
+  # Phase 2 (P2.6) removes this allowance.
+  # ------------------------------------------------------------------
+  cross-build-windows:
+    name: Cross-build windows/${{ matrix.goarch }} (from Linux) [allowed to fail until P2.6]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    continue-on-error: true # expected failure until Phase 2; Phase 2 (P2.6) removes this allowance.
+    strategy:
+      fail-fast: false
+      matrix:
+        goarch: [amd64, arm64]
+    env:
+      GOOS: windows
+      GOARCH: ${{ matrix.goarch }}
+      CGO_ENABLED: 0
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Cross-compile both commands
+        run: go build ./cmd/...
+
+  # ------------------------------------------------------------------
+  # P0.3 — Native Windows amd64 test job on a pinned runner image
+  # (windows-2025, not the floating windows-latest label).
+  #
+  # GitHub-hosted Windows runners can usually create symlinks, but
+  # Developer Mode state is not guaranteed, so the job PROBES for the
+  # capability at runtime and exports SCRATCHPAD_TEST_SYMLINKS=1|0 for
+  # the Go test process (the test helper reads exactly that variable,
+  # distinguishing symlink-dependent tests from ordinary ones).
+  #
+  # The code does not compile on Windows yet, so this job is EXPECTED to
+  # fail until the Windows store backend exists. continue-on-error keeps
+  # the workflow green for now; Phase 3 (P3.11) / Phase 4 removes this
+  # allowance and makes the job required.
+  # ------------------------------------------------------------------
+  windows-native-test:
+    name: Windows amd64 native — vet, test (windows-2025) [allowed to fail until P3.11/P4]
+    runs-on: windows-2025
+    timeout-minutes: 30
+    continue-on-error: true # expected failure until the Windows backend lands; P3.11 / P4 removes this allowance.
+    env:
+      CGO_ENABLED: 0
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Probe symlink capability
+        shell: pwsh
+        run: |
+          $probe = Join-Path ([System.IO.Path]::GetTempPath()) ("scratchpad-symlink-probe-" + [System.Guid]::NewGuid().ToString("N"))
+          New-Item -ItemType Directory -Path $probe | Out-Null
+          $target = Join-Path $probe "target"
+          New-Item -ItemType Directory -Path $target | Out-Null
+          $link = Join-Path $probe "link"
+          $capable = "0"
+          try {
+            New-Item -ItemType SymbolicLink -Path $link -Target $target -ErrorAction Stop | Out-Null
+            $capable = "1"
+            Write-Host "symlink capability: PRESENT (directory symlink created at $link)"
+          } catch {
+            # Greppable skip reason for log triage:
+            Write-Host "SCRATCHPAD-SKIP: symlink capability ABSENT on this runner ($($_.Exception.Message)) - symlink-dependent tests will be skipped"
+          }
+          Remove-Item -Recurse -Force $probe -ErrorAction SilentlyContinue
+          Add-Content -Path $env:GITHUB_ENV -Value "SCRATCHPAD_TEST_SYMLINKS=$capable"
+          Write-Host "SCRATCHPAD_TEST_SYMLINKS=$capable"
+      - name: go vet
+        shell: pwsh
+        run: go vet ./...
+      - name: go test (ordinary + symlink-gated tests)
+        shell: pwsh
+        run: |
+          Write-Host "SCRATCHPAD_TEST_SYMLINKS=$env:SCRATCHPAD_TEST_SYMLINKS"
+          if ($env:SCRATCHPAD_TEST_SYMLINKS -ne "1") {
+            Write-Host "SCRATCHPAD-SKIP: symlink capability ABSENT - tests requiring symlink creation will self-skip via SCRATCHPAD_TEST_SYMLINKS=0"
+          }
+          go test ./...
+
+  # ------------------------------------------------------------------
+  # P0.3 — Native Windows arm64 job (windows-11-arm runner): build-only
+  # coverage for the second architecture. The code does not compile on
+  # Windows yet, so this is EXPECTED to fail. continue-on-error keeps the
+  # workflow green for now; Phase 2 (P2.6) removes this allowance once
+  # both commands cross-compile.
+  # ------------------------------------------------------------------
+  windows-arm64-build:
+    name: Windows arm64 native — build (windows-11-arm) [allowed to fail until P2.6]
+    runs-on: windows-11-arm
+    timeout-minutes: 15
+    continue-on-error: true # expected failure until Phase 2; Phase 2 (P2.6) removes this allowance.
+    env:
+      CGO_ENABLED: 0
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build both commands natively
+        shell: pwsh
+        run: go build ./cmd/...

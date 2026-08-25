@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"scratchpad/internal/testutil"
 )
 
 func testRoot(t *testing.T) string {
@@ -105,6 +107,7 @@ func TestPublishFilesAndRules(t *testing.T) {
 }
 
 func TestWatch(t *testing.T) {
+	testutil.RequireSymlinks(t)
 	testRoot(t)
 	src := t.TempDir()
 	os.WriteFile(filepath.Join(src, "index.html"), []byte("<h1>src</h1>"), 0o644)
@@ -161,6 +164,7 @@ func TestWatch(t *testing.T) {
 // The no-op in TestWatch is the *only* relaxation of create-only: the name
 // still cannot be taken over by anything else.
 func TestWatchCreateOnly(t *testing.T) {
+	testutil.RequireSymlinks(t)
 	testRoot(t)
 	src, other := t.TempDir(), t.TempDir()
 	for _, d := range []string{src, other} {
@@ -185,6 +189,7 @@ func TestWatchCreateOnly(t *testing.T) {
 }
 
 func TestUnwatch(t *testing.T) {
+	testutil.RequireSymlinks(t)
 	root := testRoot(t)
 	src := t.TempDir()
 	os.WriteFile(filepath.Join(src, "index.html"), []byte("<h1>src</h1>"), 0o644)
@@ -306,6 +311,7 @@ func TestListAndResolvePath(t *testing.T) {
 }
 
 func TestResolveFolderContainmentAndWatchedTrees(t *testing.T) {
+	testutil.RequireSymlinks(t)
 	root := testRoot(t)
 	if err := os.MkdirAll(filepath.Join(root, "visible", "child"), 0o755); err != nil {
 		t.Fatal(err)
@@ -341,6 +347,7 @@ func TestResolveFolderContainmentAndWatchedTrees(t *testing.T) {
 }
 
 func TestPublishAndNestedWatchRejectSymlinkProject(t *testing.T) {
+	testutil.RequireSymlinks(t)
 	root := testRoot(t)
 	external := t.TempDir()
 	if err := os.WriteFile(filepath.Join(external, "sentinel"), []byte("unchanged"), 0o644); err != nil {
@@ -368,6 +375,7 @@ func TestPublishAndNestedWatchRejectSymlinkProject(t *testing.T) {
 }
 
 func TestListDoesNotFollowSymlinksInsideWatch(t *testing.T) {
+	testutil.RequireSymlinks(t)
 	testRoot(t)
 	source := t.TempDir()
 	external := t.TempDir()
@@ -393,25 +401,25 @@ func TestListDoesNotFollowSymlinksInsideWatch(t *testing.T) {
 }
 
 func TestPinnedMutationsIgnoreProjectSwap(t *testing.T) {
+	testutil.RequireSymlinks(t)
 	root := testRoot(t)
 	if err := os.Mkdir(filepath.Join(root, "project"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	original := filepath.Join(root, "project-original")
 	outside := t.TempDir()
-	testStoreOpHook = func(op string) {
+	setStoreOpHook(t, func(op string) {
 		if op != "publish-claim" {
 			return
 		}
-		testStoreOpHook = nil
+		clearStoreOpHook()
 		if err := os.Rename(filepath.Join(root, "project"), original); err != nil {
 			t.Fatal(err)
 		}
 		if err := os.Symlink(outside, filepath.Join(root, "project")); err != nil {
 			t.Fatal(err)
 		}
-	}
-	t.Cleanup(func() { testStoreOpHook = nil })
+	})
 	if _, err := Publish("project", "safe", map[string][]byte{"index.html": []byte("safe")}); err != nil {
 		t.Fatal(err)
 	}
@@ -424,6 +432,7 @@ func TestPinnedMutationsIgnoreProjectSwap(t *testing.T) {
 }
 
 func TestOpenDocumentRejectsArtifactAssetSymlink(t *testing.T) {
+	testutil.RequireSymlinks(t)
 	root := testRoot(t)
 	if _, err := Publish("", "art", map[string][]byte{"index.html": []byte("ok")}); err != nil {
 		t.Fatal(err)
