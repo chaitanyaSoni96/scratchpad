@@ -23,6 +23,7 @@ import (
 func TestM17OsRootStrategy(t *testing.T) {
 	dir := scratchDir(t)
 	real := mustMkdir(t, filepath.Join(dir, "real"))
+	_ = real
 	mustWrite(t, filepath.Join(real, "index.html"), "x")
 	mustMkdir(t, filepath.Join(dir, "real", "sub"))
 
@@ -53,7 +54,10 @@ func TestM17OsRootStrategy(t *testing.T) {
 	if !ok {
 		Report(t, "M17.follows_inroot_symlink", NotMeasured, "no symlink capability on this runner")
 	} else {
-		if err := CreateDirSymlink(filepath.Join(dir, "inroot"), real, true); err != nil {
+		// The target MUST be relative: os.Root refuses an absolute target as
+		// an escape regardless of where it points, so an absolute link would
+		// measure the escape check rather than the follow behaviour.
+		if err := CreateDirSymlink(filepath.Join(dir, "inroot"), "real", true); err != nil {
 			Report(t, "M17.follows_inroot_symlink", NotMeasured, "could not create the in-root symlink: %s", DescribeErr(err))
 		} else {
 			sub, err := root.OpenRoot("inroot")

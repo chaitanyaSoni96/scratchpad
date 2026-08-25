@@ -74,7 +74,14 @@ func CreateJunctionAt(parent windows.Handle, name, target string) error {
 // SetMountPoint writes a MOUNT_POINT reparse buffer onto an open, empty
 // directory handle.
 func SetMountPoint(h windows.Handle, target string) error {
-	sub := `\??\` + target
+	return SetMountPointRaw(h, `\??\`+target, target)
+}
+
+// SetMountPointRaw is SetMountPoint without the \??\ convenience prefix, so a
+// VOLUME mount point (substitute name \??\Volume{GUID}\) can be built too.
+// The tag is identical to a junction's; only the substitute name differs,
+// which is exactly what M3 has to demonstrate.
+func SetMountPointRaw(h windows.Handle, sub, target string) error {
 	subU := windows.StringToUTF16(sub)      // includes NUL
 	printU := windows.StringToUTF16(target) // includes NUL
 

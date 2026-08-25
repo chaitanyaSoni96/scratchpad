@@ -784,3 +784,7 @@ func DeleteByHandleWin32(h windows.Handle, posix bool) error {
 	return windows.SetFileInformationByHandle(h, win32FileDispositionInfo,
 		(*byte)(unsafe.Pointer(&del)), uint32(unsafe.Sizeof(del)))
 }
+
+// unsafePointer keeps the single unsafe conversion privilege.go needs in one
+// audited place.
+func unsafePointer(b *byte) unsafe.Pointer { return unsafe.Pointer(b) }
