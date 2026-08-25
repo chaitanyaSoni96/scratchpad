@@ -278,7 +278,14 @@ func entryIsDir(parent string, e os.DirEntry) bool {
 	return err == nil && fi.IsDir()
 }
 
-// annotate fills the symlink-related fields of an artifact.
+// annotate fills the symlink-related fields of an artifact. It must be given
+// the artifact's real, logical store path — never a handle path such as
+// fdPath's /proc/self/fd/N, which os.Lstat always reports as a symlink
+// regardless of what it points to. That is why annotate is not called from
+// inside loadArtifact: two of its callers (ResolvePath, Publish) load through
+// an fd and only learn the real Dir afterward, so annotate must run at the
+// call site, after Dir is set to that real path. See the Windows ADR §6.8
+// item 2, which found and named this same defect.
 func annotate(a *Artifact) {
 	if fi, err := os.Lstat(a.Dir); err == nil && IsLinkInfo(fi) {
 		a.IsLink = true
@@ -290,6 +297,11 @@ func annotate(a *Artifact) {
 	}
 }
 
+// loadArtifact reads dir and builds the Artifact if it qualifies (contains at
+// least one top-level .html). It intentionally leaves IsLink/Linked unset:
+// dir may be a handle path (fdPath) rather than the artifact's real logical
+// path, so callers must call annotate(&a) themselves once a.Dir holds that
+// real path — see annotate's doc comment.
 func loadArtifact(project, name, dir string) (Artifact, bool) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -343,7 +355,6 @@ func loadArtifact(project, name, dir string) (Artifact, bool) {
 		}
 		return nil
 	})
-	annotate(&a)
 	return a, true
 }
 
@@ -374,6 +385,7 @@ func List() ([]Artifact, error) {
 			}
 			sub := filepath.Join(dir, e.Name())
 			if a, ok := loadArtifact(project, e.Name(), sub); ok {
+				annotate(&a) // sub is already the real logical path
 				out = append(out, a)
 				continue
 			}
@@ -400,6 +412,9 @@ func Resolve(project, name string) (Artifact, bool, error) {
 		return Artifact{}, false, err
 	}
 	a, ok := loadArtifact(project, name, dir)
+	if ok {
+		annotate(&a) // dir is already the real logical path
+	}
 	return a, ok, nil
 }
 
@@ -431,7 +446,11 @@ func ResolvePath(segs []string) (a Artifact, file string, ok bool) {
 			if !ok {
 				return Artifact{}, "", false
 			}
+			// loadArtifact was given fdPath(fd), a /proc/self/fd handle path
+			// that os.Lstat always reports as a symlink — annotate must not
+			// run against it. Set the real logical Dir first, then annotate.
 			a.Dir = filepath.Join(append([]string{root}, segs[:i+1]...)...)
+			annotate(&a)
 			return a, strings.Join(segs[i+1:], "/"), true
 		}
 		closeFD(fd)
@@ -532,11 +551,15 @@ func Publish(project, name string, files map[string][]byte) (Artifact, error) {
 		}
 	}
 	a, ok := loadArtifact(project, name, fdPath(artifactFD))
+	// As in ResolvePath: fdPath is a handle path, always reported as a
+	// symlink by os.Lstat, so annotate must run after Dir is set to the
+	// real logical path, not against fdPath(artifactFD).
 	a.Dir = dir
 	if !ok {
 		cleanup()
 		return Artifact{}, errors.New("publish verification failed")
 	}
+	annotate(&a)
 	return a, nil
 }
 

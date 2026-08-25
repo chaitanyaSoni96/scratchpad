@@ -449,3 +449,87 @@ func TestOpenDocumentRejectsArtifactAssetSymlink(t *testing.T) {
 		t.Fatal("opened symlink from artifact assets")
 	}
 }
+
+// TestIsLinkFalseForPlainArtifact is a regression test for a latent bug found
+// while writing the Windows ADR: loadArtifact's two fd-backed callers
+// (ResolvePath, Publish) pass fdPath(fd) — a /proc/self/fd/N handle path —
+// as the artifact's Dir when annotate() used to run inside loadArtifact.
+// os.Lstat on a /proc/self/fd entry always reports ModeSymlink, regardless of
+// what the fd itself points to, so every artifact returned by ResolvePath or
+// Publish reported IsLink == true even for an ordinary published artifact
+// that is not, and never was, a symlink. List (which always passes a real
+// path) was never affected. See annotate's doc comment in store.go and ADR
+// §6.8 item 2 (.agents/ADRs/2026-08-26-windows-rooted-store-backend.md).
+func TestIsLinkFalseForPlainArtifact(t *testing.T) {
+	testRoot(t)
+	files := map[string][]byte{"index.html": []byte("<p>hi</p>")}
+
+	pub, err := Publish("", "plain", files)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pub.IsLink || pub.Linked {
+		t.Errorf("Publish: plain artifact = IsLink=%v Linked=%v, want false, false", pub.IsLink, pub.Linked)
+	}
+
+	rp, file, ok := ResolvePath([]string{"plain"})
+	if !ok || file != "" {
+		t.Fatalf("ResolvePath(plain) = %+v %q %v, want a match with no trailing file", rp, file, ok)
+	}
+	if rp.IsLink || rp.Linked {
+		t.Errorf("ResolvePath: plain artifact = IsLink=%v Linked=%v, want false, false", rp.IsLink, rp.Linked)
+	}
+
+	list, err := List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 1 || list[0].IsLink || list[0].Linked {
+		t.Fatalf("List: plain artifact wrong: %+v", list)
+	}
+}
+
+// TestIsLinkTruePositiveThroughResolvePath is the true-positive counterpart
+// to TestIsLinkFalseForPlainArtifact: a genuinely watched folder must still
+// report IsLink == true (and Linked == false), and an artifact living inside
+// a watched *tree* (not itself the link) must still report Linked == true
+// (and IsLink == false), through both List (already covered by TestWatch)
+// and ResolvePath (untested before this fix, and the one that actually used
+// the buggy fdPath-based annotate call).
+func TestIsLinkTruePositiveThroughResolvePath(t *testing.T) {
+	testutil.RequireSymlinks(t)
+	testRoot(t)
+
+	src := t.TempDir()
+	if err := os.WriteFile(filepath.Join(src, "index.html"), []byte("<p>src</p>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Watch("", "linked", src); err != nil {
+		t.Fatal(err)
+	}
+	rp, _, ok := ResolvePath([]string{"linked"})
+	if !ok {
+		t.Fatal("ResolvePath(linked) not found")
+	}
+	if !rp.IsLink || rp.Linked {
+		t.Errorf("ResolvePath: watched folder = IsLink=%v Linked=%v, want true, false", rp.IsLink, rp.Linked)
+	}
+
+	tree := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(tree, "child"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tree, "child", "index.html"), []byte("<p>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Watch("", "tree", tree); err != nil {
+		t.Fatal(err)
+	}
+	rp, _, ok = ResolvePath([]string{"tree", "child"})
+	if !ok {
+		t.Fatal("ResolvePath(tree/child) not found")
+	}
+	if rp.IsLink || !rp.Linked {
+		t.Errorf("ResolvePath: artifact nested in watched tree = IsLink=%v Linked=%v, want false, true", rp.IsLink, rp.Linked)
+	}
+}
