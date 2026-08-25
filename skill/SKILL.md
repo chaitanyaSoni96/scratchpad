@@ -45,7 +45,11 @@ echo '<h1>hi</h1>' | scratchpad publish -name hello -html -   # single page; -cs
 
 The name, every project segment, and every file path inside the folder must
 match `^[a-zA-Z0-9][a-zA-Z0-9._-]{0,99}$` — one bad filename (`.gitignore`,
-`my file.png`) fails the whole publish. `-dir` accepts regular files and
+`my file.png`) fails the whole publish. Also rejected, so a store stays
+movable to Windows: reserved device basenames regardless of extension
+(`CON`, `PRN`, `AUX`, `NUL`, `COM0`-`COM9`, `LPT0`-`LPT9` — case-insensitive,
+so `nul.html` and `Com1.tar.gz` fail too) and any name ending in a dot or
+space. `-dir` accepts regular files and
 directories only, not symlinks or special files. Exactly one of `-dir` and
 `-html` is required; `-css`/`-js` require `-html`, and only one input may use
 `-` for stdin.

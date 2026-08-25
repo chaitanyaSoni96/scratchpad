@@ -59,3 +59,48 @@ Known-failure list at baseline:
 the failures are OS-level, not architecture-level.
 
 Behaviour was not edited for this task.
+
+## Phase 2 — Extract Shared Platform Boundaries
+
+### P2.5 Portable name validation
+
+Added `internal/store/names.go` (shared, untagged — behaves identically on
+every OS) with `checkPortableName`, wired into `validateName` only.
+Rejects, case-insensitively and keyed on the portion before the first dot so
+an extension does not hide the match: `CON`, `PRN`, `AUX`, `NUL`,
+`COM0`-`COM9`, `LPT0`-`LPT9` (Windows' own documented device-name list
+includes `COM0`/`LPT0` alongside `COM1`-`COM9`/`LPT1`-`LPT9`). Also rejects
+names ending in a trailing dot or trailing space.
+
+Verified the existing `nameRe` (`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,99}$`) already
+excludes every Windows-forbidden character (`<>:"/\|?*`, control chars),
+leading dots/spaces, and embedded spaces, and — because the character class
+is ASCII-only — the Unicode superscript device forms (`COM¹`, `COM²`,
+`COM³`) can never reach `validateName` at all, so no code was added for
+them. Trailing space was already unreachable through `nameRe`; the trailing
+check was still written explicitly so the rule doesn't silently depend on
+that staying true.
+
+Deliberately **not** added to `validateSegment`/`existingDir` (lookup,
+delete, unwatch): tightening those would make a watched repository's own
+`CON`-or-similar-named entries unreachable and undeletable through
+scratchpad, which is a regression, not a hardening. Locked down by
+`TestValidateSegmentAcceptsDeviceNames` in
+`internal/store/names_test.go`.
+
+Compatibility change: this narrows what Linux users can name a new artifact,
+watch link, or asset file going forward (previously-legal names like `NUL`,
+`nul.html`, `COM1`, or a name ending in `.` are now rejected at create time
+only). Existing entries are unaffected — lookup/delete stayed untouched.
+Docs updated to match: `skill/SKILL.md`, `docs/cli.md`, `docs/internals.md`,
+and the `CLAUDE.md` name-validation paragraph. `README.md` does not state
+the naming rule directly (it links out to `docs/cli.md`), so no change was
+needed there. `make install-skill` was **not** run (writes outside the repo
+into `~/.claude` and `~/.pi`) — pending for whoever ships this.
+
+Verification: `make test` and `go test ./... -count=1` both green, plus
+`go test ./internal/store -run 'Name|Publish|Watch|Validate' -v -count=1`
+green including the new `TestValidateNamePortable`,
+`TestValidateFilePathRejectsDeviceNames`, and
+`TestValidateSegmentAcceptsDeviceNames`. No existing test or fixture used a
+now-rejected name.

@@ -78,9 +78,15 @@ or expect a blank tile.
 
 Name validation is split by intent. `validateName` guards what the store
 *creates* (publish, watch) with the strict
-`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,99}$`; lookups of what already exists (URLs,
-delete, unwatch) are looser, because a watched repo names its own folders,
-but still traversal-safe.
+`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,99}$`, plus a portable-name rule rejecting
+reserved Windows device basenames (`CON`, `PRN`, `AUX`, `NUL`, `COM0`-`COM9`,
+`LPT0`-`LPT9`, case-insensitive, checked before the first dot so an
+extension doesn't hide them) and names ending in a trailing dot or space, so
+a store built on one OS stays movable to the other; lookups of what already
+exists (URLs, delete, unwatch) are looser, because a watched repo names its
+own folders, but still traversal-safe — the portable-name rule deliberately
+does not apply there, so an entry a watched repository already named `CON`
+stays reachable and deletable.
 
 Filesystem containment is likewise explicit. Store-created project ancestors
 must be real directories, never symlinks. Resolution may cross one symlink

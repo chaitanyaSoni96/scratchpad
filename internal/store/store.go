@@ -82,13 +82,19 @@ func EnsureRoot() (string, error) {
 var nameRe = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,99}$`)
 
 // validateName guards names the store creates — published artifacts, watch
-// links and the project directories made for them.
+// links and the project directories made for them. It also rules out names
+// that are syntactically fine on Linux but are unportable to Windows (a
+// reserved DOS device basename, or a trailing dot/space) — see
+// checkPortableName — so a store built on one OS stays movable to the other.
 func validateName(s string) error {
 	if !nameRe.MatchString(s) {
 		return fmt.Errorf("invalid name %q: must match %s", s, nameRe.String())
 	}
 	if s == "." || s == ".." || strings.ContainsAny(s, `/\`) {
 		return fmt.Errorf("invalid name %q", s)
+	}
+	if err := checkPortableName(s); err != nil {
+		return err
 	}
 	return nil
 }
