@@ -61,6 +61,10 @@ func CreateJunctionAt(parent windows.Handle, name, target string) error {
 	if err := MkdirAt(parent, name); err != nil {
 		return fmt.Errorf("junction: claim %q: %w", name, err)
 	}
+	// The two-step window (M8): the name is now claimed as an ordinary empty
+	// directory and the tag has not been applied. A test that panics from this
+	// hook is simulating a crash here.
+	runSpikeOpHook(OpLinkNameClaimed)
 	h, err := ntOpenAt(parent, name, windows.FILE_GENERIC_WRITE|windows.FILE_GENERIC_READ,
 		windows.FILE_OPEN, windows.FILE_DIRECTORY_FILE|windows.FILE_OPEN_REPARSE_POINT,
 		windows.OBJ_CASE_INSENSITIVE, 0)
@@ -161,6 +165,9 @@ func SymlinkAt(parent windows.Handle, name, target string) error {
 	if err := MkdirAt(parent, name); err != nil {
 		return err
 	}
+	// See CreateJunctionAt: this is the same two-step window, and it is the one
+	// `watch` would use on Windows.
+	runSpikeOpHook(OpLinkNameClaimed)
 	h, err := ntOpenAt(parent, name, windows.FILE_GENERIC_WRITE|windows.FILE_GENERIC_READ,
 		windows.FILE_OPEN, windows.FILE_DIRECTORY_FILE|windows.FILE_OPEN_REPARSE_POINT,
 		windows.OBJ_CASE_INSENSITIVE, 0)

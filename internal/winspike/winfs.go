@@ -183,6 +183,7 @@ func OpenForDeleteAt(parent windows.Handle, name string, options uint32) (window
 // posix selects FILE_DISPOSITION_POSIX_SEMANTICS (name leaves the namespace at
 // once) over the legacy FileDispositionInfo (delete-on-last-close).
 func DeleteAt(parent windows.Handle, name string, options uint32, posix bool) error {
+	recordRemoval("DeleteAt", name)
 	h, err := OpenForDeleteAt(parent, name, options)
 	if err != nil {
 		return err
@@ -193,6 +194,7 @@ func DeleteAt(parent windows.Handle, name string, options uint32, posix bool) er
 
 // DeleteByHandle marks an already-open handle for deletion.
 func DeleteByHandle(h windows.Handle, posix bool) error {
+	recordRemoval("DeleteByHandle", "")
 	if posix {
 		var info struct{ Flags uint32 }
 		info.Flags = fileDispositionDelete | fileDispositionPosixSemantics | fileDispositionIgnoreReadonlyAttribute
@@ -568,6 +570,13 @@ func (r *Root) OpenBrowsableDir(segs []string, allowedTags ...uint32) (windows.H
 					windows.CloseHandle(h)
 					return windows.InvalidHandle, fmt.Errorf("%q is a %s reparse point (0x%08X), which is not an allowed watch boundary", seg, TagName(tag), tag)
 				}
+				// The one place this design re-resolves a PATH STRING. The
+				// target has been read from the reparse buffer and is about to
+				// be opened by name; the hook makes that window addressable by
+				// a test. (This mirrors the threat model's proposed
+				// `browse-segment` hook, and the Linux original has the same
+				// shape at storefs_linux.go:184.)
+				runSpikeOpHook(OpBrowseBoundary)
 				next, openErr = openAbsoluteDirNoFollow(stripNTPrefix(target))
 				if openErr == nil {
 					crossed = true
