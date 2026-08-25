@@ -161,16 +161,32 @@ type ReplacePolicy struct {
 	Flush          bool          // FlushFileBuffers on the temp before replacing
 }
 
-// DefaultReplacePolicy is the bound this spike recommends: 8 attempts,
-// 1ms→128ms doubling backoff, 1s total wall clock. Worst case ~255ms of sleep
-// over 8 attempts, so the budget is reached only when individual attempts
-// themselves block.
+// DefaultReplacePolicy is the bound this spike recommends:
+//
+//	10 attempts, 2ms→256ms doubling backoff, 2s total wall-clock ceiling.
+//
+// The sleeps before attempts 2..10 are 2, 4, 8, 16, 32, 64, 128, 256, 256 ms —
+// 766ms of retrying in the worst case, with the 2s budget as a hard ceiling
+// for the case where individual attempts themselves block rather than failing
+// immediately (a share-mode veto fails immediately; a filter driver need not).
+//
+// Why these numbers, given that the AV distribution is unmeasurable (M13.av):
+//
+//   - the FIRST attempt is what almost always succeeds (M13.retry: once the
+//     interfering handle closed, the replace succeeded on attempt 1), so the
+//     tail is what is being sized, not the mean;
+//   - the caller is an interactive save (PUT /notes/..., or a `scratchpad
+//     notes resolve` invocation), so ~0.8s of silent retrying is inside a
+//     human's tolerance and 2s is the point past which an error is kinder
+//     than more waiting;
+//   - the failure is ACTIONABLE (close the program holding the file), so a
+//     longer bound trades a fast, fixable error for a slow one.
 func DefaultReplacePolicy() ReplacePolicy {
 	return ReplacePolicy{
-		MaxAttempts:    8,
-		InitialBackoff: time.Millisecond,
-		MaxBackoff:     128 * time.Millisecond,
-		TotalBudget:    time.Second,
+		MaxAttempts:    10,
+		InitialBackoff: 2 * time.Millisecond,
+		MaxBackoff:     256 * time.Millisecond,
+		TotalBudget:    2 * time.Second,
 		Flush:          false,
 	}
 }
@@ -448,7 +464,9 @@ func RemoveTreeAt(parent windows.Handle, name string) error {
 	if strings.ContainsAny(name, `\/`) {
 		return fmt.Errorf("winspike: RemoveTreeAt requires a single component, got %q", name)
 	}
-	h, err := OpenDirAt(parent, name)
+	// OpenRealDirAt, not OpenDirAt: the classification must not depend on
+	// which filter drivers are loaded (see the STRICT primitives in winfs.go).
+	h, err := OpenRealDirAt(parent, name)
 	if err != nil {
 		if isNotExist(err) {
 			return nil

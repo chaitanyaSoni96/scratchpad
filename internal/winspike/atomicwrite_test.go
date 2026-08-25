@@ -210,9 +210,60 @@ func TestP13CleanupOnFailurePaths(t *testing.T) {
 				"non-blocking: a share-mode veto fails immediately rather than waiting)", elapsed.Round(time.Millisecond), pol.TotalBudget)
 	})
 
-	// (c) cleanup is HANDLE-based: it must survive the parent being renamed
-	//     away and substituted between the temp creation and the failure.
-	t.Run("cleanup_survives_ancestor_swap", func(t *testing.T) {
+	// (c) cleanup is HANDLE-based: the temp is removed through its own handle,
+	//     so an attacker who RENAMES the temp between the write and the
+	//     replace cannot leave residue behind. A name-based unlinkat-style
+	//     cleanup would miss it and leave the renamed file in the store.
+	t.Run("cleanup_survives_temp_rename", func(t *testing.T) {
+		r, dir := openScratchRoot(t)
+		parent, err := r.OpenRealDir(nil, false, false)
+		if err != nil {
+			t.Fatalf("OpenRealDir: %s", DescribeErr(err))
+		}
+		defer windows.CloseHandle(parent)
+		// Make the replace fail permanently so the cleanup path runs.
+		mustMkdir(t, filepath.Join(dir, "notes.json"))
+
+		stolen := ""
+		setSpikeOpHook(t, onceHook(OpBeforeReplace, func() {
+			es, e := os.ReadDir(dir)
+			if e != nil {
+				return
+			}
+			for _, entry := range es {
+				if strings.HasPrefix(entry.Name(), ".notes-") {
+					if os.Rename(filepath.Join(dir, entry.Name()), filepath.Join(dir, "stolen.tmp")) == nil {
+						stolen = entry.Name()
+					}
+					return
+				}
+			}
+		}))
+
+		_, werr := AtomicWriteFile(parent, "notes.json", []byte("NEW"), pol)
+		if stolen == "" {
+			Report(t, "P13.cleanup_handle_based", NotMeasured, "could not rename the temp out from under the write")
+			return
+		}
+		_, stolenLeft := os.Stat(filepath.Join(dir, "stolen.tmp"))
+		left := tempsLeft(t, dir)
+		clean := stolenLeft != nil && len(left) == 0
+		Report(t, "P13.cleanup_handle_based", boolVerdict(clean),
+			"the temp %q was RENAMED to stolen.tmp between the write and the replace, then the replace failed: write err=%v ; "+
+				"stolen.tmp still present=%v ; .notes-* residue %v. Cleanup goes through the temp's own HANDLE "+
+				"(DeleteByHandle), which follows the object through the rename; a name-based cleanup would have unlinked "+
+				"nothing and left an orphan file inside the store.",
+			stolen, werr != nil, stolenLeft == nil, left)
+		RequireProperty(t, "P13.cleanup_handle_based", clean,
+			"handle-based cleanup must remove the temp even after it has been renamed (stolen.tmp present=%v, residue %v)",
+			stolenLeft == nil, left)
+	})
+
+	// (d) a fact discovered while staging (c): an open child handle blocks the
+	//     rename of its parent directory, even though the child granted the
+	//     full share mode. Recorded because it NARROWS the A2 ancestor race
+	//     during an in-flight write — and must not be relied on.
+	t.Run("open_child_blocks_parent_rename", func(t *testing.T) {
 		base := scratchDir(t)
 		rootPath := mustMkdir(t, filepath.Join(base, "store"))
 		r, err := OpenRoot(rootPath)
@@ -226,32 +277,25 @@ func TestP13CleanupOnFailurePaths(t *testing.T) {
 			t.Fatalf("OpenRealDir: %s", DescribeErr(err))
 		}
 		defer windows.CloseHandle(parent)
-		// Make the replace fail permanently so the cleanup path runs.
-		mustMkdir(t, filepath.Join(rootPath, "proj", "notes.json"))
 
-		var swapErr error
-		setSpikeOpHook(t, onceHook(OpBeforeReplace, func() {
-			if swapErr = os.Rename(filepath.Join(rootPath, "proj"), filepath.Join(rootPath, "moved")); swapErr != nil {
-				return
-			}
-			swapErr = os.Mkdir(filepath.Join(rootPath, "proj"), 0o755)
-		}))
-
-		_, werr := AtomicWriteFile(parent, "notes.json", []byte("NEW"), pol)
-		if swapErr != nil {
-			Report(t, "P13.cleanup_handle_based", NotMeasured, "could not stage the ancestor swap: %v", swapErr)
-			return
+		empty := os.Rename(filepath.Join(rootPath, "proj"), filepath.Join(rootPath, "moved1"))
+		if empty == nil {
+			_ = os.Rename(filepath.Join(rootPath, "moved1"), filepath.Join(rootPath, "proj"))
 		}
-		origLeft := tempsLeft(t, filepath.Join(rootPath, "moved"))
-		decoyLeft := tempsLeft(t, filepath.Join(rootPath, "proj"))
-		Report(t, "P13.cleanup_handle_based", boolVerdict(len(origLeft) == 0 && len(decoyLeft) == 0),
-			"the project directory was renamed away and a decoy substituted between the temp write and the replace; "+
-				"write err=%v ; residue in the ORIGINAL object=%v ; residue in the DECOY=%v. Cleanup goes through the temp's own "+
-				"HANDLE (DeleteByHandle), so it can neither miss the temp nor reach into the substituted directory.",
-			werr != nil, origLeft, decoyLeft)
-		RequireProperty(t, "P13.cleanup_handle_based", len(origLeft) == 0 && len(decoyLeft) == 0,
-			"handle-based cleanup must remove the temp from the ORIGINAL object and must never touch a substituted decoy "+
-				"(original residue %v, decoy residue %v)", origLeft, decoyLeft)
+		child, cerr := CreateFileAt(parent, "child.tmp")
+		withChild := error(nil)
+		if cerr == nil {
+			withChild = os.Rename(filepath.Join(rootPath, "proj"), filepath.Join(rootPath, "moved2"))
+			windows.CloseHandle(child)
+		}
+		afterClose := os.Rename(filepath.Join(rootPath, "proj"), filepath.Join(rootPath, "moved3"))
+		Report(t, "P13.open_child_blocks_parent_rename", Info,
+			"renaming a pinned project directory with NO open children -> %v ; with ONE open child file (opened by us with "+
+				"FILE_SHARE_READ|WRITE|DELETE) -> %v ; after that child was closed -> %v. So an in-flight annotation write "+
+				"itself narrows the A2 ancestor-substitution window, because the temp file's handle blocks the rename. "+
+				"This is a HAPPY ACCIDENT and must not be relied on: it disappears the instant the temp is closed, and it "+
+				"does not apply to any operation that holds no child handle.",
+			empty, withChild, afterClose)
 	})
 }
 
@@ -394,7 +438,7 @@ func TestP13SharingModes(t *testing.T) {
 // released on a timer, so the retry loop's ability to ride out a transient
 // veto is measured rather than assumed.
 func TestP13RetryBound(t *testing.T) {
-	for _, hold := range []time.Duration{20 * time.Millisecond, 120 * time.Millisecond} {
+	for _, hold := range []time.Duration{20 * time.Millisecond, 400 * time.Millisecond} {
 		r, dir := openScratchRoot(t)
 		parent, err := r.OpenRealDir(nil, false, false)
 		if err != nil {
@@ -420,8 +464,8 @@ func TestP13RetryBound(t *testing.T) {
 		windows.CloseHandle(parent)
 		Report(t, fmt.Sprintf("P13.retry.hold%dms", hold.Milliseconds()), boolVerdict(werr == nil),
 			"blocker released after %v: replace err=%s after %d attempt(s) over %v; destination now %q. "+
-				"(1ms→128ms doubling, 8 attempts, 1s budget: the cumulative sleep before attempt N is 2^(N-1)-1 ms, so a veto "+
-				"lasting under ~255ms is ridden out and anything longer becomes an actionable error.)",
+				"(2ms→256ms doubling, 10 attempts, 2s budget: 766ms of retrying in the worst case, so a veto lasting under "+
+				"about three quarters of a second is ridden out and anything longer becomes an actionable error.)",
 			hold, DescribeErr(werr), res.Attempts, res.Elapsed.Round(time.Millisecond), content)
 		RequireProperty(t, fmt.Sprintf("P13.retry_integrity.hold%dms", hold.Milliseconds()),
 			content == "OLD" || content == "NEW",
@@ -706,4 +750,69 @@ func TestP13Durability(t *testing.T) {
 		"there is no directory-fsync question on Windows: the rename is a metadata operation on the parent's index and "+
 			"NTFS journals it, so no separate 'flush the directory' step exists to forget. FlushFileBuffers on the TEMP's "+
 			"handle before the replace is the only durability knob, and it is a one-line policy flag (ReplacePolicy.Flush).")
+}
+
+// TestP13GoStdlibShareMode measures a fact that is easy to miss and expensive
+// to discover late: Go's own os.Open on Windows does NOT grant
+// FILE_SHARE_DELETE.
+//
+//	sharemode := uint32(FILE_SHARE_READ | FILE_SHARE_WRITE)
+//	$GOROOT/src/syscall/syscall_windows.go:395
+//
+// R15 requires FILE_SHARE_READ|WRITE|DELETE everywhere. Any place the store
+// hands out an *os.File opened by path — OpenDocument serving a document over
+// HTTP is the obvious one — therefore vetoes concurrent replaces and deletes
+// of that file for as long as the response is being written.
+func TestP13GoStdlibShareMode(t *testing.T) {
+	r, dir := openScratchRoot(t)
+	parent, err := r.OpenRealDir(nil, false, false)
+	if err != nil {
+		t.Fatalf("OpenRealDir: %s", DescribeErr(err))
+	}
+	defer windows.CloseHandle(parent)
+
+	probe := func(open func(string) (func(), error)) (string, string) {
+		dst := filepath.Join(dir, "doc.html")
+		mustWrite(t, dst, "OLD")
+		closer, oerr := open(dst)
+		if oerr != nil {
+			return "open-failed(" + DescribeErr(oerr) + ")", ""
+		}
+		_, werr := AtomicWriteFile(parent, "doc.html", []byte("NEW"), ReplacePolicy{MaxAttempts: 1, TotalBudget: time.Second})
+		delErr := DeleteAt(parent, "doc.html", windows.FILE_NON_DIRECTORY_FILE, true)
+		closer()
+		_ = os.Remove(dst)
+		return DescribeErr(werr), DescribeErr(delErr)
+	}
+
+	goReplace, goDelete := probe(func(p string) (func(), error) {
+		f, err := os.Open(p)
+		if err != nil {
+			return nil, err
+		}
+		return func() { f.Close() }, nil
+	})
+	ourReplace, ourDelete := probe(func(p string) (func(), error) {
+		u, _ := windows.UTF16PtrFromString(p)
+		h, err := windows.CreateFile(u, windows.GENERIC_READ, shareAll, nil,
+			windows.OPEN_EXISTING, windows.FILE_ATTRIBUTE_NORMAL, 0)
+		if err != nil {
+			return nil, err
+		}
+		return func() { windows.CloseHandle(h) }, nil
+	})
+
+	blocked := !strings.HasPrefix(goReplace, "nil")
+	Report(t, "P13.go_share_mode", boolVerdict(blocked),
+		"with the file held open by os.Open: atomic replace -> %s ; POSIX delete -> %s. "+
+			"With the SAME file held by a CreateFile that grants FILE_SHARE_READ|WRITE|DELETE: replace -> %s ; delete -> %s. "+
+			"Go's syscall.Open hard-codes FILE_SHARE_READ|FILE_SHARE_WRITE ($GOROOT/src/syscall/syscall_windows.go:395) and "+
+			"omits FILE_SHARE_DELETE, so R15's \"FILE_SHARE_DELETE everywhere\" is NOT satisfied by using os.Open. "+
+			"CONSEQUENCE: OpenDocument's Windows twin must not return an *os.File opened by os.Open — while the web server "+
+			"is streaming a document, a concurrent notes replace or Delete of that document would fail with a sharing "+
+			"violation and burn the whole retry bound. os.NewFile over a handle WE opened with the full share mode is the fix, "+
+			"and it is the same wrapper the handle-anchored design already needs.",
+		goReplace, goDelete, ourReplace, ourDelete)
+	RequireProperty(t, "P13.share_all_reader_does_not_veto", strings.HasPrefix(ourReplace, "nil"),
+		"a reader that grants the full share mode must NOT veto the atomic replace (got %s)", ourReplace)
 }

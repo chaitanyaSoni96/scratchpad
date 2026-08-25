@@ -208,7 +208,10 @@ func TestSecurityTestMatrixCoverage(t *testing.T) {
 		{"MATRIX.Publish.ancestor_replaced", Yes,
 			"DEMONSTRATED: A1.ancestor_replaced.realdir / .junction / .symlink / .unknowntag, and M7.redirect."},
 		{"MATRIX.Publish.ancestor_link", Yes,
-			"DEMONSTRATED: P12.junction_traverse, P12.junction_intermediate, P12.symlink_traverse, A5.unknown_tag_refused."},
+			"DEMONSTRATED: P12.junction_traverse, P12.junction_intermediate, P12.symlink_traverse, A5.strict_walk. " +
+				"NOTE the correction in A5.obj_dont_reparse_inert_for_unknown_tags: for a NON-Microsoft tag the refusal must " +
+				"come from the tag read off a FILE_OPEN_REPARSE_POINT handle, not from OBJ_DONT_REPARSE, which is inert for " +
+				"those tags."},
 		{"MATRIX.Publish.artifact_ancestor", Partial,
 			"MECHANISM DEMONSTRATED: P12.reject_artifact (rejectArtifacts through the pinned walk). The remaining half is " +
 				"store policy: dirHasHTMLFD uses strings.ToLower, which is NOT the volume's $UpCase folding (M11), so a " +
@@ -220,7 +223,8 @@ func TestSecurityTestMatrixCoverage(t *testing.T) {
 				"the allowlist names it)."},
 		{"MATRIX.Browse.nested_link", Yes,
 			"DEMONSTRATED: A3.nested.* — every boundary flavour × every nested flavour (junction, symlink, unknown tag), " +
-				"at one and at two levels below the boundary."},
+				"at one and at two levels below the boundary — and A3.nested_strict.* restates each refusal as a TAG-based " +
+				"one so it does not depend on the runner's filter drivers."},
 		{"MATRIX.Browse.cycle", Partial,
 			"MECHANISM DEMONSTRATED: a cycle needs a SECOND link inside the watched source, which A3.nested.* shows is " +
 				"refused, so unbounded traversal cannot be constructed through the browse walk. The other half — that " +

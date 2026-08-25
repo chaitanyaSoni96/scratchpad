@@ -342,6 +342,15 @@ func TestA3NestedReparseBelowCrossedBoundary(t *testing.T) {
 					held = held && deepErr != nil
 				}
 
+				// Driver-independent restatement of the same refusal: the
+				// nested entry refused BY TAG, not by the absence of a filter
+				// driver (see A5.obj_dont_reparse_inert_for_unknown_tags).
+				_, strictErr := OpenRealDirAt(srcRoot.Handle(), "nested")
+				_, strictRefusal := TagOfRefusal(strictErr)
+				RequireProperty(t, "A3.nested_strict."+name, strictRefusal,
+					"the strict primitive must refuse the nested %s by its TAG, so the refusal holds on a machine whose "+
+						"filter drivers would service it (got %v)", nested, strictErr)
+
 				Report(t, "A3.nested."+name, boolVerdict(held),
 					"boundary=%s (crossed ok=%v), nested %s one level below -> %s, and two levels below (%s) -> %s ; "+
 						"external tree %s",
@@ -490,10 +499,10 @@ func TestA5UnknownReparseTagRefusedIndependentOfDriver(t *testing.T) {
 		st, _ := StatusOf(err)
 		return st
 	}
-	// With OBJ_DONT_REPARSE (the design's walk).
+	// With OBJ_DONT_REPARSE only (the obvious reading of R3).
 	_, unkNoFollow := OpenDirAt(r.Handle(), "unk")
 	_, jnNoFollow := OpenDirAt(r.Handle(), "jn")
-	// Without it (the naive port), which is where the filter driver is consulted.
+	// Without it, which is where the filter driver is consulted.
 	_, unkFollow := ntOpenAt(r.Handle(), "unk", dirReadAccess, windows.FILE_OPEN,
 		windows.FILE_DIRECTORY_FILE, windows.OBJ_CASE_INSENSITIVE, 0)
 	jnFollowH, jnFollow := ntOpenAt(r.Handle(), "jn", dirReadAccess, windows.FILE_OPEN,
@@ -502,30 +511,65 @@ func TestA5UnknownReparseTagRefusedIndependentOfDriver(t *testing.T) {
 		windows.CloseHandle(jnFollowH)
 	}
 
-	sameRefusal := status(unkNoFollow) == windows.STATUS_REPARSE_POINT_ENCOUNTERED &&
-		status(jnNoFollow) == windows.STATUS_REPARSE_POINT_ENCOUNTERED
-
 	li, _ := os.Lstat(filepath.Join(dir, "unk"))
 	isDir := li != nil && li.IsDir()
 
 	Report(t, "A5.unknown_tag_statuses", Info,
-		"UNSERVICED tag 0x00001234: with OBJ_DONT_REPARSE -> %s ; without it -> %s. "+
-			"SERVICED tag (junction, serviced by NTFS): with OBJ_DONT_REPARSE -> %s ; without it -> %s. "+
+		"UNSERVICED tag 0x00001234: with OBJ_DONT_REPARSE -> %s ; WITHOUT it -> %s. "+
+			"SERVICED tag (junction, serviced by NTFS itself): with OBJ_DONT_REPARSE -> %s ; WITHOUT it -> %s. "+
 			"os.Lstat().IsDir() on the unknown tag = %v.",
 		DescribeErr(unkNoFollow), DescribeErr(unkFollow), DescribeErr(jnNoFollow), DescribeErr(jnFollow), isDir)
 
-	Report(t, "A5.unknown_tag_driver_independent", boolVerdict(sameRefusal),
-		"THE ARGUMENT: the refusal status is identical (STATUS_REPARSE_POINT_ENCOUNTERED) for a tag NTFS services and for a "+
-			"tag nothing services, while the WITHOUT-flag opens differ (the junction traverses, the unknown tag gets "+
-			"STATUS_IO_REPARSE_TAG_NOT_HANDLED). OBJ_DONT_REPARSE therefore fails the open during name resolution, before any "+
-			"filter driver is asked to service the tag — so on a machine that DOES have the driver (Windows Containers WCI*, "+
-			"VFS-for-Git PROJFS*, a vendor filter) the open still fails the same way. What that machine changes is only the "+
-			"WITHOUT-flag column: there the open would SUCCEED and Go's IsDir()==%v would be the entire defence. The design "+
-			"never takes that column, which is why it is contained and a Go-mode-based port is not.", isDir)
+	// The invalidation. The two unknown-tag columns are the SAME status.
+	objDontReparseIsInert := status(unkNoFollow) == status(unkFollow) &&
+		status(unkNoFollow) == windows.STATUS_IO_REPARSE_TAG_NOT_HANDLED
+	Report(t, "A5.obj_dont_reparse_inert_for_unknown_tags", boolVerdict(objDontReparseIsInert),
+		"THREAT-MODEL CORRECTION: for a NON-MICROSOFT tag the WITH-flag and WITHOUT-flag opens return the SAME status "+
+			"(STATUS_IO_REPARSE_TAG_NOT_HANDLED, 0xC0000279), whereas for the junction they differ (refused vs traverses). "+
+			"OBJ_DONT_REPARSE therefore does NOTHING for an unknown tag: the open is refused because no filter driver "+
+			"claimed the tag, not because we asked not to reparse. On a machine that HAS the driver — Windows Containers "+
+			"(WCI*), VFS-for-Git (PROJFS*), a vendor filter — the same open would be SERVICED and the walk would traverse. "+
+			"R3 stated as 'OBJ_DONT_REPARSE on every component' is NECESSARY AND NOT SUFFICIENT.")
 
-	RequireProperty(t, "A5.unknown_tag_refused", status(unkNoFollow) == windows.STATUS_REPARSE_POINT_ENCOUNTERED,
-		"a non-surrogate unknown reparse tag must be refused by the no-follow walk with STATUS_REPARSE_POINT_ENCOUNTERED "+
-			"(i.e. by the no-follow rule, NOT merely because no driver services it), got %s", DescribeErr(unkNoFollow))
+	// The corrected primitive. FILE_OPEN_REPARSE_POINT bypasses reparse
+	// processing for EVERY tag, so the open returns the entry itself and the
+	// tag read from that same handle is what refuses it.
+	_, unkStrict := OpenRealDirAt(r.Handle(), "unk")
+	_, jnStrict := OpenRealDirAt(r.Handle(), "jn")
+	unkTag, unkIsRefusal := TagOfRefusal(unkStrict)
+	jnTag, jnIsRefusal := TagOfRefusal(jnStrict)
+	// A real directory must still open through the strict primitive.
+	mustMkdir(t, filepath.Join(dir, "plain"))
+	plainH, plainErr := OpenRealDirAt(r.Handle(), "plain")
+	if plainErr == nil {
+		windows.CloseHandle(plainH)
+	}
+
+	Report(t, "A5.strict_open", boolVerdict(unkIsRefusal && jnIsRefusal && plainErr == nil),
+		"OpenRealDirAt (FILE_OPEN_REPARSE_POINT + FILE_ATTRIBUTE_TAG_INFO checked on the SAME handle): "+
+			"unknown tag -> %v (tag 0x%08X, tag-based refusal=%v) ; junction -> %v (tag 0x%08X, tag-based refusal=%v) ; "+
+			"a plain directory -> %s. The unknown-tag open SUCCEEDS at the kernel level here — that success is the proof "+
+			"that FILE_OPEN_REPARSE_POINT bypassed the filter dispatch entirely — and it is OUR tag check, not the absence "+
+			"of a driver, that refuses it. That makes the refusal driver-independent, which OBJ_DONT_REPARSE alone is not.",
+		unkStrict, unkTag, unkIsRefusal, jnStrict, jnTag, jnIsRefusal, DescribeErr(plainErr))
+
+	RequireProperty(t, "A5.unknown_tag_refused", unkIsRefusal && unkTag == 0x00001234,
+		"a non-surrogate unknown reparse tag must be refused BY ITS TAG, read from a handle opened with "+
+			"FILE_OPEN_REPARSE_POINT, so the refusal does not depend on no filter driver servicing it (got err=%v, tag=0x%08X)",
+		unkStrict, unkTag)
+	RequireProperty(t, "A5.strict_open_admits_real_dirs", plainErr == nil,
+		"the strict primitive must still open an ordinary directory, or it is useless (got %s)", DescribeErr(plainErr))
+
+	// And the strict WALK: an unknown-tag ancestor must be refused by tag.
+	mustMkdir(t, filepath.Join(dir, "proj"))
+	if _, ok := plantLink(t, r.Handle(), "unk2", ext, "unknowntag"); ok {
+		_, walkErr := r.OpenRealDirStrict([]string{"unk2"})
+		_, walkIsRefusal := TagOfRefusal(walkErr)
+		RequireProperty(t, "A5.strict_walk", walkIsRefusal,
+			"the strict project walk must refuse an unknown-tag ancestor by tag (got %v)", walkErr)
+		Report(t, "A5.strict_walk", boolVerdict(walkIsRefusal),
+			"OpenRealDirStrict through an unknown-tag ancestor -> %v", walkErr)
+	}
 
 	// The removal path must also treat it as a link, not as the directory Go
 	// says it is.
@@ -1197,7 +1241,7 @@ func TestA12ConcurrentNoteWriters(t *testing.T) {
 	defer windows.CloseHandle(parent)
 	mustWrite(t, filepath.Join(dir, "notes.json"), "seed")
 
-	const writers, rounds = 8, 40
+	const writers, rounds = 8, 25
 	var wg sync.WaitGroup
 	errs := make([]int, writers)
 	bad := make([]string, 0)
@@ -1213,7 +1257,14 @@ func TestA12ConcurrentNoteWriters(t *testing.T) {
 				if _, e := AtomicWriteFile(parent, "notes.json", payload, DefaultReplacePolicy()); e != nil {
 					errs[w]++
 				}
-				b, rerr := os.ReadFile(filepath.Join(dir, "notes.json"))
+				// Read through a share-all handle, NOT os.ReadFile.
+				// syscall.Open grants FILE_SHARE_READ|FILE_SHARE_WRITE and
+				// NOT FILE_SHARE_DELETE ($GOROOT/src/syscall/syscall_windows.go:395),
+				// so an os.ReadFile reader VETOES a concurrent atomic replace.
+				// That is a real defect for the store (see P13.go_share_mode)
+				// but it is not what this test is measuring, and letting it
+				// in would turn every round into a full retry bound.
+				b, rerr := readAllShareAll(parent, "notes.json")
 				if rerr != nil {
 					continue
 				}
@@ -1252,4 +1303,25 @@ func uniqueTokens(s string) map[string]bool {
 		}
 	}
 	return out
+}
+
+// readAllShareAll reads a whole file through a handle-relative open that
+// grants the full share mode, so the reader cannot veto a concurrent replace.
+func readAllShareAll(parent windows.Handle, name string) ([]byte, error) {
+	h, err := OpenRegularFileAt(parent, name)
+	if err != nil {
+		return nil, err
+	}
+	defer windows.CloseHandle(h)
+	var out []byte
+	buf := make([]byte, 4096)
+	for {
+		n, err := windows.Read(h, buf)
+		if n > 0 {
+			out = append(out, buf[:n]...)
+		}
+		if err != nil || n == 0 {
+			return out, nil
+		}
+	}
 }

@@ -3,6 +3,7 @@
 package winspike
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"runtime"
@@ -679,6 +680,9 @@ func isReparse(err error) bool {
 	if err == nil {
 		return false
 	}
+	if _, ok := TagOfRefusal(err); ok {
+		return true
+	}
 	st, ok := StatusOf(err)
 	if !ok {
 		return false
@@ -797,3 +801,111 @@ func DeleteByHandleWin32(h windows.Handle, posix bool) error {
 // unsafePointer keeps the single unsafe conversion privilege.go needs in one
 // audited place.
 func unsafePointer(b *byte) unsafe.Pointer { return unsafe.Pointer(b) }
+
+// ---------------------------------------------------------------------------
+// STRICT traversal primitives.
+//
+// Run 32906333884 measured something that invalidates the obvious reading of
+// R3. For a NON-Microsoft reparse tag, OBJ_DONT_REPARSE does NOTHING:
+//
+//	unknown tag 0x00001234, WITH OBJ_DONT_REPARSE    -> STATUS_IO_REPARSE_TAG_NOT_HANDLED
+//	unknown tag 0x00001234, WITHOUT OBJ_DONT_REPARSE -> STATUS_IO_REPARSE_TAG_NOT_HANDLED
+//	junction,               WITH OBJ_DONT_REPARSE    -> STATUS_REPARSE_POINT_ENCOUNTERED
+//	junction,               WITHOUT OBJ_DONT_REPARSE -> success (traverses)
+//
+// The two columns are IDENTICAL for the unknown tag. The open is refused
+// because no filter driver claimed the tag, not because we asked not to
+// reparse — so on a machine that HAS the driver (Windows Containers WCI*,
+// VFS-for-Git PROJFS*, a vendor filter) the same open would be serviced and
+// the walk would traverse. OBJ_DONT_REPARSE is necessary and NOT sufficient.
+//
+// The primitives below close that. FILE_OPEN_REPARSE_POINT is documented to
+// bypass normal reparse-point processing entirely — for every tag, driver or
+// no driver — so the open returns a handle to the ENTRY ITSELF. The tag is
+// then read from THAT handle and anything reparse-tagged is refused. One
+// kernel operation, one check, both on the same object: no check-then-use
+// window, and no dependence on which filter drivers happen to be loaded.
+//
+// OBJ_DONT_REPARSE is kept as well, because it still covers intermediate
+// components for the Microsoft tags, and costs nothing.
+// ---------------------------------------------------------------------------
+
+// ReparseRefusal is returned when a strict open found a reparse point where a
+// real directory or file is required. It carries the tag so the caller can
+// give an actionable error and so an allowlist can be applied by the caller
+// rather than buried in the primitive.
+type ReparseRefusal struct {
+	Name  string
+	Tag   uint32
+	Attrs uint32
+}
+
+func (e *ReparseRefusal) Error() string {
+	return fmt.Sprintf("%q is a %s reparse point (tag 0x%08X, attrs 0x%08X), not a real directory entry",
+		e.Name, TagName(e.Tag), e.Tag, e.Attrs)
+}
+
+// openStrictAt is the shared body of OpenRealDirAt / OpenRealFileAt.
+func openStrictAt(parent windows.Handle, name string, access, options uint32) (windows.Handle, error) {
+	if strings.ContainsAny(name, `\/`) {
+		return windows.InvalidHandle, fmt.Errorf("winspike: strict opens require a single component, got %q", name)
+	}
+	h, err := ntOpenAt(parent, name, access, windows.FILE_OPEN,
+		options|windows.FILE_OPEN_REPARSE_POINT, noFollowAttrs, 0)
+	if err != nil {
+		return windows.InvalidHandle, err
+	}
+	at, tagErr := AttrTagOf(h)
+	if tagErr != nil {
+		windows.CloseHandle(h)
+		return windows.InvalidHandle, tagErr
+	}
+	if at.IsReparse() {
+		windows.CloseHandle(h)
+		return windows.InvalidHandle, &ReparseRefusal{Name: name, Tag: at.ReparseTag, Attrs: at.FileAttributes}
+	}
+	return h, nil
+}
+
+// OpenRealDirAt is OpenDirAt hardened: it opens the entry itself and refuses
+// any reparse tag from the handle, so its guarantee does not depend on the
+// filter drivers installed on the machine.
+func OpenRealDirAt(parent windows.Handle, name string) (windows.Handle, error) {
+	return openStrictAt(parent, name, dirReadAccess, windows.FILE_DIRECTORY_FILE)
+}
+
+// OpenRealFileAt is OpenRegularFileAt hardened, on the same argument.
+func OpenRealFileAt(parent windows.Handle, name string) (windows.Handle, error) {
+	return openStrictAt(parent, name, fileReadAccess, windows.FILE_NON_DIRECTORY_FILE)
+}
+
+// TagOfRefusal reports the tag a strict open refused, and whether err is such
+// a refusal at all.
+func TagOfRefusal(err error) (uint32, bool) {
+	var r *ReparseRefusal
+	if errors.As(err, &r) {
+		return r.Tag, true
+	}
+	return 0, false
+}
+
+// OpenRealDirStrict is Root.OpenRealDir built on the strict primitive.
+func (r *Root) OpenRealDirStrict(segs []string) (windows.Handle, error) {
+	h, err := DupHandle(r.h)
+	if err != nil {
+		return windows.InvalidHandle, err
+	}
+	for i, seg := range segs {
+		next, openErr := OpenRealDirAt(h, seg)
+		windows.CloseHandle(h)
+		if openErr != nil {
+			if isReparse(openErr) {
+				return windows.InvalidHandle, fmt.Errorf("project ancestor %q is a link or reparse point: %w",
+					strings.Join(segs[:i+1], "/"), openErr)
+			}
+			return windows.InvalidHandle, openErr
+		}
+		h = next
+	}
+	return h, nil
+}

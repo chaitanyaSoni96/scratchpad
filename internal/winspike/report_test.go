@@ -4,6 +4,7 @@ package winspike
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -28,7 +29,17 @@ const (
 //	WINSPIKE|<id>|<verdict>|<detail>
 func Report(t testing.TB, id, verdict, format string, args ...any) {
 	t.Helper()
-	t.Logf("WINSPIKE|%s|%s|%s", id, verdict, fmt.Sprintf(format, args...))
+	t.Logf("WINSPIKE|%s|%s|%s", id, verdict, oneLine(fmt.Sprintf(format, args...)))
+}
+
+// oneLine keeps a measurement on ONE line. Several NTSTATUS descriptions embed
+// a newline ("{Access Denied}\r\nA process has requested access..."), and the
+// workflow's Findings step lifts measurements line by line — an embedded
+// newline silently truncates the detail in the job summary, which is how a
+// finding gets lost. Measured the hard way in run 32906333884, where
+// A9.rename_failure_statuses was cut off at "{Access Denied}".
+func oneLine(s string) string {
+	return strings.Join(strings.Fields(strings.ReplaceAll(strings.ReplaceAll(s, "\r\n", " "), "\n", " ")), " ")
 }
 
 // RequireProperty is the one place a measurement is allowed to fail the build:

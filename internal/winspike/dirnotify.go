@@ -4,8 +4,11 @@ package winspike
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/sys/windows"
@@ -56,11 +59,13 @@ func ActionName(a uint32) string {
 
 // DirObserver reports the raw change records for one directory.
 type DirObserver struct {
-	h    windows.Handle
-	mu   sync.Mutex
-	acts []DirAction
-	done chan struct{}
-	err  error
+	h        windows.Handle
+	path     string
+	stopping atomic.Bool
+	mu       sync.Mutex
+	acts     []DirAction
+	done     chan struct{}
+	err      error
 }
 
 // ObserveDir starts watching path (non-recursively) for name changes. The
@@ -76,7 +81,7 @@ func ObserveDir(path string) (*DirObserver, error) {
 	if err != nil {
 		return nil, err
 	}
-	o := &DirObserver{h: h, done: make(chan struct{})}
+	o := &DirObserver{h: h, path: path, done: make(chan struct{})}
 	go o.loop()
 	return o, nil
 }
@@ -107,6 +112,9 @@ func (o *DirObserver) loop() {
 		o.mu.Lock()
 		o.acts = append(o.acts, parseNotify(buf[:n])...)
 		o.mu.Unlock()
+		if o.stopping.Load() {
+			return
+		}
 	}
 }
 
@@ -188,14 +196,24 @@ func (o *DirObserver) Err() error {
 	return o.err
 }
 
-// Close aborts the pending read and waits for the goroutine to finish. The
-// wait is bounded: a blocked synchronous ReadDirectoryChangesW is expected to
-// abort when its handle closes, but this is an instrument and must not be able
-// to hang the job if it does not.
+// Close stops the observer.
+//
+// It does NOT simply close the handle: this is a SYNCHRONOUS
+// ReadDirectoryChangesW, and closing a handle out from under a thread blocked
+// in synchronous I/O can block CloseHandle itself. Instead the loop is asked
+// to stop, then woken by a change of our own so it observes the request and
+// returns on its own. CancelIoEx plus the close happen off the calling
+// goroutine as a backstop, with every wait bounded — an instrument must never
+// be able to hang the job it is measuring.
 func (o *DirObserver) Close() {
-	windows.CloseHandle(o.h)
+	o.stopping.Store(true)
+	_ = os.WriteFile(filepath.Join(o.path, ".observer-stop"), []byte("x"), 0o644)
 	select {
 	case <-o.done:
 	case <-time.After(5 * time.Second):
 	}
+	go func() {
+		_ = windows.CancelIoEx(o.h, nil)
+		_ = windows.CloseHandle(o.h)
+	}()
 }
