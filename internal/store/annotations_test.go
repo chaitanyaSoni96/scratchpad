@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 )
 
@@ -74,7 +75,8 @@ func TestLoadSaveNotesLifecycle(t *testing.T) {
 		t.Fatalf("reload after save = %+v, %v", reloaded, err)
 	}
 
-	// Saving with zero annotations removes the file and prunes empty dirs.
+	// Saving with zero annotations keeps a tombstone so stale writers cannot
+	// recreate notes at an old revision.
 	empty, err := SaveNotes(doc, NotesFile{}, 1)
 	if err != nil {
 		t.Fatalf("SaveNotes empty: %v", err)
@@ -82,11 +84,99 @@ func TestLoadSaveNotesLifecycle(t *testing.T) {
 	if empty.Rev != 2 || len(empty.Annotations) != 0 {
 		t.Fatalf("SaveNotes empty result = %+v", empty)
 	}
-	if _, err := os.Stat(p); !os.IsNotExist(err) {
-		t.Errorf("sidecar should be removed once annotations reach zero, stat err = %v", err)
+	if _, err := os.Stat(p); err != nil {
+		t.Errorf("empty revision tombstone missing: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(root, AnnotationsDir, "art")); !os.IsNotExist(err) {
-		t.Errorf("now-empty .annotations/art should be pruned, stat err = %v", err)
+	reloaded, err = LoadNotes(doc)
+	if err != nil || reloaded.Rev != 2 || len(reloaded.Annotations) != 0 {
+		t.Fatalf("empty tombstone = %+v, %v", reloaded, err)
+	}
+	if docs, err := WalkNotes(doc); err != nil || len(docs) != 0 {
+		t.Fatalf("WalkNotes(empty tombstone) = %+v, %v", docs, err)
+	}
+}
+
+func TestConcurrentSameRevisionExactlyOneWins(t *testing.T) {
+	testRoot(t)
+	doc := publishDoc(t, "", "art")
+	start := make(chan struct{})
+	errs := make(chan error, 2)
+	var wg sync.WaitGroup
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			_, err := SaveNotes(doc, NotesFile{Annotations: []Annotation{{ID: string(rune('a' + i)), Status: "open"}}}, 0)
+			errs <- err
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	wins, conflicts := 0, 0
+	for err := range errs {
+		if err == nil {
+			wins++
+		} else if errors.Is(err, ErrRevMismatch) {
+			conflicts++
+		} else {
+			t.Fatalf("unexpected concurrent save error: %v", err)
+		}
+	}
+	if wins != 1 || conflicts != 1 {
+		t.Fatalf("wins=%d conflicts=%d, want 1 each", wins, conflicts)
+	}
+}
+
+func TestAnnotationSymlinkComponentsRejected(t *testing.T) {
+	root := testRoot(t)
+	doc := publishDoc(t, "", "art")
+	outside := t.TempDir()
+	annRoot := filepath.Join(root, AnnotationsDir)
+	if err := os.Mkdir(annRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(annRoot, "art")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadNotes(doc); err == nil {
+		t.Fatal("LoadNotes accepted annotation symlink component")
+	}
+	if _, err := SaveNotes(doc, NotesFile{Annotations: []Annotation{{ID: "n"}}}, 0); err == nil {
+		t.Fatal("SaveNotes accepted annotation symlink component")
+	}
+	if err := DeleteNotes(doc); err == nil {
+		t.Fatal("DeleteNotes accepted annotation symlink component")
+	}
+	if _, err := WalkNotes("art"); err == nil {
+		t.Fatal("WalkNotes accepted annotation symlink component")
+	}
+}
+
+func TestAnnotationRootSwapDoesNotRedirectOpenHandle(t *testing.T) {
+	root := testRoot(t)
+	ann, err := openAnnotationFS()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ann.close()
+	original := filepath.Join(root, ".annotations-original")
+	if err := os.Rename(filepath.Join(root, AnnotationsDir), original); err != nil {
+		t.Fatal(err)
+	}
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(root, AnnotationsDir)); err != nil {
+		t.Fatal(err)
+	}
+	if err := ann.writeFile([]string{"art", "index.html.json"}, []byte(`{"rev":1,"annotations":[]}`)); err != nil {
+		t.Fatalf("descriptor-relative write after root swap: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(outside, "art", "index.html.json")); !os.IsNotExist(err) {
+		t.Fatalf("write escaped through replacement symlink: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(original, "art", "index.html.json")); err != nil {
+		t.Fatalf("write did not remain on opened annotation inode: %v", err)
 	}
 }
 
@@ -156,6 +246,46 @@ func TestResolveAndReplyNote(t *testing.T) {
 	}
 }
 
+func TestConcurrentResolveAndReplyPreserveBoth(t *testing.T) {
+	testRoot(t)
+	doc := publishDoc(t, "", "art")
+	if _, err := SaveNotes(doc, NotesFile{Annotations: []Annotation{{ID: "n1", Status: "open"}}}, 0); err != nil {
+		t.Fatal(err)
+	}
+	start := make(chan struct{})
+	errs := make(chan error, 2)
+	go func() { <-start; _, err := ResolveNote(doc, "n1", "fixed"); errs <- err }()
+	go func() { <-start; _, err := ReplyNote(doc, "n1", "question"); errs <- err }()
+	close(start)
+	for i := 0; i < 2; i++ {
+		if err := <-errs; err != nil {
+			t.Fatal(err)
+		}
+	}
+	f, err := LoadNotes(doc)
+	if err != nil || f.Rev != 3 || len(f.Annotations) != 1 || len(f.Annotations[0].Replies) != 2 || f.Annotations[0].Status != "resolved" {
+		t.Fatalf("concurrent replies = %+v, %v", f, err)
+	}
+}
+
+func TestStaleSaveCannotRecreateAfterFinalDeletion(t *testing.T) {
+	testRoot(t)
+	doc := publishDoc(t, "", "art")
+	stale := NotesFile{Annotations: []Annotation{{ID: "n1", Status: "open"}}}
+	if _, err := SaveNotes(doc, stale, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := DeleteNotes(doc); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := SaveNotes(doc, stale, 1); !errors.Is(err, ErrRevMismatch) {
+		t.Fatalf("stale recreation = %v, want ErrRevMismatch", err)
+	}
+	if f, err := LoadNotes(doc); err != nil || f.Rev != 2 || len(f.Annotations) != 0 {
+		t.Fatalf("notes after stale recreation = %+v, %v", f, err)
+	}
+}
+
 func TestAnnotationsInvisible(t *testing.T) {
 	root := testRoot(t)
 	resetIgnoreCache()
@@ -218,6 +348,9 @@ func TestDeleteAndUnwatchRemoveNotes(t *testing.T) {
 	if err != nil || f.Rev != 0 || len(f.Annotations) != 0 {
 		t.Errorf("republished artifact should see no notes, got %+v, %v", f, err)
 	}
+	if saved, err := SaveNotes(doc2, NotesFile{Annotations: []Annotation{{ID: "fresh", Status: "open"}}}, 0); err != nil || saved.Rev != 1 {
+		t.Fatalf("republished revision did not reset: %+v, %v", saved, err)
+	}
 
 	// Unwatch drops notes on the watched link's docs too.
 	src := t.TempDir()
@@ -237,6 +370,48 @@ func TestDeleteAndUnwatchRemoveNotes(t *testing.T) {
 	}
 	if _, err := os.Stat(linkSidecar); !os.IsNotExist(err) {
 		t.Errorf("Unwatch should remove notes, stat err = %v", err)
+	}
+}
+
+func TestArtifactCleanupRacesCannotLeaveNotes(t *testing.T) {
+	testRoot(t)
+	for _, tc := range []struct {
+		name  string
+		setup func(*testing.T) string
+		clean func() error
+	}{
+		{name: "delete", setup: func(t *testing.T) string { return publishDoc(t, "", "art") }, clean: func() error { return Delete("", "art") }},
+		{name: "unwatch", setup: func(t *testing.T) string {
+			src := t.TempDir()
+			if err := os.WriteFile(filepath.Join(src, "index.html"), []byte("x"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Watch("", "art", src); err != nil {
+				t.Fatal(err)
+			}
+			return "art/index.html"
+		}, clean: func() error { return Unwatch("", "art") }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			doc := tc.setup(t)
+			start := make(chan struct{})
+			saveErr := make(chan error, 1)
+			cleanErr := make(chan error, 1)
+			go func() {
+				<-start
+				_, err := SaveNotes(doc, NotesFile{Annotations: []Annotation{{ID: "n", Status: "open"}}}, 0)
+				saveErr <- err
+			}()
+			go func() { <-start; cleanErr <- tc.clean() }()
+			close(start)
+			if err := <-cleanErr; err != nil {
+				t.Fatal(err)
+			}
+			<-saveErr // Either the save completed first or the cleanup made the doc disappear.
+			if docs, err := WalkNotes("art"); err != nil || len(docs) != 0 {
+				t.Fatalf("cleanup left notes: %+v, %v", docs, err)
+			}
+		})
 	}
 }
 

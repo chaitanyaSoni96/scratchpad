@@ -3,6 +3,7 @@ package web
 import (
 	"compress/gzip"
 	"net/http"
+	"strconv"
 	"strings"
 )
 
@@ -32,21 +33,56 @@ func withGzip(next http.Handler) http.Handler {
 
 // acceptsGzip reports whether the header offers gzip at a non-zero q-value.
 func acceptsGzip(header string) bool {
+	explicit, wildcard := -1.0, -1.0
 	for _, part := range strings.Split(header, ",") {
 		fields := strings.Split(strings.TrimSpace(part), ";")
-		if !strings.EqualFold(strings.TrimSpace(fields[0]), "gzip") {
+		coding := strings.TrimSpace(fields[0])
+		if !strings.EqualFold(coding, "gzip") && coding != "*" {
 			continue
 		}
+		q, valid := 1.0, true
 		for _, p := range fields[1:] {
 			if k, v, ok := strings.Cut(p, "="); ok &&
-				strings.EqualFold(strings.TrimSpace(k), "q") &&
-				strings.TrimSpace(v) == "0" {
-				return false
+				strings.EqualFold(strings.TrimSpace(k), "q") {
+				var ok bool
+				q, ok = parseQuality(strings.TrimSpace(v))
+				if !ok {
+					valid = false
+				}
 			}
 		}
-		return true
+		if !valid {
+			continue
+		}
+		if strings.EqualFold(coding, "gzip") {
+			explicit = max(explicit, q)
+		} else {
+			wildcard = max(wildcard, q)
+		}
 	}
-	return false
+	if explicit >= 0 {
+		return explicit > 0
+	}
+	return wildcard > 0
+}
+
+func parseQuality(value string) (float64, bool) {
+	whole, fraction, dotted := strings.Cut(value, ".")
+	if whole != "0" && whole != "1" {
+		return 0, false
+	}
+	if dotted {
+		if len(fraction) > 3 {
+			return 0, false
+		}
+		for _, digit := range fraction {
+			if digit < '0' || digit > '9' || whole == "1" && digit != '0' {
+				return 0, false
+			}
+		}
+	}
+	q, err := strconv.ParseFloat(value, 64)
+	return q, err == nil
 }
 
 // gzipWriter defers the compress-or-not choice to the moment the handler

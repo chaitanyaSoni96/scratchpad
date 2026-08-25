@@ -4,6 +4,7 @@ package web
 
 import (
 	"embed"
+	"errors"
 	"fmt"
 	"html/template"
 	"io/fs"
@@ -286,22 +287,33 @@ func pageCards(a store.Artifact) []card {
 
 // docCount counts markdown files in a subtree, skipping ignored dirs and not
 // descending into artifacts (their pages are counted as theirs).
-func docCount(dir string) int {
+func docCount(rel string) int {
+	dirFile, ok := store.ResolveFolder(rel)
+	if !ok {
+		return 0
+	}
+	defer dirFile.Close()
+	dir := fmt.Sprintf("/proc/self/fd/%d", dirFile.Fd())
+	visibleDir := logicalFolderPath(rel)
 	n := 0
-	entries, err := os.ReadDir(dir)
+	entries, err := dirFile.ReadDir(-1)
 	if err != nil {
 		return 0
 	}
 	for _, e := range entries {
 		name := e.Name()
 		isDir := entryIsDirFS(dir, e)
-		if !store.Visible(dir, name, isDir) {
+		if !store.Visible(visibleDir, name, isDir) {
 			continue
 		}
 		if isDir {
 			sub := filepath.Join(dir, name)
 			if !dirHasHTML(sub) {
-				n += docCount(sub)
+				child := name
+				if rel != "" {
+					child = rel + "/" + name
+				}
+				n += docCount(child)
 			}
 		} else if strings.HasSuffix(strings.ToLower(name), ".md") {
 			n++
@@ -337,12 +349,7 @@ func dirHasHTML(dir string) bool {
 // folderExtras appends cards artifacts can't produce: loose markdown files
 // directly in folder f, and doc-only subfolders (no artifacts anywhere but
 // markdown within).
-func folderExtras(f string, used map[string]bool) []card {
-	root, err := store.Root()
-	if err != nil {
-		return nil
-	}
-	dir := filepath.Join(root, filepath.FromSlash(f))
+func folderExtras(f, dir string, used map[string]bool) []card {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil
@@ -352,13 +359,18 @@ func folderExtras(f string, used map[string]bool) []card {
 		prefix = f + "/"
 	}
 	var cards []card
+	visibleDir := logicalFolderPath(f)
 	for _, e := range entries {
 		name := e.Name()
-		if used[name] || !store.Visible(dir, name, entryIsDirFS(dir, e)) {
+		if used[name] || !store.Visible(visibleDir, name, entryIsDirFS(dir, e)) {
 			continue
 		}
 		if entryIsDirFS(dir, e) {
-			if n := docCount(filepath.Join(dir, name)); n > 0 {
+			child := name
+			if f != "" {
+				child = f + "/" + name
+			}
+			if n := docCount(child); n > 0 {
 				cards = append(cards, card{Kind: "project", Label: name,
 					Href: "/p/" + prefix + name, Count: n, Unit: "docs",
 					Unwatch: folderUnwatch(prefix + name)})
@@ -374,7 +386,7 @@ func folderExtras(f string, used map[string]bool) []card {
 }
 
 // buildCards turns the newest-first artifact list into tiles for folder f.
-func buildCards(artifacts []store.Artifact, f string) []card {
+func buildCards(artifacts []store.Artifact, f, dir string) []card {
 	prefix := ""
 	if f != "" {
 		prefix = f + "/"
@@ -426,31 +438,24 @@ func buildCards(artifacts []store.Artifact, f string) []card {
 			}
 		}
 	}
-	return append(cards, folderExtras(f, used)...)
+	return append(cards, folderExtras(f, dir, used)...)
 }
 
 // childDocs counts markdown under child folder of the current folder; a
 // non-zero count blocks the single-artifact collapse so those docs stay
 // reachable from the folder page.
 func childDocs(prefix, child string) int {
-	root, err := store.Root()
-	if err != nil {
-		return 0
-	}
-	return docCount(filepath.Join(root, filepath.FromSlash(prefix+child)))
+	rel := prefix + child
+	return docCount(rel)
 }
 
 // folderExists reports whether f names a real directory under the root.
 func folderExists(f string) bool {
-	if f == "" {
-		return true
+	dir, ok := store.ResolveFolder(f)
+	if ok {
+		dir.Close()
 	}
-	root, err := store.Root()
-	if err != nil {
-		return false
-	}
-	fi, err := os.Stat(filepath.Join(root, filepath.FromSlash(f)))
-	return err == nil && fi.IsDir()
+	return ok
 }
 
 // resolveCollection returns the multi-page artifact at path f, if that is
@@ -538,17 +543,27 @@ func buildListView(f string) (listView, error) {
 		view.Cards = withNoteCounts(pageCards(a))
 		return view, nil
 	}
+	dir, ok := store.ResolveFolder(f)
+	if !ok {
+		return view, fs.ErrNotExist
+	}
+	defer dir.Close()
 	artifacts, err := store.List()
 	if err != nil {
 		return view, err
 	}
-	view.Cards = withNoteCounts(buildCards(artifacts, f))
+	view.Cards = withNoteCounts(buildCards(artifacts, f, fmt.Sprintf("/proc/self/fd/%d", dir.Fd())))
 	return view, nil
 }
 
 func handleListFragment(w http.ResponseWriter, r *http.Request) {
-	view, err := buildListView(strings.Trim(r.URL.Query().Get("project"), "/"))
+	project := r.URL.Query().Get("project")
+	view, err := buildListView(project)
 	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			http.NotFound(w, r)
+			return
+		}
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -582,12 +597,14 @@ func siblingItems(parent string) []sibItem {
 		}
 		return items
 	}
-	root, err := store.Root()
-	if err != nil {
+	dir, ok := store.ResolveFolder(parent)
+	if !ok {
 		return nil
 	}
-	dir := filepath.Join(root, filepath.FromSlash(parent))
-	entries, err := os.ReadDir(dir)
+	defer dir.Close()
+	dirPath := fmt.Sprintf("/proc/self/fd/%d", dir.Fd())
+	visibleDir := logicalFolderPath(parent)
+	entries, err := os.ReadDir(dirPath)
 	if err != nil {
 		return nil
 	}
@@ -598,18 +615,18 @@ func siblingItems(parent string) []sibItem {
 	var items []sibItem
 	for _, e := range entries {
 		name := e.Name()
-		if !store.Visible(dir, name, entryIsDirFS(dir, e)) {
+		if !store.Visible(visibleDir, name, entryIsDirFS(dirPath, e)) {
 			continue
 		}
 		rel := prefix + name
-		if entryIsDirFS(dir, e) {
-			if dirHasHTML(filepath.Join(dir, name)) {
+		if entryIsDirFS(dirPath, e) {
+			if dirHasHTML(filepath.Join(dirPath, name)) {
 				if a, _, ok := store.ResolvePath(strings.Split(rel, "/")); ok && !a.MultiPage() {
 					items = append(items, sibItem{Name: name, Href: "/fragments/viewer/" + rel, Viewer: true})
 					continue
 				}
 			}
-			if hasRenderable(filepath.Join(dir, name)) {
+			if hasRenderable(rel) {
 				items = append(items, sibItem{Name: name, Href: "/p/" + rel})
 			}
 		} else if strings.HasSuffix(strings.ToLower(name), ".md") {
@@ -622,19 +639,30 @@ func siblingItems(parent string) []sibItem {
 
 // hasRenderable reports whether any html or markdown lives under dir, so the
 // popover skips folders that would render an empty page.
-func hasRenderable(dir string) bool {
-	entries, err := os.ReadDir(dir)
+func hasRenderable(rel string) bool {
+	dirFile, ok := store.ResolveFolder(rel)
+	if !ok {
+		return false
+	}
+	defer dirFile.Close()
+	dir := fmt.Sprintf("/proc/self/fd/%d", dirFile.Fd())
+	visibleDir := logicalFolderPath(rel)
+	entries, err := dirFile.ReadDir(-1)
 	if err != nil {
 		return false
 	}
 	for _, e := range entries {
 		name := e.Name()
 		isDir := entryIsDirFS(dir, e)
-		if !store.Visible(dir, name, isDir) {
+		if !store.Visible(visibleDir, name, isDir) {
 			continue
 		}
 		if isDir {
-			if hasRenderable(filepath.Join(dir, name)) {
+			child := name
+			if rel != "" {
+				child = rel + "/" + name
+			}
+			if hasRenderable(child) {
 				return true
 			}
 		} else if l := strings.ToLower(name); strings.HasSuffix(l, ".html") || strings.HasSuffix(l, ".md") {
@@ -642,6 +670,14 @@ func hasRenderable(dir string) bool {
 		}
 	}
 	return false
+}
+
+func logicalFolderPath(rel string) string {
+	root, err := store.Root()
+	if err != nil || rel == "" {
+		return root
+	}
+	return filepath.Join(root, filepath.FromSlash(rel))
 }
 
 func handleSiblings(w http.ResponseWriter, r *http.Request) {
@@ -812,8 +848,12 @@ func handleArtifact(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		// Loose markdown living in plain project directories renders too.
 		raw := strings.Trim(r.PathValue("path"), "/")
-		if p, isDoc := store.ResolveDoc(strings.Split(raw, "/")); isDoc {
-			serveMarkdown(w, r, p, filepath.Base(p))
+		if _, isDoc := store.ResolveDoc(strings.Split(raw, "/")); isDoc {
+			if opened, safe := store.OpenDocument(strings.Split(raw, "/")); safe {
+				serveMarkdownFile(w, r, opened, filepath.Base(raw))
+				return
+			}
+			http.NotFound(w, r)
 			return
 		}
 		http.NotFound(w, r)
@@ -833,11 +873,22 @@ func handleArtifact(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	full := filepath.Join(a.Dir, clean)
-	if strings.HasSuffix(strings.ToLower(clean), ".md") {
-		serveMarkdown(w, r, full, filepath.Base(clean))
+	opened, safe := store.OpenDocument(strings.Split(a.RelPath()+"/"+filepath.ToSlash(clean), "/"))
+	if !safe {
+		http.NotFound(w, r)
 		return
 	}
-	http.ServeFile(w, r, full)
+	if strings.HasSuffix(strings.ToLower(clean), ".md") {
+		serveMarkdownFile(w, r, opened, filepath.Base(clean))
+		return
+	}
+	defer opened.Close()
+	info, err := opened.Stat()
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	http.ServeContent(w, r, filepath.Base(full), info.ModTime(), opened)
 }
 
 func handleDelete(w http.ResponseWriter, r *http.Request) {

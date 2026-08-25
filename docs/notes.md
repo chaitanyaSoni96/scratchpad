@@ -43,9 +43,11 @@ One sidecar JSON file per document, mirroring the document's own path:
 e.g. `.annotations/demo/q3-report/index.html.json` and
 `.annotations/demo/q3-report/notes.md.json` for two documents of one
 artifact. A document with no notes has no file — "has notes" is a cheap
-stat — and deleting the last note deletes the file. All writers (the HTTP
-handler and the CLI) write atomically, temp file + rename, bumping the `rev`
-counter (see Concurrency).
+stat — until its first write. Deleting the last note then leaves an empty
+revision tombstone that normal note listings omit. This preserves the latest
+`rev`, so a stale writer cannot recreate deleted notes. All writers (the HTTP handler and the CLI)
+serialize per document, write atomically by temp file + rename, and bump the
+`rev` counter (see Concurrency).
 
 `.annotations` lives under the writable root, so it works for **watched**
 artifacts too, even though their source trees are mounted read-only. Deleting
@@ -94,7 +96,8 @@ DELETE /notes/{doc-path...}       # remove all notes on one document
   to — content actually named `notes` shadows it. `GET /notes/{path...}`
   always works.
 - `PUT` replaces the whole notes file at the `rev` it was loaded at (see
-  Concurrency); `DELETE` removes every note on the document.
+  Concurrency); `DELETE` removes every note on the document but preserves the
+  incremented revision as an internal empty tombstone.
 
 ```bash
 curl http://localhost:8737/notes/demo/q3-report/index.html
@@ -132,6 +135,7 @@ CLI's `resolve`/`reply`. Every write must carry the `rev` it last read; a
 mismatch is rejected rather than silently overwriting the other writer — a
 409 over HTTP, with the current file in the body so the viewer can refetch
 and replay in one round trip; a plain error from the CLI, which loads the
-file fresh immediately before each write. This is a single-user local tool:
-the guard turns a lost update into a visible conflict, it does not provide
-real multi-writer safety.
+file fresh immediately before each write. Per-document locking makes the
+revision check and replacement one serialized operation, so concurrent writes
+at one revision produce exactly one success. Empty tombstones make that guard
+durable across deletion.

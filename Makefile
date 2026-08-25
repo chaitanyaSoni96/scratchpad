@@ -1,5 +1,14 @@
 IMAGE := localhost/scratchpad:latest
 DATA  := $(HOME)/.scratchpad
+LAN ?= 0
+
+ifeq ($(LAN),1)
+HOST_BIND := 0.0.0.0
+else ifeq ($(LAN),0)
+HOST_BIND := 127.0.0.1
+else
+$(error LAN must be 0 or 1)
+endif
 
 .PHONY: build test image web stop logs install install-skill install-cli drop-mcp
 
@@ -7,7 +16,7 @@ build:
 	go build -o bin/ ./cmd/...
 
 test:
-	go vet ./... && go test ./...
+	go vet ./... && go test ./... && scripts/check-make.sh
 
 image:
 	podman build -t $(IMAGE) .
@@ -17,7 +26,7 @@ image:
 # process can never modify watched sources).
 web: image
 	-podman rm -f scratchpad-web
-	podman run -d --name scratchpad-web -p 8737:8737 \
+	podman run -d --name scratchpad-web -p $(HOST_BIND):8737:8737 \
 		-v $(DATA):/data:z -v $(HOME):$(HOME):ro \
 		--restart unless-stopped $(IMAGE)
 	@echo "scratchpad-web up at http://localhost:8737"
@@ -50,7 +59,8 @@ drop-mcp:
 install: build install-skill
 	install -m 0755 bin/scratchpad-web $(HOME)/.local/bin/scratchpad-web
 	mkdir -p $(HOME)/.config/systemd/user
-	install -m 0644 systemd/scratchpad-web.service $(HOME)/.config/systemd/user/scratchpad-web.service
+	sed 's/--addr 127\.0\.0\.1:8737/--addr $(HOST_BIND):8737/' systemd/scratchpad-web.service > $(HOME)/.config/systemd/user/scratchpad-web.service
+	chmod 0644 $(HOME)/.config/systemd/user/scratchpad-web.service
 	systemctl --user daemon-reload
 # daemon-reload only re-reads unit files — an already-running service keeps
 # serving the old binary until it is restarted. try-restart is a no-op when

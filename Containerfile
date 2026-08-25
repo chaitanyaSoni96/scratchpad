@@ -10,4 +10,4 @@ COPY --from=build /out/scratchpad-web /scratchpad-web
 COPY --from=build /out/scratchpad /scratchpad
 ENV SCRATCHPAD_ROOT=/data
 EXPOSE 8737
-CMD ["/scratchpad-web"]
+CMD ["/scratchpad-web", "--addr", ":8737"]

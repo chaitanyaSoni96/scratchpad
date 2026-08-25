@@ -8,7 +8,9 @@ description: Host html/css/js artifacts (demos, dashboards, reports, visualizati
 Any folder under `~/.scratchpad` (override: `SCRATCHPAD_ROOT`) that directly
 contains an `.html` file is served at `http://localhost:8737/a/<path>/`
 (override: `SCRATCHPAD_URL`). The site refreshes as files change; `.md` files
-render as styled pages.
+render as styled pages. The server is loopback-only by default; `make web LAN=1`
+or `make install LAN=1` opts into unauthenticated LAN exposure, including delete
+and notes-write endpoints, and should be used only on a trusted network.
 
 ## Default: watch the project's `.scratchpad/`
 
@@ -43,7 +45,10 @@ echo '<h1>hi</h1>' | scratchpad publish -name hello -html -   # single page; -cs
 
 The name, every project segment, and every file path inside the folder must
 match `^[a-zA-Z0-9][a-zA-Z0-9._-]{0,99}$` — one bad filename (`.gitignore`,
-`my file.png`) fails the whole publish.
+`my file.png`) fails the whole publish. `-dir` accepts regular files and
+directories only, not symlinks or special files. Exactly one of `-dir` and
+`-html` is required; `-css`/`-js` require `-html`, and only one input may use
+`-` for stdin.
 
 ## Review notes
 
@@ -69,7 +74,9 @@ erasing and reopening are the user's, in the web UI.
 - Keep artifacts self-contained, with relative links. Card previews run in an
   opaque-origin sandbox: a `fetch()` of a sibling file fails there (it works
   in the viewer and a direct tab), and an entry page over 1 MiB draws a
-  placeholder instead of a preview.
+  placeholder instead of a preview. Opening the viewer is a deliberate trust
+  decision: it grants `allow-same-origin` so the annotator can run; automatic
+  card previews remain opaque and cannot reach mutation endpoints.
 - One artifact per folder: the shallowest folder on a path holding an `.html`
   is the artifact and everything below it is its assets. A subfolder with its
   own `.html` is *not* a second artifact, and an `.html` at the top of a
@@ -77,3 +84,6 @@ erasing and reopening are the user's, in the web UI.
   itself an artifact is refused.
 - `delete` and `unwatch` are the user's — run them only when explicitly asked,
   never to recycle a name.
+- A watch link is the only symlink boundary the site follows. Do not rely on
+  nested symlinks inside a watched tree: they are not browsed or listed, and
+  publish/delete/unwatch refuse symlinked project ancestors.

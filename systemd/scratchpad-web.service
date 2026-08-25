@@ -10,7 +10,7 @@ Type=exec
 # in, which need not live under $HOME). Running it as that same login session
 # gives it exactly that access with no sudo and no DynamicUser identity that
 # would lack permission on the user's own files.
-ExecStart=%h/.local/bin/scratchpad-web --addr :8737
+ExecStart=%h/.local/bin/scratchpad-web --addr 127.0.0.1:8737
 Restart=on-failure
 RestartSec=2s
 

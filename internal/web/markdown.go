@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"html"
+	"io"
 	"net/http"
 	"os"
 
@@ -57,6 +58,27 @@ hr { border: 0; border-top: 1px solid #e2e0da; }
 %s
 </body>
 </html>`
+
+func serveMarkdownFile(w http.ResponseWriter, r *http.Request, f *os.File, title string) {
+	defer f.Close()
+	w.Header().Set("Cache-Control", "no-cache")
+	if r.URL.Query().Get("raw") != "" {
+		if info, err := f.Stat(); err == nil {
+			http.ServeContent(w, r, title, info.ModTime(), f)
+			return
+		}
+		http.NotFound(w, r)
+		return
+	}
+	src, err := io.ReadAll(f)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	if err := writeMarkdownPage(w, title, src); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+}
 
 // serveMarkdown renders a markdown file to a full standalone HTML page.
 // ?raw=1 serves the source instead.

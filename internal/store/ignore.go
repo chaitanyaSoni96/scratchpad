@@ -297,7 +297,7 @@ type ignoreEntry struct {
 
 var (
 	ignoreMu    sync.Mutex
-	ignoreCache = map[string]*ignoreEntry{}
+	ignoreCache = map[string]ignoreEntry{}
 )
 
 // ignoreSetFor returns dir's parsed rules, re-reading them when the files
@@ -312,13 +312,22 @@ func ignoreSetFor(dir string) *ignoreSet {
 	}
 	if cached && e.set.fresh() {
 		ignoreMu.Lock()
-		e.checked = now
+		if current, ok := ignoreCache[dir]; ok && current.set == e.set {
+			current.checked = now
+			ignoreCache[dir] = current
+		}
 		ignoreMu.Unlock()
 		return e.set
 	}
 	set := loadIgnoreSet(dir)
 	ignoreMu.Lock()
-	ignoreCache[dir] = &ignoreEntry{set: set, checked: now}
+	// Publish only if the snapshot is still current; filesystem I/O stays unlocked.
+	current, exists := ignoreCache[dir]
+	if exists && (!cached || current.set != e.set) {
+		set = current.set
+	} else {
+		ignoreCache[dir] = ignoreEntry{set: set, checked: now}
+	}
 	ignoreMu.Unlock()
 	return set
 }
@@ -327,7 +336,7 @@ func ignoreSetFor(dir string) *ignoreSet {
 // edits take effect without waiting out the TTL.
 func resetIgnoreCache() {
 	ignoreMu.Lock()
-	ignoreCache = map[string]*ignoreEntry{}
+	ignoreCache = map[string]ignoreEntry{}
 	ignoreMu.Unlock()
 }
 

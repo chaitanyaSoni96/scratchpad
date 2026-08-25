@@ -304,3 +304,139 @@ func TestListAndResolvePath(t *testing.T) {
 		t.Error("traversal must not resolve")
 	}
 }
+
+func TestResolveFolderContainmentAndWatchedTrees(t *testing.T) {
+	root := testRoot(t)
+	if err := os.MkdirAll(filepath.Join(root, "visible", "child"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if dir, ok := ResolveFolder("visible/child"); !ok {
+		t.Fatalf("ResolveFolder visible = %v", ok)
+	} else {
+		dir.Close()
+	}
+	for _, path := range []string{"../outside", "/etc", `visible\\child`, "missing", ".git"} {
+		if _, ok := ResolveFolder(path); ok {
+			t.Errorf("ResolveFolder(%q) unexpectedly succeeded", path)
+		}
+	}
+
+	source := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(source, "nested"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Watch("", "watched", source); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := ResolveFolder("watched/nested"); !ok {
+		t.Error("folder inside deliberate watch should remain browsable")
+	}
+	escape := t.TempDir()
+	if err := os.Symlink(escape, filepath.Join(source, "escape")); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := ResolveFolder("watched/escape"); ok {
+		t.Error("second symlink inside watched tree must be rejected")
+	}
+}
+
+func TestPublishAndNestedWatchRejectSymlinkProject(t *testing.T) {
+	root := testRoot(t)
+	external := t.TempDir()
+	if err := os.WriteFile(filepath.Join(external, "sentinel"), []byte("unchanged"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(external, filepath.Join(root, "project")); err != nil {
+		t.Fatal(err)
+	}
+	files := map[string][]byte{"index.html": []byte("<p>unsafe</p>")}
+	if _, err := Publish("project/nested", "artifact", files); err == nil {
+		t.Fatal("Publish beneath symlink project succeeded")
+	}
+	target := t.TempDir()
+	if _, err := Watch("project/nested", "watch", target); err == nil {
+		t.Fatal("Watch beneath symlink project succeeded")
+	}
+	if got, err := os.ReadFile(filepath.Join(external, "sentinel")); err != nil || string(got) != "unchanged" {
+		t.Fatalf("external sentinel changed: %q, %v", got, err)
+	}
+	for _, rel := range []string{"nested", "nested/artifact", "nested/watch"} {
+		if _, err := os.Lstat(filepath.Join(external, filepath.FromSlash(rel))); !os.IsNotExist(err) {
+			t.Errorf("external path %q was created: %v", rel, err)
+		}
+	}
+}
+
+func TestListDoesNotFollowSymlinksInsideWatch(t *testing.T) {
+	testRoot(t)
+	source := t.TempDir()
+	external := t.TempDir()
+	if err := os.WriteFile(filepath.Join(external, "index.html"), []byte("secret"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(external, filepath.Join(source, "escape")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(source, filepath.Join(source, "cycle")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Watch("", "tree", source); err != nil {
+		t.Fatal(err)
+	}
+	artifacts, err := List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(artifacts) != 0 {
+		t.Fatalf("List followed nested watched-tree symlink: %+v", artifacts)
+	}
+}
+
+func TestPinnedMutationsIgnoreProjectSwap(t *testing.T) {
+	root := testRoot(t)
+	if err := os.Mkdir(filepath.Join(root, "project"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	original := filepath.Join(root, "project-original")
+	outside := t.TempDir()
+	testStoreOpHook = func(op string) {
+		if op != "publish-claim" {
+			return
+		}
+		testStoreOpHook = nil
+		if err := os.Rename(filepath.Join(root, "project"), original); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(outside, filepath.Join(root, "project")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() { testStoreOpHook = nil })
+	if _, err := Publish("project", "safe", map[string][]byte{"index.html": []byte("safe")}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(outside, "safe")); !os.IsNotExist(err) {
+		t.Fatalf("publish escaped through swapped ancestor: %v", err)
+	}
+	if got, err := os.ReadFile(filepath.Join(original, "safe", "index.html")); err != nil || string(got) != "safe" {
+		t.Fatalf("pinned publish = %q, %v", got, err)
+	}
+}
+
+func TestOpenDocumentRejectsArtifactAssetSymlink(t *testing.T) {
+	root := testRoot(t)
+	if _, err := Publish("", "art", map[string][]byte{"index.html": []byte("ok")}); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(t.TempDir(), "secret")
+	if err := os.WriteFile(outside, []byte("secret"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "art", "secret.txt")); err != nil {
+		t.Fatal(err)
+	}
+	if f, ok := OpenDocument([]string{"art", "secret.txt"}); ok {
+		f.Close()
+		t.Fatal("opened symlink from artifact assets")
+	}
+}

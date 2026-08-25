@@ -8,6 +8,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"io/fs"
 	"net/http"
 	"os"
@@ -82,9 +83,9 @@ There is no create, edit, delete, or reopen here: an agent can answer and
 close feedback but can never author it, erase it, or overrule the user's
 reopen — those are the user's, in the web UI.`
 
-func readInput(path string) ([]byte, error) {
+func readInput(path string, stdin io.Reader) ([]byte, error) {
 	if path == "-" {
-		return os.ReadFile("/dev/stdin")
+		return io.ReadAll(stdin)
 	}
 	return os.ReadFile(path)
 }
@@ -92,8 +93,18 @@ func readInput(path string) ([]byte, error) {
 func filesFromDir(dir string) (map[string][]byte, error) {
 	files := map[string][]byte{}
 	err := filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
+		if err != nil {
 			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("%s is not a regular file", p)
 		}
 		rel, err := filepath.Rel(dir, p)
 		if err != nil {
@@ -107,6 +118,42 @@ func filesFromDir(dir string) (map[string][]byte, error) {
 		return nil
 	})
 	return files, err
+}
+
+func publishFiles(dir, htmlPath, cssPath, jsPath string, args []string, stdin io.Reader) (map[string][]byte, error) {
+	if len(args) != 0 {
+		return nil, fmt.Errorf("usage: scratchpad publish accepts no positional arguments")
+	}
+	if (dir == "") == (htmlPath == "") {
+		return nil, fmt.Errorf("exactly one of -dir or -html is required")
+	}
+	if dir != "" {
+		if cssPath != "" || jsPath != "" {
+			return nil, fmt.Errorf("-css and -js may only be used with -html")
+		}
+		return filesFromDir(dir)
+	}
+	stdinInputs := 0
+	for _, path := range []string{htmlPath, cssPath, jsPath} {
+		if path == "-" {
+			stdinInputs++
+		}
+	}
+	if stdinInputs > 1 {
+		return nil, fmt.Errorf("only one input may be read from stdin")
+	}
+	files := map[string][]byte{}
+	for name, path := range map[string]string{"index.html": htmlPath, "style.css": cssPath, "script.js": jsPath} {
+		if path == "" {
+			continue
+		}
+		b, err := readInput(path, stdin)
+		if err != nil {
+			return nil, err
+		}
+		files[name] = b
+	}
+	return files, nil
 }
 
 func main() {
@@ -127,36 +174,9 @@ func main() {
 		jsPath := fs.String("js", "", "path to js file")
 		fs.Parse(os.Args[2:])
 
-		var files map[string][]byte
-		switch {
-		case *dir != "":
-			var err error
-			if files, err = filesFromDir(*dir); err != nil {
-				fatal(err)
-			}
-		case *htmlPath != "":
-			files = map[string][]byte{}
-			html, err := readInput(*htmlPath)
-			if err != nil {
-				fatal(err)
-			}
-			files["index.html"] = html
-			if *cssPath != "" {
-				b, err := readInput(*cssPath)
-				if err != nil {
-					fatal(err)
-				}
-				files["style.css"] = b
-			}
-			if *jsPath != "" {
-				b, err := readInput(*jsPath)
-				if err != nil {
-					fatal(err)
-				}
-				files["script.js"] = b
-			}
-		default:
-			fatal(fmt.Errorf("one of -dir or -html is required"))
+		files, err := publishFiles(*dir, *htmlPath, *cssPath, *jsPath, fs.Args(), os.Stdin)
+		if err != nil {
+			usageFatal(err)
 		}
 		a, err := store.Publish(*project, *name, files)
 		if err != nil {
@@ -177,8 +197,10 @@ func main() {
 			target, args = args[0], args[1:]
 		}
 		fs.Parse(args)
-		if target == "" && fs.NArg() > 0 {
+		if target == "" && fs.NArg() == 1 {
 			target = fs.Arg(0)
+		} else if fs.NArg() != 0 {
+			usageFatal(fmt.Errorf("watch accepts exactly one folder"))
 		}
 		if target == "" {
 			fatal(fmt.Errorf("usage: scratchpad watch <folder> [-name n] [-project p]"))
@@ -210,6 +232,9 @@ func main() {
 			target, args = args[0], args[1:]
 		}
 		fs.Parse(args)
+		if fs.NArg() > 0 {
+			usageFatal(fmt.Errorf("unwatch accepts exactly one path"))
+		}
 		if target != "" {
 			rel := strings.Trim(target, "/")
 			if i := strings.LastIndex(rel, "/"); i >= 0 {
@@ -236,6 +261,9 @@ func main() {
 		fs := flag.NewFlagSet("list", flag.ExitOnError)
 		asJSON := fs.Bool("json", false, "output JSON")
 		fs.Parse(os.Args[2:])
+		if fs.NArg() != 0 {
+			usageFatal(fmt.Errorf("list accepts no positional arguments"))
+		}
 		artifacts, err := store.List()
 		if err != nil {
 			fatal(err)
@@ -257,6 +285,9 @@ func main() {
 		project := fs.String("project", "", "optional project path")
 		name := fs.String("name", "", "artifact name (required)")
 		fs.Parse(os.Args[2:])
+		if fs.NArg() != 0 {
+			usageFatal(fmt.Errorf("delete accepts no positional arguments"))
+		}
 		if err := store.Delete(*project, *name); err != nil {
 			fatal(err)
 		}
@@ -306,6 +337,11 @@ func fatal(err error) {
 	os.Exit(1)
 }
 
+func usageFatal(err error) {
+	fmt.Fprintln(os.Stderr, "error:", err)
+	os.Exit(2)
+}
+
 // notesRead implements `scratchpad notes [<path>] [-all] [-json]`. <path> may
 // be a document, an artifact, a project folder, or omitted entirely (the
 // whole store), and — like watch/unwatch — may appear before or after the
@@ -330,8 +366,10 @@ func notesRead(args []string) {
 		path, args = args[0], args[1:]
 	}
 	fs.Parse(args)
-	if path == "" && fs.NArg() > 0 {
+	if path == "" && fs.NArg() == 1 {
 		path = fs.Arg(0)
+	} else if fs.NArg() != 0 {
+		usageFatal(fmt.Errorf("notes accepts at most one path"))
 	}
 	docs, err := store.WalkNotes(path)
 	if err != nil {
@@ -410,7 +448,7 @@ func parseNoteArgs(verb string, args []string) (doc, id, msg string) {
 	fs.Parse(args[i:])
 	positional = append(positional, fs.Args()...)
 
-	if len(positional) < 2 {
+	if len(positional) != 2 {
 		fmt.Fprintln(os.Stderr, notesUsage)
 		os.Exit(2)
 	}
