@@ -27,10 +27,24 @@ CI log is the evidence.
 | 2 | [32902343901](https://github.com/chaitanyaSoni96/scratchpad/actions/runs/32902343901) | `11805a1` | privilege-dropping child; run-1 gaps |
 | 3 | [32902629190](https://github.com/chaitanyaSoni96/scratchpad/actions/runs/32902629190) | `8f9a508` | Developer Mode dependency; unknown-tag vector |
 | 4 | [32902862617](https://github.com/chaitanyaSoni96/scratchpad/actions/runs/32902862617) | `295fc5b` | unknown tag applied to an empty directory |
+| 5 | [32903450305](https://github.com/chaitanyaSoni96/scratchpad/actions/runs/32903450305) | `6474bb8` | confirmation run for this document |
 
 Each run executes on **`windows-2025`** (amd64) and, as a secondary data point,
 **`windows-11-arm`** (arm64). Every design-deciding answer below was identical
 on both.
+
+Run 5 is the reference state of this document: **192 measurements** on
+`windows-2025` (107 YES, 28 NO, 49 INFO, 4 NOT-MEASURED, 2 PARTIAL) and **17
+REQUIRED security properties holding with zero `SECURITY-FAIL` verdicts**. A
+`SECURITY-FAIL` line means the runner contradicted a property the Windows
+backend must have; it fails the job, and none appeared.
+
+The seventeen required properties that hold: `P12.mkdir_excl`,
+`P12.junction_traverse`, `P12.junction_intermediate`, `P12.symlink_traverse`,
+`P12.browsable_nested`, `P14.junction_not_dir`, `P14.delete_descend`,
+`P14.unlink_junction`, `M1.intermediate`, `M4.traverse`, `M7.redirect`,
+`M8.createsymlink_excl`, `M9`, `M10.posix_nt`, `M16`, `R13.replace`,
+`RR1.removeall`.
 
 ## The instrument's own limits — read this before quoting anything
 
