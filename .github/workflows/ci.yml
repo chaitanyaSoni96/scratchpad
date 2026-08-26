@@ -8,6 +8,23 @@ on:
 permissions:
   contents: read
 
+# F8 (P5.7) - every `uses:` is pinned to a full commit SHA with the release it
+# corresponds to in a trailing comment. A tag like `@v4` is a mutable pointer
+# owned by the action's publisher: whoever controls that repository (or steals
+# a maintainer token, which is how the tj-actions/changed-files and
+# reviewdog compromises worked) can retarget it and immediately execute code
+# in every job on every branch of every repo that follows it. Several of these
+# jobs run with the repository checkout on disk, and the `release` job holds
+# `contents: write`, so that is a real path from a third-party account to this
+# project's release assets. A SHA cannot be retargeted.
+#
+# Updating a pin: read the trailing comment for the version in use, pick the
+# new release, and resolve it once -
+#   gh api repos/actions/checkout/git/ref/tags/v4.5.0 --jq '.object.sha'
+# then replace both the SHA and the comment. Dependabot/Renovate understand
+# this exact `<sha> # <version>` form and will raise the bump automatically if
+# either is ever enabled here.
+
 # F8 (partial) — cancel superseded runs on the same ref; never cancel runs on
 # main so its history keeps complete evidence. The ${{ }} here is a workflow
 # expression, not run-block interpolation: no injection surface is introduced.
@@ -25,8 +42,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
       - name: go mod tidy -diff
@@ -60,8 +77,8 @@ jobs:
       GOARCH: ${{ matrix.goarch }}
       CGO_ENABLED: 0
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
       - name: Cross-compile both commands
@@ -111,8 +128,8 @@ jobs:
     env:
       CGO_ENABLED: 0
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
       - name: Probe symlink capability (mandatory in this job)
@@ -194,7 +211,7 @@ jobs:
       # gating job stay inspectable after the run log expires.
       - name: Upload test log
         if: ${{ always() }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: windows-symlink-test-log
           path: ${{ runner.temp }}/go-test-output.txt
@@ -224,8 +241,8 @@ jobs:
       CGO_ENABLED: 0
       SCRATCHPAD_TEST_SYMLINKS: "0" # deliberate: force the no-capability path for the whole suite
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
       - name: go vet
@@ -272,7 +289,7 @@ jobs:
       # symlink-capable job).
       - name: Upload test log
         if: ${{ always() }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: windows-degraded-test-log
           path: ${{ runner.temp }}/go-test-output.txt
@@ -291,8 +308,8 @@ jobs:
     env:
       CGO_ENABLED: 0
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
       - name: Build both commands natively
@@ -333,8 +350,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
       - name: go test -race
@@ -355,8 +372,8 @@ jobs:
     env:
       CGO_ENABLED: 0
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
       # -race needs cgo and a C toolchain, so this ONE step overrides the
@@ -411,8 +428,8 @@ jobs:
       # the values are workflow literals, but the discipline is uniform).
       INSTALL_ENGINE: ${{ matrix.engine }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
       - name: Build both commands natively
@@ -422,23 +439,222 @@ jobs:
         shell: pwsh
         run: pwsh -NoProfile -File scripts/verify-install.ps1 -Engine $env:INSTALL_ENGINE
 
+  # ------------------------------------------------------------------
+  # P5.7 - install from the RELEASE ARCHIVE, not from a checkout.
+  #
+  # windows-installer above runs install.ps1 out of the git working tree,
+  # where binaries sit in bin\ and the skill in skill\. That is not the
+  # layout users get. It passed 94/94 on both engines while the shipped
+  # archive could not install itself at all: install.ps1 resolved payloads
+  # only against $RepoDir (= the parent of the script's directory), which
+  # for an extracted archive is the parent of the extracted folder, and
+  # SKILL.md was not in the archive at all - so `cli` failed outright and
+  # `skill`/`all`/`install` had no source to copy. A control that is owned,
+  # green, and pointed at the wrong artefact is worth less than no control,
+  # because it is believed.
+  #
+  # So this job exercises the thing a user downloads: package the archives,
+  # extract one into a scratch directory, and drive install/upgrade/
+  # uninstall/reinstall through it. Three properties make it non-vacuous:
+  #
+  #   1. The extraction parent is asserted to contain no bin\ and no skill\,
+  #      so a pass cannot come from the checkout-layout fallback firing.
+  #   2. The checksum block re-derives every hash with Get-FileHash - the
+  #      exact command docs/windows.md tells users to run - and compares it
+  #      to SHA256SUMS.txt, so the published verification instruction is
+  #      executed rather than asserted.
+  #   3. A minimum assertion count fails the job if the block stops running
+  #      its checks, so "0 failures" can never mean "0 checks".
+  #
+  # Cost: two windows-2025 legs, ~5 minutes each, sharing the runner class
+  # the installer job already uses. Both engines are kept because engine
+  # parity is exactly the claim docs/windows.md makes.
+  # ------------------------------------------------------------------
+  windows-archive-install:
+    name: Windows install from the release ARCHIVE - ${{ matrix.engine }} (P5.7)
+    runs-on: windows-2025
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        engine: [pwsh, powershell]
+    env:
+      CGO_ENABLED: 0
+      # env indirection, not run-block ${{ }} interpolation (house style).
+      INSTALL_ENGINE: ${{ matrix.engine }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+      - name: Build both architectures into dist/
+        shell: pwsh
+        run: |
+          go build -o dist/windows-amd64/ ./cmd/...
+          $env:GOARCH = 'arm64'
+          go build -o dist/windows-arm64/ ./cmd/...
+      - name: Package the release archives (installer required)
+        shell: pwsh
+        run: go run scripts/mkrelease.go -dist dist -version citest -require-installer
+      - name: Verify SHA256SUMS.txt the way the docs tell users to
+        shell: pwsh
+        run: |
+          $fail = 0; $passed = 0
+          function Assert([bool]$Cond, [string]$What) {
+            if ($Cond) { $script:passed++; Write-Host "  ok    $What" }
+            else { $script:fail++; Write-Host "::error::FAIL  $What" }
+          }
+          $zips = @(Get-ChildItem -Path dist -Filter *.zip | Sort-Object Name)
+          $lines = @(Get-Content -LiteralPath dist\SHA256SUMS.txt | Where-Object { $_.Trim() -ne '' })
+          Assert ($zips.Count -eq 2) "packaging produced 2 archives (found $($zips.Count))"
+          Assert ($lines.Count -eq $zips.Count) "SHA256SUMS.txt covers every archive ($($lines.Count) lines vs $($zips.Count) archives)"
+          $covered = @()
+          foreach ($line in $lines) {
+            $parts = $line -split '\s+', 2
+            $want = $parts[0].ToLowerInvariant()
+            $name = $parts[1].Trim()
+            $path = Join-Path 'dist' $name
+            Assert (Test-Path -LiteralPath $path) "SHA256SUMS.txt names an archive that exists: $name"
+            if (Test-Path -LiteralPath $path) {
+              # Get-FileHash is verbatim what docs/windows.md instructs.
+              $got = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+              Assert ($got -eq $want) "Get-FileHash matches SHA256SUMS.txt for $name"
+              $covered += $name
+            }
+          }
+          foreach ($z in $zips) {
+            Assert ($covered -contains $z.Name) "archive $($z.Name) has a checksum line"
+          }
+          Write-Host "assertions: $passed passed, $fail failed"
+          if ($passed -lt 8) { Write-Host "::error::only $passed assertions ran - the checksum block did not execute its checks"; exit 1 }
+          if ($fail -gt 0) { exit 1 }
+      - name: Install, upgrade, uninstall and reinstall from an extracted archive
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $fail = 0; $passed = 0
+          function Assert([bool]$Cond, [string]$What) {
+            if ($Cond) { $script:passed++; Write-Host "  ok    $What" }
+            else { $script:fail++; Write-Host "::error::FAIL  $What" }
+          }
+
+          $engine = $env:INSTALL_ENGINE
+          Write-Host "engine under test: $engine"
+
+          # A scratch tree well away from the checkout. $sandbox is what
+          # install.ps1 computes as $RepoDir when the script runs from
+          # $sandbox\pkg, so it must not look like a checkout.
+          $sandbox = Join-Path $env:RUNNER_TEMP ("archive-" + [Guid]::NewGuid().ToString('N'))
+          $pkg = Join-Path $sandbox 'pkg'
+          New-Item -ItemType Directory -Path $pkg -Force | Out-Null
+          Expand-Archive -LiteralPath (Join-Path 'dist' 'scratchpad_citest_windows_amd64.zip') -DestinationPath $pkg -Force
+
+          Assert (-not (Test-Path -LiteralPath (Join-Path $sandbox 'bin')))   "no bin\ beside the extracted folder - the checkout-layout fallback cannot fire"
+          Assert (-not (Test-Path -LiteralPath (Join-Path $sandbox 'skill'))) "no skill\ beside the extracted folder"
+          Assert (-not (Test-Path -LiteralPath (Join-Path $pkg 'scripts')))   "the archive has no scripts\ subdirectory (what docs/windows.md now says)"
+          Assert (Test-Path -LiteralPath (Join-Path $pkg 'install.ps1'))      "install.ps1 is at the archive root"
+          Assert (Test-Path -LiteralPath (Join-Path $pkg 'skill\SKILL.md'))   "skill\SKILL.md ships in the archive"
+          Assert (Test-Path -LiteralPath (Join-Path $pkg 'scratchpad.exe'))   "scratchpad.exe ships in the archive"
+
+          # An overridden data root, with a space and a non-ASCII character,
+          # pre-seeded with a marker: uninstall must never touch it.
+          $root = Join-Path $sandbox 'data root e'
+          New-Item -ItemType Directory -Path $root -Force | Out-Null
+          $marker = Join-Path $root 'marker.txt'
+          Set-Content -LiteralPath $marker -Value 'do not touch' -NoNewline
+          $before = (Get-FileHash -LiteralPath $marker -Algorithm SHA256).Hash
+          $env:SCRATCHPAD_ROOT = $root
+          $bin = Join-Path $sandbox 'bin target'
+          $ps1 = Join-Path $pkg 'install.ps1'
+
+          function Invoke-Installer([string[]]$Args) {
+            Write-Host "--> $engine install.ps1 $($Args -join ' ')"
+            if ($engine -eq 'powershell') {
+              & powershell -NoProfile -ExecutionPolicy Bypass -File $ps1 @Args 2>&1 | ForEach-Object { Write-Host "      $_" }
+            } else {
+              & pwsh -NoProfile -ExecutionPolicy Bypass -File $ps1 @Args 2>&1 | ForEach-Object { Write-Host "      $_" }
+            }
+            return $LASTEXITCODE
+          }
+
+          Assert ((Invoke-Installer @('cli', '-BinDir', $bin)) -eq 0) "cli from the archive exits 0"
+          Assert (Test-Path -LiteralPath (Join-Path $bin 'scratchpad.exe')) "cli installed scratchpad.exe into -BinDir"
+
+          # The shipped binary must actually run, not merely copy.
+          & (Join-Path $bin 'scratchpad.exe') list 2>&1 | ForEach-Object { Write-Host "      $_" }
+          Assert ($LASTEXITCODE -eq 0) "the installed scratchpad.exe runs (list exits 0)"
+
+          Assert ((Invoke-Installer @('skill')) -eq 0) "skill from the archive exits 0"
+          Assert (Test-Path -LiteralPath (Join-Path $env:USERPROFILE '.claude\skills\scratchpad\SKILL.md')) "SKILL.md installed under ~\.claude"
+          Assert (Test-Path -LiteralPath (Join-Path $env:USERPROFILE '.pi\agent\skills\scratchpad\SKILL.md')) "SKILL.md installed under ~\.pi"
+
+          # Upgrade over an existing install using the DEFAULT verb.
+          Assert ((Invoke-Installer @('all', '-BinDir', $bin)) -eq 0) "all (the default verb) over an existing install exits 0"
+          Assert (Test-Path -LiteralPath (Join-Path $bin 'scratchpad.exe')) "binary still present after the upgrade run"
+
+          Assert ((Invoke-Installer @('uninstall', '-BinDir', $bin)) -eq 0) "uninstall exits 0"
+          Assert (-not (Test-Path -LiteralPath (Join-Path $bin 'scratchpad.exe'))) "uninstall removed the binary"
+          Assert (-not (Test-Path -LiteralPath (Join-Path $env:USERPROFILE '.claude\skills\scratchpad'))) "uninstall removed the ~\.claude skill copy"
+          Assert (-not (Test-Path -LiteralPath (Join-Path $env:USERPROFILE '.pi\agent\skills\scratchpad'))) "uninstall removed the ~\.pi skill copy"
+          Assert ((Invoke-Installer @('uninstall', '-BinDir', $bin)) -eq 0) "second uninstall exits 0 (idempotent)"
+
+          Assert (Test-Path -LiteralPath $root) "the overridden SCRATCHPAD_ROOT still exists"
+          Assert (Test-Path -LiteralPath $marker) "the data-root marker still exists"
+          if (Test-Path -LiteralPath $marker) {
+            Assert ((Get-FileHash -LiteralPath $marker -Algorithm SHA256).Hash -eq $before) "the data-root marker is byte-identical"
+          }
+
+          # Nothing uninstall leaves behind may trip a reinstall.
+          Assert ((Invoke-Installer @('cli', '-BinDir', $bin)) -eq 0) "reinstall after uninstall exits 0"
+          Assert (Test-Path -LiteralPath (Join-Path $bin 'scratchpad.exe')) "reinstall restored the binary"
+
+          Write-Host "assertions: $passed passed, $fail failed"
+          if ($passed -lt 20) { Write-Host "::error::only $passed assertions ran - the block did not execute its checks"; exit 1 }
+          if ($fail -gt 0) { exit 1 }
+
   windows-artifacts:
     name: Windows release archives (cross-built from Linux)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0 # full history so `git describe` can version the archives from tags
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
+      # P5.7 - the Makefile's default VERSION is `git describe --tags`, and its
+      # recipe expands $(VERSION) UNQUOTED into /bin/sh. Git permits ; $ ` | &
+      # in a tag name, so a tag reachable from the pushed commit could inject
+      # shell here. Resolve it once, validate it, and pass it explicitly.
+      - name: Resolve and validate the archive version
+        run: |
+          v="$(git describe --tags --always --dirty 2>/dev/null || echo dev)"
+          if [[ ! "$v" =~ ^[0-9A-Za-z][0-9A-Za-z._+-]*$ ]]; then
+            echo "::error::refusing to package with version string '$v': only [0-9A-Za-z._+-] are allowed. A tag name with shell metacharacters is the likely cause."
+            exit 1
+          fi
+          echo "ARCHIVE_VERSION=$v" >> "$GITHUB_ENV"
+          echo "archive version: $v"
       - name: Build, package, and self-verify archives
-        run: make release-windows
-      - name: Verify checksums independently
-        run: cd dist && sha256sum -c SHA256SUMS.txt
+        run: make release-windows VERSION="$ARCHIVE_VERSION"
+      # P5.7 - `sha256sum -c` only checks the files SHA256SUMS.txt names; it
+      # says nothing about a .zip in dist/ that no line covers. Since the
+      # upload/publish steps below use a dist/*.zip glob, assert the reverse
+      # direction too, so nothing can ship uncovered by the checksum file.
+      - name: Verify checksums independently, both directions
+        run: |
+          cd dist
+          sha256sum -c SHA256SUMS.txt
+          for z in *.zip; do
+            grep -qF "  $z" SHA256SUMS.txt || {
+              echo "::error::$z is present in dist/ but has no line in SHA256SUMS.txt"
+              exit 1
+            }
+          done
+          echo "every archive in dist/ is covered by SHA256SUMS.txt"
       - name: Upload archives
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: windows-release-archives
           path: |
@@ -466,7 +682,7 @@ jobs:
   release:
     name: Draft release assets (v* tags only)
     if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
-    needs: [linux-test, cross-build-windows, windows-arm64-build, windows-artifacts]
+    needs: [linux-test, cross-build-windows, windows-arm64-build, windows-artifacts, windows-archive-install]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -478,20 +694,56 @@ jobs:
       # concurrency comment above).
       RELEASE_TAG: ${{ github.ref_name }}
     steps:
-      - uses: actions/checkout@v4
+      # P5.7 - reject a tag name that is not a plain version BEFORE it reaches
+      # a shell. `git check-ref-format` accepts ; $ ` | & in a tag name, and
+      # RELEASE_TAG flows into `make ... VERSION="$RELEASE_TAG"`, whose recipe
+      # expands $(VERSION) unquoted into /bin/sh. Reproduced locally: a tag
+      # named `v1.0;<command>;` runs <command> in this job - the only job in
+      # the workflow holding `contents: write` and a GH_TOKEN, so it converts
+      # tag-push rights into arbitrary code with a write token. The accepted
+      # set here is strictly narrower than git's, which makes the injection
+      # unreachable no matter what the Makefile quotes.
+      - name: Validate the release tag name
+        run: |
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9][0-9A-Za-z.+-]*$ ]]; then
+            echo "::error::refusing to release from tag '$RELEASE_TAG': a release tag must match ^v[0-9][0-9A-Za-z.+-]*$"
+            exit 1
+          fi
+          echo "release tag: $RELEASE_TAG"
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
       - name: Build release archives (installer required)
         run: make release-windows VERSION="$RELEASE_TAG" RELEASE_FLAGS=-require-installer
-      - name: Verify checksums independently
-        run: cd dist && sha256sum -c SHA256SUMS.txt
+      # P5.7 - `sha256sum -c` only checks the files SHA256SUMS.txt names; it
+      # says nothing about a .zip in dist/ that no line covers. Since the
+      # upload/publish steps below use a dist/*.zip glob, assert the reverse
+      # direction too, so nothing can ship uncovered by the checksum file.
+      - name: Verify checksums independently, both directions
+        run: |
+          cd dist
+          sha256sum -c SHA256SUMS.txt
+          for z in *.zip; do
+            grep -qF "  $z" SHA256SUMS.txt || {
+              echo "::error::$z is present in dist/ but has no line in SHA256SUMS.txt"
+              exit 1
+            }
+          done
+          echo "every archive in dist/ is covered by SHA256SUMS.txt"
       - name: Create draft release with assets
         run: |
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            echo "release $RELEASE_TAG exists — replacing assets"
+            # P5.7 - re-running this job against an already PUBLISHED release
+            # would swap the assets under it without any human seeing the new
+            # build. Draft releases are re-buildable; published ones are not.
+            if [ "$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft)" != "true" ]; then
+              echo "::error::release $RELEASE_TAG is already published; refusing to replace its assets from CI. Cut a new tag instead."
+              exit 1
+            fi
+            echo "draft release $RELEASE_TAG exists — replacing assets"
             gh release upload "$RELEASE_TAG" dist/*.zip dist/SHA256SUMS.txt --clobber
           else
             gh release create "$RELEASE_TAG" --draft --verify-tag \
