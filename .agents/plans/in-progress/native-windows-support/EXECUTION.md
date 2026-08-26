@@ -389,3 +389,71 @@ the same thing (the strict `FILE_OPEN_REPARSE_POINT` open from P1.3/P1.5,
 per spike-findings.md §10.3), applied to every component of the resolved
 target rather than just the final one — noted in `storefs_windows.go`'s
 `openBrowsableDir` stub; not implemented here.
+
+## Phase 1 — Win32 Security Spike
+
+### P1.8 — Accept or stop: **ACCEPT**
+
+The gate asks whether a credible race-resistant strategy exists, and whether to
+stop and rescope if it does not. It does. Recorded 2026-08-26.
+
+Evidence chain: threat model (P1.1) → prototype and 369 measurements on real
+`windows-2025` and `windows-11-arm` runners across nine CI runs (P1.2–P1.5) →
+ADR (P1.6) → independent red team (P1.7, verdict ACCEPT WITH CONDITIONS) → ADR
+revision 2 closing every blocking condition.
+
+Authoritative run: [32908643117](https://github.com/chaitanyaSoni96/scratchpad/actions/runs/32908643117)
+at `145583a` — 369 measurement lines (251 YES / 70 INFO / 24 NO / 13
+NOT-MEASURED / 11 PARTIAL), 91 REQUIRED properties, zero `SECURITY-FAIL`.
+
+What makes this an accept rather than a hope: every mechanism the Linux backend
+relies on has a *measured* Windows twin. The two questions that could have
+killed the project — whether intermediate-component containment is reachable
+(M1/§2.1) and whether handle-relative atomic replacement exists at all (M9) —
+both resolved favourably. The two that resolved against the obvious approach —
+`LockFileEx` on a directory handle (M14) and `os.Root` (M17) — each have a
+replacement that preserves the property rather than trading it away.
+
+Two blocking findings were closed by *changing the design*, and P1.8 approves
+them as design commitments rather than accepting them as established facts:
+
+- **F1** — `OBJ_DONT_REPARSE` is inert for non-Microsoft tags
+  (`A5.obj_dont_reparse_inert_for_unknown_tags`): the refusal is "no filter
+  driver claimed the tag", not containment, so on a machine running Docker
+  (WCIFS) or VFS for Git (ProjFS) the walk traverses. The containment primitive
+  is now the strict open — `FILE_OPEN_REPARSE_POINT` plus a
+  `FILE_ATTRIBUTE_TAG_INFO` read from the same handle — with
+  `OBJ_DONT_REPARSE` demoted to necessary-but-not-sufficient. Six REQUIRED
+  properties hold **in the prototype**, not yet in `internal/store`.
+- **A11** — still a `NO` in the authoritative run. The Linux half shipped in
+  `113cbb2`; the Windows half is a P3 commitment.
+
+Operator decision recorded 2026-08-26: **junctions are accepted** as watch
+links at the same tier as symlinks. The spike measured that a junction is the
+only link an unprivileged user with Developer Mode off can create
+(`P14.devmode_off.*`), and the red team confirmed that everything an attacker
+gains from junction acceptance is closed by tag-aware classification, which the
+design requires regardless. The spec's "created and identified by the
+application" test is unachievable — a store-created junction is byte-identical
+to an attacker's — so §10.1 of the ADR retargets that clause rather than
+claiming to satisfy it.
+
+Not accepted, carried as conditions on later phases: the three unmeasured beta
+dependencies (ReFS/Dev Drive, the antivirus transient-error distribution, and a
+genuinely non-elevated session) block *claiming the beta is validated*, not
+implementation. Owners are recorded in the ADR's remaining-risk table.
+
+### Out-of-sequence security fix: A11 on Linux
+
+`A11.ancestor_swapped` was measured on the Windows spike and proved
+platform-independent: `openBrowsableDir` crossed the one permitted watch
+boundary by re-opening the link target as a **path string** with `O_NOFOLLOW`,
+which protects only the final component. It is not a race — ancestors were
+never validated, at watch time or browse time — and it is reachable by watched
+source content (a `git checkout` swapping a directory for a symlink), with the
+payoff being read disclosure over the unauthenticated HTTP endpoint.
+
+Fixed in `113cbb2`, out of phase order, because it is a live defect in shipping
+Linux code rather than a Phase 3 concern. The demonstrated leak (HTTP 200
+serving a planted marker) is now a regression test at both the store and web
+layers.
