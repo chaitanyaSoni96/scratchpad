@@ -2724,6 +2724,30 @@ inside a directory nested below a junction, and asserts the change reaches
 a `Hub` subscriber within the package's real debounce/max-latency windows.
 Both symlink-flavour twins were left unchanged.
 
+**A bonus consequence, reasoned from the Win32 API contract (not yet
+Windows-CI-confirmed): divergence-table row 18 is also resolved, not just
+the nested-registration half of P-5.** `filepath.EvalSymlinks` (M5.junction)
+left a junction unresolved specifically as a *final* path component while
+still failing on anything nested past one — an asymmetry unique to Go's
+`walkSymlinks`, which only calls `readlink` when `fi.Mode()&fs.ModeSymlink
+!= 0`, and a junction reports `ModeIrregular`, not `ModeSymlink`. Plain
+`CreateFile` (what `canonicalDir` now uses) has no such asymmetry: the
+Windows I/O manager reparses every component of a path transparently,
+final component included, for any reparse tag it understands, regardless
+of position. So `canonicalDir(link)` for a junction now resolves through to
+the **target's** canonical path, exactly like a directory symlink already
+did — not the link's own store-side path, which is what P-4's
+`TestReconcileRegistersAndRemovesJunctionWatch` had assumed and asserted in
+its comment (never in a runnable assertion — that test derives its
+expected key from `canonicalDir(link)` itself, so it stays correct either
+way). That comment was corrected in this task's second commit to describe
+the new behaviour instead of the old one. Net effect: a junction watch tree
+is now registered under the exact same kind of key a symlink watch tree
+is — dedup, `skipEntry`'s logged path, and `reconcile`'s stale-watch
+comparison all behave identically across both link flavours, closing the
+"two behaviours inside one platform" framing P-5's own text used, not only
+the deeper nested-registration bug `185b37d` measured underneath it.
+
 **Related gap checked, not found.** The task that raised P-5 asked whether
 `WatchLinkFor`, `Watches` and the web layer have the same bug. They do not:
 both are `internal/store/store.go` functions built on handle-relative,
@@ -2801,5 +2825,27 @@ Real Windows CI (`windows-2025` / `windows-11-arm`): **not yet obtained**
 — see "Verification status" above. This entry must be updated with the run
 URL and result once GitHub Actions recovers.
 
-One commit so far: `fix(watch): resolve junctions through canonicalDir on
-Windows (P-5)` (`afc3a66`).
+Two commits: `fix(watch): resolve junctions through canonicalDir on Windows
+(P-5)` (`afc3a66`), and a follow-up correcting
+`TestReconcileRegistersAndRemovesJunctionWatch`'s now-stale doc comment
+(P-4's test, not P-5's; its assertions were never wrong, just its prose)
+plus this EXECUTION.md record.
+
+**Note on this branch's shared-checkout concurrency.** This task's second
+commit (`0206498`, the first version of this EXECUTION.md entry) was
+created via `git add <exact EXECUTION.md path>` while another concurrently
+running agent had this same file open with its own uncommitted installer-
+verification rewrite in the working tree — the branch's multiple agents
+share one local checkout, per this file's own repeated "Concurrency note"
+entries. `git add`, even naming one exact file, stages the file's entire
+current on-disk content, so that commit ended up carrying both this task's
+appended P-5 section and the other task's P5.1/P5.2 rewrite together,
+despite the commit message describing only the former (the other agent's
+own next commit, `a70dceb`, then had nothing left to commit for this file
+and its message is misleading about what it actually changed). Content-wise
+nothing was lost or corrupted — both sections are intact and correctly
+placed in the file as it stands — and by the time this was noticed the
+commits were already pushed and had commits from other agents built on top,
+so this was left as a recorded attribution note rather than rewritten
+history: rewriting shared, already-built-upon history is a materially
+bigger risk than one commit whose diff is broader than its message.

@@ -144,9 +144,20 @@ func TestNestedChangeUnderJunctionReachesHub(t *testing.T) {
 // once the junction link itself is removed — the "watched by the
 // reconciler" and "unwatchable" properties P-4 asks internal/watch to cover
 // for a junction, mirroring what TestReconcileRemovesTargetWatchAfterUnwatch
-// already proves for a directory symlink. Per the same P-5 reasoning as
-// above, the registered key is the junction's own (store-side) canonical
-// path, not the target's.
+// already proves for a directory symlink.
+//
+// Unlike this test's original comment claimed (written against the
+// pre-P-5-fix filepath.EvalSymlinks canonicalDir, which — per M5.junction —
+// left a junction unresolved as a *final* path component even though it
+// failed resolving anything nested past one): the registered key is now the
+// TARGET's canonical path, the same as a directory symlink's, not a
+// store-side path distinct from it. Plain CreateFile (what canonicalDir
+// uses on Windows now, identity_windows.go) follows a reparse point
+// transparently regardless of type or position — final component included
+// — which is exactly why the nested-registration half of P-5 is fixed. This
+// test doesn't hardcode that fact: it derives linkCanonical from
+// canonicalDir(link) itself, so it stays correct either way, but the
+// comment should not go on describing the old asymmetry as current.
 func TestReconcileRegistersAndRemovesJunctionWatch(t *testing.T) {
 	testutil.RequireWatchLinks(t)
 	root := t.TempDir()
