@@ -216,3 +216,83 @@ func TestSymlinkAtSelfHealsOnFSCTLFailure(t *testing.T) {
 		t.Fatalf("watch of the freed name after cleanup should succeed, got %v", err)
 	}
 }
+
+// TestSymlinkAtSelfHealsOnReopenFailure is the P3.14 red-team M1
+// reproduction: TestSymlinkAtSelfHealsOnFSCTLFailure above injects its fault
+// at the FSCTL step, which symlinkAt already cleans up (self-heal through
+// the SAME handle). It never exercises the OTHER failure point ADR §6.6
+// rule 1 names — the post-claim REOPEN itself failing, before any handle
+// exists to clean up through. That branch used to `return` immediately,
+// leaving the just-claimed empty directory behind forever (a wedged name,
+// fixable only by a manual `scratchpad delete`).
+//
+// The fault is injected via the "symlink-reopen" runStoreOpHook checkpoint
+// (link_windows.go), which fires after mkdirClaim succeeds and before
+// symlinkAt's own reopen. The hook opens the just-claimed directory with a
+// share mode that grants FILE_SHARE_READ|FILE_SHARE_DELETE but withholds
+// FILE_SHARE_WRITE: symlinkAt's reopen requests FILE_GENERIC_WRITE among its
+// access rights, so it collides and fails with a genuine
+// STATUS_SHARING_VIOLATION — exactly the "a scanner/indexer/Explorer is
+// holding the new directory" scenario the finding describes, not a faked
+// error value. Crucially, the fix's rollback (rmdirAt) only ever requests
+// FILE_READ_ATTRIBUTES|DELETE, both of which the blocking handle DOES share,
+// so the rollback can succeed even while the blocker is still open — letting
+// this test tell fixed from unfixed without any timing race.
+func TestSymlinkAtSelfHealsOnReopenFailure(t *testing.T) {
+	root := testRoot(t)
+	rfs, err := openRootedFS(true)
+	if err != nil {
+		t.Fatalf("openRootedFS: %v", err)
+	}
+	defer rfs.close()
+	parent := int(rfs.root.Fd())
+
+	const name = "reopenfail"
+	full := filepath.Join(root, name)
+
+	var blocker windows.Handle
+	testStoreOpHook = func(op string) {
+		if op != "symlink-reopen" {
+			return
+		}
+		p, err := windows.UTF16PtrFromString(full)
+		if err != nil {
+			t.Fatalf("UTF16PtrFromString(%q): %v", full, err)
+		}
+		h, err := windows.CreateFile(p, windows.GENERIC_READ,
+			windows.FILE_SHARE_READ|windows.FILE_SHARE_DELETE, // deliberately NOT FILE_SHARE_WRITE
+			nil, windows.OPEN_EXISTING, windows.FILE_FLAG_BACKUP_SEMANTICS, 0)
+		if err != nil {
+			t.Fatalf("blocking CreateFile(%q): %v", full, err)
+		}
+		blocker = h
+	}
+	defer func() { testStoreOpHook = nil }()
+	defer func() {
+		if blocker != 0 {
+			windows.CloseHandle(blocker)
+		}
+	}()
+
+	if err := symlinkAt(parent, t.TempDir(), name); err == nil {
+		t.Fatal("symlinkAt unexpectedly succeeded while its reopen was blocked by a competing handle")
+	}
+
+	// The rollback (rmdirAt) must already have run, synchronously, inside the
+	// failed symlinkAt call above — the blocker is still open here, on
+	// purpose, to prove the rollback did not depend on the blocker going
+	// away first.
+	if _, statErr := os.Stat(full); !os.IsNotExist(statErr) {
+		t.Fatalf("residue left behind after a reopen failure (ADR §6.6 rule 1, reopen branch, not holding): stat err = %v", statErr)
+	}
+
+	windows.CloseHandle(blocker)
+	blocker = 0
+	testStoreOpHook = nil
+
+	// The name must be fully free again, exactly as the FSCTL-branch test
+	// above checks.
+	if _, err := Watch("", name, t.TempDir()); err != nil {
+		t.Fatalf("watch of the freed name after cleanup should succeed, got %v", err)
+	}
+}

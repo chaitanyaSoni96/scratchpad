@@ -92,9 +92,24 @@ func symlinkAt(parent int, target, name string) error {
 	if err := mkdirClaim(parent, name); err != nil {
 		return err
 	}
+	// Fires after the claim and before the reopen below, so a test can put
+	// the just-claimed directory into a state that fails ONLY this specific
+	// reopen (e.g. a competing handle sharing less than FILE_GENERIC_WRITE
+	// needs) without needing privilege manipulation — the same deterministic
+	// fault-injection shape runStoreOpHook already provides for the
+	// annotation-tree race tests (annotationfs_windows.go).
+	runStoreOpHook("symlink-reopen")
 	h, err := ntOpenAt(windows.Handle(parent), name, windows.FILE_GENERIC_WRITE|windows.FILE_GENERIC_READ|windows.DELETE,
 		windows.FILE_OPEN, windows.FILE_DIRECTORY_FILE|windows.FILE_OPEN_REPARSE_POINT, windows.OBJ_CASE_INSENSITIVE, 0)
 	if err != nil {
+		// rule 1: the claim must not outlive the failure. There is no handle
+		// to dispose through here — the reopen is what just failed — so this
+		// is the same by-name rollback Publish uses at its own post-claim
+		// reopen (store.go's openDirAt/rmdirAt pair): rmdirAt refuses a
+		// non-empty directory and never follows a link, so it cannot destroy
+		// content even if the name was substituted in the window between the
+		// claim and this failed reopen.
+		_ = rmdirAt(parent, name)
 		return translateOpen("open new link", err)
 	}
 	defer windows.CloseHandle(h)
