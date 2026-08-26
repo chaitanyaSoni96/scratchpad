@@ -361,6 +361,58 @@ func TestDeleteDeepArtifactTree(t *testing.T) {
 	}
 }
 
+// TestArtifactTreeDepthInvariant is the P6.3 F5 pairing, asserted as one
+// property rather than two limits: maxArtifactTreeDepth bounds BOTH what
+// ValidateFilePath will create and how deep removeTreeAt will descend, so
+// "the store never creates a tree it then refuses to delete" is checkable in
+// one place. The two halves are deliberately tested against each other at the
+// exact boundary — a future change that lowers only the removal bound is
+// precisely P3.14's M2 coming back, and this is the test that catches it.
+// Untagged on purpose: the invariant is identical on both backends.
+func TestArtifactTreeDepthInvariant(t *testing.T) {
+	testRoot(t)
+
+	// One segment past the bound must be refused at PUBLISH time, not
+	// discovered at delete time, and must leave nothing behind.
+	over := strings.Repeat("d/", maxArtifactTreeDepth) + "leaf.txt" // maxArtifactTreeDepth+1 segments
+	if err := ValidateFilePath(over); err == nil {
+		t.Fatalf("ValidateFilePath accepted %d segments, deeper than removeTreeAt will descend", maxArtifactTreeDepth+1)
+	}
+	if _, err := Publish("", "over", map[string][]byte{"index.html": []byte("x"), over: []byte("y")}); err == nil {
+		t.Fatal("Publish accepted a file path deeper than removeTreeAt will descend")
+	}
+	if arts, err := List(); err == nil {
+		for _, a := range arts {
+			if a.Name == "over" {
+				t.Fatal("a publish rejected for depth still created an artifact")
+			}
+		}
+	}
+
+	// A path at exactly the bound must be publishable AND deletable. If this
+	// half ever fails while the half above passes, the bound has become
+	// one-directional again.
+	at := strings.Repeat("d/", maxArtifactTreeDepth-1) + "leaf.txt" // exactly maxArtifactTreeDepth segments
+	if err := ValidateFilePath(at); err != nil {
+		t.Fatalf("ValidateFilePath rejected a path at exactly the bound: %v", err)
+	}
+	if _, err := Publish("", "atbound", map[string][]byte{"index.html": []byte("x"), at: []byte("y")}); err != nil {
+		t.Fatalf("Publish rejected a path at exactly the bound: %v", err)
+	}
+	if err := Delete("", "atbound"); err != nil {
+		t.Fatalf("Delete could not remove what Publish had just created at the bound: %v", err)
+	}
+	arts, err := List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range arts {
+		if a.Name == "atbound" {
+			t.Fatal("artifact published at the depth bound survived Delete")
+		}
+	}
+}
+
 func TestListAndResolvePath(t *testing.T) {
 	root := testRoot(t)
 

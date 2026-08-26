@@ -722,19 +722,36 @@ func recordNamespaceRemoval(name string) {
 // left to report that the open's own success or failure did not already
 // decide.
 //
-// P3.9 originally gave this function the same maxArtifactWalkDepth bound
-// List/sizeWalkAt use for R16, as a hard error past the bound. P3.14's M2
-// finding reproduced why that was wrong: List and sizeWalkAt need the bound
-// because an unbounded walk over attacker-reachable structure risks a
-// symlink/reparse cycle, but removeTreeAt never follows a link either — the
-// strict open above refuses to descend through one — so it carries none of
-// that risk; a real directory tree cannot cycle. A depth bound on removal can
-// therefore only ever create artifacts the store refuses to delete, never
-// protect anything; there is no partial destruction either (the recursion
-// errored on the way down, before any removal). removeTreeAt is deliberately
-// unbounded: the store must never create something it refuses to delete, and
-// the only bound that mattered — the filesystem's own — still applies.
+// Bounded at maxArtifactTreeDepth (store.go), which is the SAME constant
+// ValidateFilePath bounds creation with — see that constant's comment for the
+// full history and for why 2048. P3.9 bounded this at maxArtifactWalkDepth
+// (64) while leaving creation unbounded, which is P3.14's M2: the store
+// refusing to delete an artifact it had itself just published. The fix made
+// this unbounded, closing M2 but leaving termination to whichever process
+// resource ran out first — and P6.3 measured that the resource differs by
+// platform in the worst possible direction. This function's frame is 128 bytes
+// of locals on windows/amd64 and 136 on windows/arm64, against 312 for the
+// Linux twin (which carries a unix.Stat_t for its classify-then-open triage
+// that this open-then-classify shape does not need), so 1 GiB of goroutine
+// stack buys ~7.35M levels here versus a ~16.7M process handle limit: the
+// STACK is the binding ceiling on Windows, where on Linux the descriptor table
+// is. That matters because the two fail differently — EMFILE returns an error
+// and leaves the tree intact (measured at 540 000 levels), while Go's stack
+// overflow is a runtime.throw that recover() cannot catch, killing
+// scratchpad-web for every user because one DELETE handler recursed too far.
+// Bounding creation and removal with one constant is what makes a bound safe
+// rather than a re-run of M2.
+//
+// The check is on the way DOWN, before anything is removed, so hitting it
+// leaves the tree exactly as it was rather than half-destroyed.
 func removeTreeAt(parent int, name string) error {
+	return removeTreeAtDepth(parent, name, 0)
+}
+
+func removeTreeAtDepth(parent int, name string, depth int) error {
+	if depth > maxArtifactTreeDepth {
+		return errTreeTooDeep(name)
+	}
 	h, err := openRealDirAt(parent, name)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
@@ -765,7 +782,7 @@ func removeTreeAt(parent int, name string) error {
 			// ago — nil outside tests, same shape as runStoreOpHook
 			// (store.go).
 			runStoreOpHook("annotation-tree-entry")
-			if err := removeTreeAt(h, e.Name()); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			if err := removeTreeAtDepth(h, e.Name(), depth+1); err != nil && !errors.Is(err, fs.ErrNotExist) {
 				readErr = err
 				break
 			}
@@ -842,10 +859,23 @@ func (a *annotationFS) walk(segs []string, visit func([]string, []byte)) error {
 		return err
 	}
 	defer closeFD(fd)
-	return walkAnnotationDir(fd, append([]string(nil), segs...), visit)
+	return walkAnnotationDir(fd, append([]string(nil), segs...), visit, 0)
 }
 
-func walkAnnotationDir(fd int, prefix []string, visit func([]string, []byte)) error {
+// walkAnnotationDir is depth-bounded like every other recursive walk in this
+// package (R16). It was the one that had no bound at all on either platform
+// (P3.13 F-11, carried into P6.2's R16 row) — the same unrecoverable
+// stack-overflow class P6.3 F5 found in removeTreeAt, reached here from
+// WalkNotes' report rendering rather than from a delete. It degrades the way
+// List and sizeWalkAt do (stop walking, do not error), not the way
+// removeTreeAt does, because under-reporting a note is recoverable and leaving
+// content behind is not. The bound is maxArtifactTreeDepth rather than
+// maxArtifactWalkDepth so it can never under-report a sidecar the store was
+// willing to create.
+func walkAnnotationDir(fd int, prefix []string, visit func([]string, []byte), depth int) error {
+	if depth > maxArtifactTreeDepth {
+		return nil
+	}
 	entries, err := readDirFD(fd)
 	if err != nil {
 		return err
@@ -862,7 +892,7 @@ func walkAnnotationDir(fd int, prefix []string, visit func([]string, []byte)) er
 			if err != nil {
 				continue
 			}
-			_ = walkAnnotationDir(child, path, visit)
+			_ = walkAnnotationDir(child, path, visit, depth+1)
 			closeFD(child)
 		case meta.IsRegular:
 			if !strings.HasSuffix(entry.Name(), ".json") {

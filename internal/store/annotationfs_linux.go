@@ -213,19 +213,32 @@ func readDirFD(fd int) ([]os.DirEntry, error) {
 
 // removeTreeAt recursively removes the directory named by (parent, name),
 // handle-anchored and no-follow throughout (a symlink entry is unlinked, not
-// descended). P3.9 originally gave this the same maxArtifactWalkDepth bound
-// List/sizeWalkAt use for R16, as a hard error past the bound. P3.14's M2
-// finding reproduced why that was wrong: List and sizeWalkAt need the bound
-// because an unbounded walk over attacker-reachable structure risks a
-// symlink/reparse cycle, but removeTreeAt never follows a link either, so it
-// carries none of that risk — real directories cannot cycle. A depth bound
-// on removal therefore cannot protect anything; it can only leave an
-// artifact the store itself created permanently undeletable (no partial
-// destruction either: the recursion errored on the way down, before any
-// removal). removeTreeAt is deliberately unbounded: the store must never
-// create something it refuses to delete, and the only bound that mattered —
-// the filesystem's own — still applies.
+// descended).
+//
+// Bounded at maxArtifactTreeDepth (store.go), which is the SAME constant
+// ValidateFilePath bounds creation with — see that constant's comment for the
+// full history and for why 2048. The short version: P3.9's bound was
+// maxArtifactWalkDepth (64) with creation unbounded, which is P3.14's M2 (the
+// store refusing to delete artifacts it had just published); the fix made this
+// unbounded, which closed M2 but left termination to whichever process
+// resource ran out first, and P6.3 measured that on Windows this function's
+// frame is small enough that the goroutine stack limit is reached before the
+// handle limit — an unrecoverable runtime.throw that takes scratchpad-web down
+// with it. Bounding BOTH halves with one constant is what makes a bound safe
+// here: nothing publish can create is deeper than what this can remove.
+//
+// The check is on the way DOWN, before anything is removed, so hitting it
+// leaves the tree exactly as it was rather than half-destroyed — the same
+// property P3.14 observed of the old bound, and the reason this is a clean
+// refusal rather than a partial delete.
 func removeTreeAt(parent int, name string) error {
+	return removeTreeAtDepth(parent, name, 0)
+}
+
+func removeTreeAtDepth(parent int, name string, depth int) error {
+	if depth > maxArtifactTreeDepth {
+		return errTreeTooDeep(name)
+	}
 	fd, err := openDirAt(parent, name)
 	if errors.Is(err, unix.ENOENT) {
 		return nil
@@ -250,7 +263,7 @@ func removeTreeAt(parent int, name string) error {
 				break
 			}
 			if st.Mode&unix.S_IFMT == unix.S_IFDIR {
-				if err := removeTreeAt(fd, entry.Name()); err != nil && !errors.Is(err, unix.ENOENT) {
+				if err := removeTreeAtDepth(fd, entry.Name(), depth+1); err != nil && !errors.Is(err, unix.ENOENT) {
 					readErr = err
 					break
 				}
@@ -313,10 +326,23 @@ func (a *annotationFS) walk(segs []string, visit func([]string, []byte)) error {
 		return err
 	}
 	defer unix.Close(fd)
-	return walkAnnotationDir(fd, append([]string(nil), segs...), visit)
+	return walkAnnotationDir(fd, append([]string(nil), segs...), visit, 0)
 }
 
-func walkAnnotationDir(fd int, prefix []string, visit func([]string, []byte)) error {
+// walkAnnotationDir is depth-bounded like every other recursive walk in this
+// package (R16). It was the one that had no bound at all on either platform
+// (P3.13 F-11, carried into P6.2's R16 row), which is the same unrecoverable
+// stack-overflow class P6.3 F5 found in removeTreeAt — reached here from
+// WalkNotes' report rendering rather than from a delete. It degrades the way
+// List and sizeWalkAt do (stop walking, do not error), not the way
+// removeTreeAt does, because under-reporting a note is recoverable and
+// leaving content behind is not. The bound is maxArtifactTreeDepth rather than
+// maxArtifactWalkDepth so it can never under-report a sidecar the store was
+// willing to create.
+func walkAnnotationDir(fd int, prefix []string, visit func([]string, []byte), depth int) error {
+	if depth > maxArtifactTreeDepth {
+		return nil
+	}
 	entries, err := readDirFD(fd)
 	if err != nil {
 		return err
@@ -333,7 +359,7 @@ func walkAnnotationDir(fd int, prefix []string, visit func([]string, []byte)) er
 			if err != nil {
 				continue
 			}
-			_ = walkAnnotationDir(child, path, visit)
+			_ = walkAnnotationDir(child, path, visit, depth+1)
 			unix.Close(child)
 		case unix.S_IFREG:
 			if len(entry.Name()) < 5 || entry.Name()[len(entry.Name())-5:] != ".json" {

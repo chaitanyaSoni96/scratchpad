@@ -378,19 +378,80 @@ func annotate(a *Artifact, parentFD int, name string) {
 // pathologically deep tree costs is a slightly stale size/mtime or a missed
 // deep artifact, not incorrect containment.
 //
-// P3.9 originally gave removeTreeAt (annotationfs_{linux,windows}.go) the
-// same bound, but as a HARD ERROR rather than a graceful stop. That was wrong:
-// removeTreeAt never follows a reparse point/symlink either, so it carries
-// none of the cycle risk this bound exists to guard against for List's project
-// descent, and unlike List/sizeWalkAt a removal that "gracefully" stops early
-// leaves content behind rather than merely under-reporting — the parent's own
-// rmdir then fails on the non-empty directory. A depth bound on removal can
-// therefore only ever create artifacts the store refuses to delete, never
-// protect anything; P3.14's M2 finding reproduced exactly that (publish a
-// tree past this depth, watch Delete fail forever with no partial removal).
-// removeTreeAt is deliberately unbounded as of that fix — see its doc comment
-// on both platforms.
+// removeTreeAt does NOT use this bound; it uses maxArtifactTreeDepth below,
+// which is a different number for a different reason. Keeping the two apart is
+// the point: this one is a cheap "stop looking" for best-effort discovery, and
+// making removal share it was P3.14's M2 bug.
 const maxArtifactWalkDepth = 64
+
+// maxArtifactTreeDepth bounds, with ONE constant, both halves of the same
+// invariant: how deep the store will CREATE inside an artifact
+// (ValidateFilePath, below) and how deep removeTreeAt
+// (annotationfs_{linux,windows}.go) will descend to take it away again. They
+// are the same number on purpose — "the store never creates a tree it then
+// refuses to delete" is then true by construction and checkable in one place,
+// rather than an emergent property of two limits nobody compared.
+//
+// History, because both previous answers were wrong in opposite directions.
+// P3.9 gave removeTreeAt maxArtifactWalkDepth (64) as a hard error while
+// leaving creation unbounded; P3.14's M2 reproduced the consequence — publish
+// a file path 65 segments deep and the artifact is undeletable through the CLI
+// and the web UI, forever, with no partial removal. The fix (eea0349) took
+// P3.14's second suggestion and made removal unbounded, which closed M2 but
+// left the recursion terminated only by whichever process resource ran out
+// first. P6.3 measured what that means: on Linux the descriptor table goes
+// first (measured: 540 000 levels → EMFILE, tree wholly intact, clean error),
+// but on Windows removeTreeAt's frame is SMALLER than the Linux twin's (128 vs
+// 312 bytes of locals, measured out of the compiler on both arches, because
+// the Linux twin carries a 144-byte unix.Stat_t for its classify-then-open
+// triage), so the 1 GiB goroutine stack limit (~7.35M levels) is reached
+// before the process handle limit (~16.7M) — and Go's stack overflow is a
+// runtime.throw, which recover() cannot catch. In scratchpad-web that is the
+// whole server dying for every user because one DELETE handler recursed too
+// far. P3.14's FIRST suggestion — bound creation to agree with removal — is
+// what this constant finally implements.
+//
+// Why 2048 specifically, rather than a round figure:
+//
+//   - It is exactly Linux's path-nameability ceiling. PATH_MAX is 4096 bytes
+//     and the shallowest possible level costs 2 ("/a"), so 2048 is the deepest
+//     tree that can be named as an absolute path at all. Nothing deeper can be
+//     handed to any path-taking syscall, to filepath.Walk/fs.WalkDir (which is
+//     how `publish -dir` reads a source tree), or to os.RemoveAll.
+//   - It is ~16x past Windows' legacy MAX_PATH ceiling (260 chars ≈ 128
+//     levels), which is where Explorer, `rmdir /s` and `del` stop.
+//   - It is ~20x the deepest real tree anyone has: historical npm
+//     node_modules nesting, a Java package tree and a deep monorepo path all
+//     sit under 100.
+//   - Its resource cost is negligible at both ceilings the unbounded version
+//     ran into: 2048 x 320 B = 655 KiB of goroutine stack on linux/amd64
+//     (1500x under the 1 GiB limit) and 2049 concurrent descriptors/handles
+//     (256x under this host's measured RLIMIT_NOFILE). A deep Delete inside an
+//     HTTP handler can no longer starve the process of descriptors either.
+//
+// The residual, stated rather than buried: a tree deeper than this that
+// arrived in the store some OTHER way — an external `cp -r`, not publish —
+// is refused by Delete. That is a real capability regression against the
+// unbounded version, and it is NOT M2 returning: M2 was the store refusing to
+// delete what the store itself created at a depth (64) an agent could reach in
+// one publish call. Here creation is bounded by the same constant, so the
+// store cannot produce such a tree; only a hand-built one deeper than any path
+// on the machine can name can hit it, and errTreeTooDeep says exactly what to
+// run instead. Deleting content the store never created is not a promise
+// worth a recoverable-process guarantee.
+const maxArtifactTreeDepth = 2048
+
+// errTreeTooDeep is the one message both platforms' removeTreeAt emit past
+// maxArtifactTreeDepth. It names the remedy, because by construction the user
+// cannot have produced this tree with scratchpad and so cannot undo it with
+// scratchpad either — unlike M2's bare "exceeds the maximum artifact tree
+// depth", which told a user their own published artifact was now permanent.
+func errTreeTooDeep(name string) error {
+	return fmt.Errorf("scratchpad: %q is nested more than %d directories deep, which is deeper than scratchpad itself will ever create "+
+		"(publish refuses a file path with more than %d segments) — this tree was put here by something else, and it is deeper than any "+
+		"path on this machine can name; remove it with a tool that walks by handle rather than by path (`rm -rf` on Linux, or "+
+		"`robocopy <empty-dir> <this-dir> /MIR` on Windows) and retry", name, maxArtifactTreeDepth, maxArtifactTreeDepth)
+}
 
 // sizeWalkAt sums file sizes and finds the newest mtime under the directory
 // named by dirFD, handle-anchored and depth-bounded (R16). A link entry
@@ -737,7 +798,19 @@ func ValidateFilePath(p string) error {
 	if p == "" || strings.HasPrefix(p, "/") || strings.Contains(p, `\`) {
 		return fmt.Errorf("invalid file path %q", p)
 	}
-	for _, seg := range strings.Split(p, "/") {
+	segs := strings.Split(p, "/")
+	// The creation half of maxArtifactTreeDepth's invariant (P3.14 M2's
+	// preferred fix, P6.3 F5). A path of N segments makes removeTreeAt descend
+	// to depth N — the last segment is the file, every earlier one a directory
+	// mkdirsAt creates — so refusing N > maxArtifactTreeDepth here is exactly
+	// what makes the removal bound safe: everything this store can publish, it
+	// can also delete. Checked before the per-segment loop so a pathological
+	// path fails on its shape rather than after thousands of regex matches.
+	if len(segs) > maxArtifactTreeDepth {
+		return fmt.Errorf("invalid file path %q: %d path segments is deeper than the maximum of %d "+
+			"(an artifact this deep could not be removed again without exhausting the process's own limits)", p, len(segs), maxArtifactTreeDepth)
+	}
+	for _, seg := range segs {
 		if err := validateName(seg); err != nil {
 			return fmt.Errorf("invalid file path %q: %w", p, err)
 		}
