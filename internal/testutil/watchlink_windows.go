@@ -75,10 +75,7 @@ func WatchLinkCapable() bool {
 // is imported BY internal/store's tests, so it must not import internal/store
 // itself (that would not be a cycle in the Go sense — a test-only import can
 // point at the production package — but it would be a real, needless
-// coupling for a package whose whole job is staying dependency-free). The
-// reparse-buffer construction below is the minimum needed to plant a
-// MOUNT_POINT and is not a general-purpose junction API: it exists only to
-// answer "can this process make one at all".
+// coupling for a package whose whole job is staying dependency-free).
 func probeJunction() bool {
 	dir, err := os.MkdirTemp("", "scratchpad-watchlink-probe-")
 	if err != nil {
@@ -89,29 +86,54 @@ func probeJunction() bool {
 	if err := os.Mkdir(target, 0o755); err != nil {
 		return false
 	}
-	link := filepath.Join(dir, "link")
+	return MakeJunction(filepath.Join(dir, "link"), target) == nil
+}
+
+// MakeJunction creates a directory at link and turns it into a junction
+// (MOUNT_POINT reparse point) targeting target, using the raw
+// FSCTL_SET_REPARSE_POINT primitive probeJunction above uses to test
+// capability — factored out here so callers elsewhere in the test suite
+// (internal/watch, internal/web, cmd/scratchpad) can create a real,
+// deterministic junction without duplicating the reparse-buffer
+// construction, and without going through store.Watch, which tries a
+// directory symlink FIRST and falls back to a junction only when that
+// fails — on a Developer-Mode-on runner that fallback would silently
+// produce a symlink instead, defeating a test whose whole point is the
+// junction flavour specifically (P4.7 semantic-parity finding P-4).
+// Junction creation needs no privilege at all (unlike a directory symlink),
+// so this should succeed unconditionally on NTFS; callers still gate on
+// testutil.RequireWatchLinks for the rare environment where it does not
+// (e.g. a non-NTFS volume).
+//
+// link must not already exist; its parent must. This is the same
+// path-based (not handle-relative) shape as internal/store's own
+// package-private makeJunctionAtPath test helper
+// (storefs_windows_attack_test.go) — that one is unexported and internal
+// to internal/store's own containment-focused tests, so it is reimplemented
+// here rather than imported.
+func MakeJunction(link, target string) error {
 	if err := os.Mkdir(link, 0o755); err != nil {
-		return false
+		return err
 	}
 	p, err := windows.UTF16PtrFromString(link)
 	if err != nil {
-		return false
+		return err
 	}
 	h, err := windows.CreateFile(p, windows.FILE_GENERIC_WRITE|windows.FILE_GENERIC_READ, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil,
 		windows.OPEN_EXISTING, windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
 	if err != nil {
-		return false
+		return err
 	}
 	defer windows.CloseHandle(h)
 
 	sub := `\??\` + target
 	subU, err := syscall.UTF16FromString(sub)
 	if err != nil {
-		return false
+		return err
 	}
 	printU, err := syscall.UTF16FromString(target)
 	if err != nil {
-		return false
+		return err
 	}
 	subBytes := (len(subU) - 1) * 2
 	printBytes := (len(printU) - 1) * 2
@@ -138,6 +160,5 @@ func probeJunction() bool {
 	}
 
 	var n uint32
-	err = windows.DeviceIoControl(h, windows.FSCTL_SET_REPARSE_POINT, &buf[0], uint32(len(buf)), nil, 0, &n, nil)
-	return err == nil
+	return windows.DeviceIoControl(h, windows.FSCTL_SET_REPARSE_POINT, &buf[0], uint32(len(buf)), nil, 0, &n, nil)
 }

@@ -97,6 +97,20 @@ func filesFromDir(dir string) (map[string][]byte, error) {
 			return err
 		}
 		if d.IsDir() {
+			// A Windows junction (or any other reparse point Go does not
+			// resolve to a symlink) reports IsDir() true — ModeDir plus
+			// ModeIrregular, never ModeSymlink (ADR §3.3) — so without this
+			// check it would silently be walked into like an ordinary
+			// directory instead of being rejected the way a directory
+			// symlink already is below (a symlink entry's Type() is
+			// ModeSymlink, not ModeDir, so it never reaches this branch and
+			// falls through to the regular-file check instead). This keeps
+			// "publish -dir accepts regular files/directories only"
+			// (CLAUDE.md) true for both link flavours, not just the one
+			// Unix has.
+			if d.Type()&fs.ModeIrregular != 0 {
+				return fmt.Errorf("%s is not a regular directory", p)
+			}
 			return nil
 		}
 		info, err := d.Info()
