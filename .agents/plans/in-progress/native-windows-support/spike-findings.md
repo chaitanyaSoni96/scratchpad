@@ -28,6 +28,10 @@ CI log is the evidence.
 | 3 | [32902629190](https://github.com/chaitanyaSoni96/scratchpad/actions/runs/32902629190) | `8f9a508` | Developer Mode dependency; unknown-tag vector |
 | 4 | [32902862617](https://github.com/chaitanyaSoni96/scratchpad/actions/runs/32902862617) | `295fc5b` | unknown tag applied to an empty directory |
 | 5 | [32903450305](https://github.com/chaitanyaSoni96/scratchpad/actions/runs/32903450305) | `6474bb8` | confirmation run for this document |
+| 6 | [32905568933](https://github.com/chaitanyaSoni96/scratchpad/actions/runs/32905568933) | `ccd8905` | **cancelled** — the P1.3/P1.5 prototype: `AtomicWriteFile`, the sharing/retry matrix, `A1`–`A12` adversarial tests |
+| 7 | [32906333884](https://github.com/chaitanyaSoni96/scratchpad/actions/runs/32906333884) | `6f8b5c3` | **failure** — an unrelated store fix (`fix(store): stop annotate() from misreading fdPath as a symlink`) run against the P1.3/P1.5 harness surfaced two real defects in it: `A5.unknown_tag_refused` was `SECURITY-FAIL` (R3 was necessary and not sufficient, §4.1/§9.7 below), and `TestP13NeverRemoveThenRename/change_records` hung for the full 20-minute test timeout and panicked |
+| 8 | [32908423510](https://github.com/chaitanyaSoni96/scratchpad/actions/runs/32908423510) | `47248c3` | **failure** — corrected R3 to a tag-based refusal and unhung the change-records observer; with the hang gone the observer could finally run to completion, which surfaced a second `SECURITY-FAIL`: `P13.change_records` |
+| 9 | [32908643117](https://github.com/chaitanyaSoni96/scratchpad/actions/runs/32908643117) | `145583a` | **success** — withdrew the `P13.change_records` assertion the runner falsified (§9.6 below); reference run for P1.3/P1.5 |
 
 Each run executes on **`windows-2025`** (amd64) and, as a secondary data point,
 **`windows-11-arm`** (arm64). Every design-deciding answer below was identical
@@ -45,6 +49,18 @@ The seventeen required properties that hold: `P12.mkdir_excl`,
 `P14.unlink_junction`, `M1.intermediate`, `M4.traverse`, `M7.redirect`,
 `M8.createsymlink_excl`, `M9`, `M10.posix_nt`, `M16`, `R13.replace`,
 `RR1.removeall`.
+
+Run 9 is the reference state for the P1.3/P1.5 sections below (§9–§11):
+**369 measurement lines** on `windows-2025` (251 YES, 70 INFO, 24 NO, 13
+NOT-MEASURED, 11 PARTIAL) and **zero `SECURITY-FAIL` verdicts** — the one
+literal occurrence of the string "SECURITY-FAIL" in that run's raw log is the
+job-summary script's own match pattern, not a finding. 91 distinct
+`RequireProperty` ids reported "holds" in that run (up from the 17 above);
+they are not all reproduced by name here, but every one cited in §9–§11 below
+is a direct quote of its log line. Runs 6–8 are kept in the table above
+because their *failures* are findings in their own right (§9.6, §10.3): this
+phase is measurement, and a runner falsifying an assertion and the assertion
+being corrected is exactly what it looks like working.
 
 ## The instrument's own limits — read this before quoting anything
 
@@ -561,3 +577,587 @@ they left open.
    handle-anchored design already closes the reachable half, so it is defence in
    depth rather than the control (§4.3).
 10. **ReFS**: decide explicitly; it is the one gap CI cannot close (§7).
+11. **`A11.ancestor_swapped` (WARNING, §10.1)**: the containment proof for
+    "browse walk cannot reach outside the watch boundary" is not yet complete
+    on either platform. The ADR must state the property as bounded (needs
+    write access above the user's watched folder) rather than absolute, and
+    own a follow-up task for the handle-by-handle target walk on both
+    `internal/store/storefs_linux.go` and the Windows backend.
+12. **The two-step link-creation window** (`M8.symlinkat_excl`, §10.4,
+    restating §5's `M8.symlinkat_excl` with the P1.5 recovery experiment): give
+    `unwatch` the power to remove an **empty real directory** under a watch
+    name, not only a link, or the name is permanently stuck.
+13. **Retry bound and retryable-status set** (§9.3): adopt
+    `DefaultReplacePolicy` (10 attempts, 2ms→256ms doubling, 2s budget) and
+    `RetryableStatuses` as designed, on the record that the antivirus
+    distribution they are sized against is unmeasurable (`M13.av`) and the
+    bound is therefore a documented judgment call, not a fitted parameter.
+14. **Do not serve documents through `os.Open`** (`P13.go_share_mode`, §9.2):
+    the Windows twin of `OpenDocument` must wrap a handle opened with the full
+    share mode (`FILE_SHARE_READ|WRITE|DELETE`), or a concurrent notes save or
+    `Delete` of an open document burns its entire retry bound against our own
+    web server.
+
+---
+
+## 9. P1.3 — Atomic replacement
+
+The instrument is `internal/winspike/atomicwrite.go` (`AtomicWriteFile`,
+`ReplacePolicy`, `RetryableStatuses`) plus the tests in
+`atomicwrite_test.go`. All results below are Run 9 unless noted.
+
+### 9.1 The write path (`AtomicWriteFile`)
+
+`AtomicWriteFile(parent, name, data, pol)` is entirely handle-relative — no
+step resolves a path — and does four things, each with its own measured
+property:
+
+1. **Unique temp creation.** `newTempName()` generates an 8-random-byte name
+   shaped `.notes-<16 hex chars>.tmp`, "same as `annotationfs_linux.go:110`"
+   (source comment). Claimed with `CreateFileAt` (`FILE_CREATE`, i.e.
+   create-only) in a loop that retries only on a name collision. Measured:
+   `P13.temp_unique` — 64 generated names, 64 distinct, no duplicate.
+2. **Handle-relative rename.** `RenameAtNT(src, parent, name,
+   fileRenameInformationEx, REPLACE|POSIX)` — `NtSetInformationFile` with
+   `RootDirectory=parent`, never a Win32 path-based rename. `P13.write_new`
+   (first write through a pinned parent, `attempts=1`) and
+   `P13.replace_existing` (replace over an existing destination, `attempts=1`)
+   both measured `err=nil`. `REQUIRED property holds` for
+   `P13.replace_existing`: "`NtSetInformationFile(FileRenameInformationEx,
+   RootDirectory=parent, REPLACE|POSIX)` must replace the destination
+   atomically through the pinned parent handle."
+3. **The destination is never unlinked (R-3).** `P13.no_dest_removal` —
+   REQUIRED property holds: "a successful replace must issue ZERO namespace
+   removals naming the destination; recorded []." `P13.audit` cross-checks
+   this with an audit of every disposition-setting call `AtomicWriteFile`
+   makes: "recorded [], err=<nil>." The negative control,
+   `P13.audit_control`, runs the same audit against a *deliberately wrong*
+   remove-then-rename implementation and confirms the audit actually catches
+   it: "the audit DID see it remove the destination = true. If this were false
+   the audit would be worthless and the guard below would be vacuous."
+4. **Cleanup on failure goes through the temp's own HANDLE, never its name**
+   (R-4). `P13.cleanup_handle_based` renamed the temp to `stolen.tmp` between
+   the write and the replace, then failed the replace: "stolen.tmp still
+   present=false; `.notes-*` residue []. Cleanup goes through the temp's own
+   HANDLE (`DeleteByHandle`), which follows the object through the rename; a
+   name-based cleanup would have unlinked nothing and left an orphan file
+   inside the store." `P13.cleanup_bound` and `P13.cleanup_permanent` confirm
+   the same handle-based cleanup fires after a retry-bound exhaustion and
+   after a permanent failure respectively (both: residue `[]`).
+   `P13.permanent_failure` classifies one such permanent case — replacing a
+   directory-shaped destination — as `STATUS_OBJECT_IS_A_DIRECTORY`
+   (`NTSTATUS=0xC00000BA`), non-retryable, destination still present, temp
+   residue `[]`.
+
+`A9.rename_failure_statuses` measured which statuses the class-65
+(`FileRenameInformationEx`) call returns per failure mode, each paired with
+what class-10 (`FileRenameInformation`, the pre-1709 fallback) returns for the
+same case, to determine when the class-65→class-10 fallback should fire:
+`dest_is_directory` → class65 `STATUS_OBJECT_IS_A_DIRECTORY`, not retryable;
+`dest_is_junction` → both classes `nil` (a junction IS a valid replace
+target); `dest_held_no_share_delete` → class65
+`STATUS_SHARING_VIOLATION`/retryable, class10 `STATUS_ACCESS_DENIED`;
+`dest_absent` → both `nil`. Consequence recorded verbatim: "the class-65→
+class-10 fallback must fire ONLY on `STATUS_INVALID_PARAMETER` /
+`NOT_SUPPORTED` / `INVALID_INFO_CLASS` / `INVALID_DEVICE_REQUEST` (i.e. 'this
+build or filesystem does not implement the class'). The stdlib's blanket
+'retry on any error' fallback would, on the rows above, silently retry an
+ATTACK with a class that has no POSIX semantics." `isUnsupportedRenameClass`
+in `atomicwrite.go` implements exactly that allowlisted fallback trigger, not
+a blanket one.
+
+### 9.2 Sharing-mode matrix (`P13.sharing.*`)
+
+Measured across all three destination-mutating primitives — `renameEx` (class
+65, POSIX semantics), `renameLegacy` (class 10), `posixDelete` (NT class 64) —
+crossed with an opener holding the destination via `GENERIC_READ` or
+`GENERIC_WRITE` under each of the 8 `FILE_SHARE_*` combinations
+(`P13.sharing.renameEx.GENERIC_READ`, `.renameEx.GENERIC_WRITE`,
+`.renameLegacy.GENERIC_READ`, `.renameLegacy.GENERIC_WRITE`,
+`.posixDelete.GENERIC_READ`, `.posixDelete.GENERIC_WRITE`).
+
+The rule, stated once by `P13.sharing_summary`: **"a destination opened
+WITHOUT `FILE_SHARE_DELETE` vetoes the replace (err=true); the destination is
+left holding 'COMPLETE-OLD'. An opener that grants `FILE_SHARE_DELETE` does
+not veto it. This is the whole rule: the interferer's share mask, not its
+access mask, decides."** Read vs. write access on the interfering handle makes
+no difference; only whether `FILE_SHARE_DELETE` is in its share mask does.
+`renameLegacy` differs in *how* it fails without `FILE_SHARE_DELETE` —
+`STATUS_ACCESS_DENIED` rather than `renameEx`'s `STATUS_SHARING_VIOLATION` —
+which is why `renameEx`'s status (retryable) and not `renameLegacy`'s
+(not retryable, per `RetryableStatuses` below) is the one that matters for the
+primary path.
+
+`P13.sharing_never_truncates` — REQUIRED property holds: a vetoed replace must
+leave the destination byte-identical, never truncated or absent; found
+"COMPLETE-OLD" every time. `P13.share_all_reader_does_not_veto` — REQUIRED
+property holds: a reader that grants the full share mode must not veto the
+replace (`got nil`).
+
+A distinct defect surfaced here, not in the primitive but in how the store
+would naturally end up calling it: **`P13.go_share_mode`**. Go's
+`syscall.Open` (what `os.Open` uses) hard-codes
+`FILE_SHARE_READ|FILE_SHARE_WRITE` and omits `FILE_SHARE_DELETE`
+(`$GOROOT/src/syscall/syscall_windows.go:395`). Measured: with a file held
+open by `os.Open`, both the atomic replace and a POSIX delete of that file
+fail with `STATUS_SHARING_VIOLATION`; with the *same* file held by a
+`CreateFile` that grants `FILE_SHARE_READ|WRITE|DELETE`, both succeed.
+Consequence, quoted: "`OpenDocument`'s Windows twin must not return an
+`*os.File` opened by `os.Open` — while the web server is streaming a
+document, a concurrent notes replace or `Delete` of that document would fail
+with a sharing violation and burn the whole retry bound. `os.NewFile` over a
+handle WE opened with the full share mode is the fix." This is item 14 in §8.
+
+### 9.3 Retry policy actually implemented
+
+`DefaultReplacePolicy()` in `atomicwrite.go`: `MaxAttempts=10`,
+`InitialBackoff=2ms`, `MaxBackoff=256ms` (doubling in between: 2, 4, 8, 16,
+32, 64, 128, 256, 256 ms — 766ms of sleep in the worst case), `TotalBudget=2s`
+as a hard wall-clock ceiling, `Flush=false`.
+
+`RetryableStatuses` (the exported set, `atomicwrite.go:221`):
+`STATUS_SHARING_VIOLATION`, `STATUS_DELETE_PENDING`,
+`STATUS_LOCK_NOT_GRANTED`, `STATUS_FILE_LOCK_CONFLICT`,
+`STATUS_USER_MAPPED_FILE`, `STATUS_DIRECTORY_NOT_EMPTY` — plus a parallel
+Win32-errno set (`ERROR_SHARING_VIOLATION`, `ERROR_LOCK_VIOLATION`,
+`ERROR_DIR_NOT_EMPTY`, `ERROR_USER_MAPPED_FILE`) for the paths that go through
+a Win32 wrapper rather than the NT call directly. Deliberately **not**
+retryable, per the code's own comment: `STATUS_ACCESS_DENIED` (a real ACL
+denial once the delete-pending case is carved out into its own status, so
+retrying it would only add latency to a permanent failure —
+`M13.pending_status`); `STATUS_REPARSE_POINT_ENCOUNTERED` (a link appeared
+where a real entry is required — this is an **attack signal**, A2/RR1, and
+retrying it would loop against the attacker); `STATUS_OBJECT_NAME_COLLISION`,
+`STATUS_OBJECT_PATH_NOT_FOUND`, `STATUS_NOT_SAME_DEVICE`,
+`STATUS_DISK_FULL`, `STATUS_MEDIA_WRITE_PROTECTED` (permanent by
+construction).
+
+**This set is chosen from documentation, not from a measured distribution: the
+antivirus-induced transient-error distribution is explicitly
+`MATRIX.EXCLUDED.antivirus_distribution` / `M13.av`, NOT-MEASURED** — "not
+measurable on a runner. Defender's realtime state on a CI image is not
+representative, so the retryable set is chosen from documentation with a
+stated bound, and the DETERMINISTIC half — an interfering handle we open
+ourselves — is measured instead (`P13.sharing.*`, `P13.retry.*`)."
+
+What the deterministic half showed: `M13.retry` — a replace that is going to
+succeed succeeds on the **first** attempt once the interfering handle closes,
+so the retry bound is sized for the tail, not the mean. `P13.retry.hold20ms`
+and `P13.retry.hold400ms` held a blocking opener for 20ms and 400ms
+respectively; the replace succeeded after 5 attempts/31ms and 9
+attempts/514ms. `P13.retry_integrity.hold20ms` / `.hold400ms` — REQUIRED
+property holds for both: "whatever the retry outcome, the destination must
+hold one COMPLETE version, never a partial one."
+
+`P13.bound` measured the exhausted-bound case: a destination held without
+`FILE_SHARE_DELETE` for the whole bound produced 10 attempts over 771ms and a
+`*ReplaceError`, whose user-facing message is reproduced in full because it is
+the spec's "antivirus/indexer sharing violations exceed retry bounds"
+actionable case:
+
+> notes write: could not replace "notes.json" after 10 attempts over 771ms:
+> NTSTATUS=0xC0000043(A file cannot be opened because the share access flags
+> are incompatible.) errno=32(The process cannot access the file because it is
+> being used by another process.) goerr=A file cannot be opened because the
+> share access flags are incompatible.. Another program is holding the file
+> open without allowing deletion — most often an editor, Explorer's preview
+> pane, an antivirus scanner or a backup agent. Close it and retry; the
+> previous contents of "notes.json" were left untouched.
+
+`P13.bound_preserves_dest` — REQUIRED property holds: after the bound is
+exhausted the destination must still hold its COMPLETE previous content
+("COMPLETE-OLD"). `P13.bound_terminates` — the loop terminated in 771ms, "well
+inside a request timeout," because each attempt is non-blocking (a share-mode
+veto fails immediately rather than waiting).
+
+### 9.4 Concurrent writers (`A12.concurrent_writers`)
+
+`TestA12ConcurrentNoteWriters` (`adversarial_test.go:1235`) runs **8 writers ×
+25 replaces** (`const writers, rounds = 8, 25`) of one document, each writer
+racing `AtomicWriteFile` against the others and reading back through a
+share-all handle. Measured: `A12.concurrent_writers` — per-writer failures all
+zero, "torn/partial reads observed 0 []," temp residue `[]`.
+`A12.concurrent_temp_residue` — REQUIRED property holds: concurrent writers
+must not leave temp files behind. `A12.concurrent_writers` itself is also a
+REQUIRED property: "a concurrent reader must never observe a torn or partial
+document." Quoted conclusion: "the unique temp name plus the atomic replace
+means concurrent writers never share a temp and a reader never sees a partial
+file — the rev guard above this layer decides WHICH version wins, not whether
+the file is intact." Both `windows-2025` and `windows-11-arm` reported the
+identical `8 writers × 25 replaces` line.
+
+**Discrepancy, not silently resolved:** `matrix_test.go:279`'s hardcoded
+description of this same result — the string inside
+`MATRIX.Notes.concurrent_revisions` — says **"8 writers × 40 replaces"**. That
+number does not appear anywhere in the code or in either run's log; the test
+constant is `rounds = 25` and every `A12.concurrent_writers` log line on both
+architectures reports 25. This is a stale literal in `matrix_test.go`'s
+descriptive string, not a re-measurement, and not evidence of 40 replaces
+having been run. The finding stands as **8 × 25**, per the primitive's own
+measurement line.
+
+### 9.5 Durability and flush
+
+`P13.flush_cost` (INFO): 100× (create temp + write 4 KiB + atomic replace)
+without `FlushFileBuffers`: 811µs/op; with it: 4.594ms/op (5.7×).
+Recommendation, quoted: "DO NOT flush by default. `annotationfs_linux.go`'s
+`writeFile` does not fsync either, so flushing would make Windows strictly
+MORE durable than the Linux backend rather than reaching parity, at this cost
+per note save. What the atomic replace already guarantees without any flush
+is the property that matters: the destination name always resolves to one
+COMPLETE version. What it does not guarantee is which version survives a
+power loss — and a lost note revision is recoverable by the user, a torn one
+is not."
+
+`P13.flush_scope` (INFO): there is no directory-fsync question on Windows —
+the rename is a metadata operation on the parent's index and NTFS journals
+it, so `FlushFileBuffers` on the temp's own handle before the replace is the
+only durability knob, exposed as `ReplacePolicy.Flush` and left `false` by
+default per the above.
+
+### 9.6 The withdrawn hypothesis: `ReadDirectoryChangesW` cannot detect a degraded replace
+
+This is the most important self-correction in this batch, and it deserves to
+be stated carefully.
+
+The original hypothesis, built into the instrument
+(`internal/winspike/dirnotify.go`'s own doc comment, still unchanged in the
+tree as of this writing): a raw `ReadDirectoryChangesW` observer could tell
+apart "the destination was replaced atomically" from "the destination was
+removed and a new file was renamed into its place," because the kernel's own
+action codes are supposedly `RENAMED_OLD_NAME`/`RENAMED_NEW_NAME` for the
+first and `REMOVED`+`RENAMED_OLD_NAME`+`RENAMED_NEW_NAME` for the second. At
+`47248c3` this was wired up as a `RequireProperty` — a `SECURITY-FAIL`-gating
+assertion — and the runner contradicted it (Run 8,
+`atomicwrite_test.go:648`): "REQUIRED property CONTRADICTED: the atomic
+replace must never produce `FILE_ACTION_REMOVED` for the destination" against
+records `[ADDED(.tmp) REMOVED(notes.json) RENAMED_OLD_NAME(.tmp)
+RENAMED_NEW_NAME(notes.json) MODIFIED(notes.json) ...]` — i.e. the genuine
+`AtomicWriteFile` replace, not the deliberately-wrong implementation, produced
+a `FILE_ACTION_REMOVED` naming the destination.
+
+Run 9 (`145583a`) withdrew the assertion rather than patch around the
+observation, and `P13.change_records` is now an **`NO`**-verdict, informational
+finding, quoted in full because the wording matters:
+
+> INSTRUMENT INSUFFICIENT, and the reason is a finding. `AtomicWriteFile`
+> produced `[ADDED(.notes-c60166cfd8bc5ff7.tmp) REMOVED(notes.json)
+> RENAMED_OLD_NAME(.notes-c60166cfd8bc5ff7.tmp)
+> RENAMED_NEW_NAME(notes.json) MODIFIED(notes.json) ADDED(.sentinel)
+> MODIFIED(.sentinel)]` ; the deliberately-wrong remove-then-rename produced
+> `[ADDED(.notes-b6fade695f6e54b2.tmp) REMOVED(notes.json)
+> RENAMED_OLD_NAME(.notes-b6fade695f6e54b2.tmp)
+> RENAMED_NEW_NAME(notes.json) MODIFIED(notes.json) ADDED(.sentinel)
+> MODIFIED(.sentinel)]` ; identical apart from the temp name = false (both
+> contain `FILE_ACTION_REMOVED` naming the destination = true / true). A
+> POSIX-semantics rename that REPLACES a destination makes the kernel emit
+> `FILE_ACTION_REMOVED` for the replaced file as part of the atomic rename, so
+> `ReadDirectoryChangesW` CANNOT distinguish an atomic replace from
+> unlink+rename. The hypothesis that it could is withdrawn; the guard against
+> the degradation is the namespace-removal audit (`P13.audit`) and the
+> continuous-existence observer (`P13.continuous_existence`).
+
+`P13.change_records_control` (Run 8, still true in Run 9's negative control)
+independently confirms the two record streams *would* have been
+distinguishable if the false-positive hadn't been the atomic case itself:
+"the instrument can therefore distinguish the two implementations" — meaning
+this was not an instrument bug that produced noise; the instrument worked
+correctly and reported that the two implementations are **not**
+distinguishable by kernel change notification alone, because POSIX-semantics
+rename-with-replace itself emits `FILE_ACTION_REMOVED` for the replaced name.
+Identical on `windows-11-arm`.
+
+**What guards the property instead**, now that the change-notification
+discriminator is withdrawn:
+
+- **`P13.audit`** — an audit of every disposition-setting call
+  `AtomicWriteFile` itself makes, asserting zero of them name the destination.
+  REQUIRED property holds: "`AtomicWriteFile` must perform zero namespace
+  removals naming the destination (recorded [], err=<nil>)." This is a
+  white-box guarantee about what the function does, not a black-box
+  observation of what the kernel reports.
+- **`P13.continuous_existence`** — a concurrent reader polling the destination
+  name across 200 replaces observed it absent 0 times out of 1902 polls,
+  against a negative control (remove-then-rename, 200 replaces) that saw it
+  absent 1902 times out of 3441 polls. Quoted: "With the control failing on
+  roughly half of all polls, this is the black-box discriminator that
+  `ReadDirectoryChangesW` turned out not to be: it is empirical rather than
+  deterministic, but the margin is not a close call." REQUIRED property
+  holds: "the destination name must resolve at every instant during a
+  replace."
+
+**Where the log and the code disagree:** `internal/winspike/dirnotify.go`'s
+package doc comment still asserts the withdrawn hypothesis as fact — "so 'no
+`FILE_ACTION_REMOVED` naming the destination' is a black-box, deterministic
+assertion that the destination never left the namespace" — unchanged by the
+`145583a` withdrawal. The finding record above is authoritative; that comment
+is stale and, since `internal/winspike` is deleted at the end of Phase 1 per
+this document's introduction, it is being recorded here rather than fixed in
+place (this task is constrained to this file only).
+
+**Also recorded here rather than filed silently:** `P13.watch_sees_removed_on_replace`
+(INFO) draws out the consequence for `internal/watch`: every notes save now
+emits `REMOVED(<doc>)` immediately followed by `RENAMED_NEW_NAME(<doc>)` and
+`MODIFIED(<doc>)`; fsnotify maps that to Remove→Create→Write. "A watcher that
+reacts to Remove by dropping state for the document — or a UI that reacts by
+hiding it — will flicker on every save. The 250ms debounce in `internal/watch`
+absorbs this today on Linux (where a rename emits no unlink at all); on
+Windows the debounce is doing real work and must not be removed."
+
+---
+
+## 10. P1.5 — Adversarial tests
+
+The instrument is `internal/winspike/adversarial_test.go` (1327 lines) plus
+the sharing/retry cases in `atomicwrite_test.go` and the reserved-name /
+matrix wiring in `matrix_test.go`. All results below are Run 9 unless noted;
+every containment result was identical on `windows-2025` and
+`windows-11-arm`.
+
+### 10.1 WARNING — `A11.ancestor_swapped`: containment BROKE
+
+This is the most important result in this batch. Verdict: **`NO`** —
+containment did not hold. Quoted in full:
+
+> an ANCESTOR of the watch target was replaced with a junction between the
+> reparse-buffer read and the open-by-name: open -> nil ; entries reached
+> [LOOT.txt] ; the attacker's tree was reached = true. THIS IS A REAL WINDOW
+> AND IT IS PLATFORM-INDEPENDENT: storefs_linux.go:184 re-opens the readlink
+> result as an ABSOLUTE PATH with O_NOFOLLOW, which likewise protects only the
+> final component. It is not a Windows regression and it is bounded by the
+> attacker already needing write access above the user's watched folder, but
+> the ADR should record it rather than let the Windows port inherit it
+> silently. The structural fix on both platforms is to walk the target's
+> components handle-by-handle instead of opening the string.
+
+Stated plainly: an ancestor directory of the watch target was replaced with a
+junction pointing at an attacker-controlled tree in the window between when
+`openBrowsableDir` read the reparse buffer (to follow the store's one
+permitted watch-boundary link) and when it opened the resolved target by
+name — and the attacker's tree **was** reached (`entries reached [LOOT.txt]`,
+the attacker's planted file). This is distinct from `A11.target_swapped`
+(the watch **target itself** substituted with a link), which **is** refused —
+`openAbsoluteDirNoFollow` opens the final component with
+`FILE_FLAG_OPEN_REPARSE_POINT` and then refuses a reparse point, closing that
+half. The ancestor-substitution half is the one that is open.
+
+**It is platform-independent.** `internal/store/storefs_linux.go`'s
+`openBrowsableDir` (currently lines 196–223; the vulnerable call is line
+**211**: `unix.Open(string(buf[:n]), unix.O_RDONLY|unix.O_DIRECTORY|
+unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)`) re-opens the `readlink` result as an
+**absolute path** with `O_NOFOLLOW`, which likewise protects only the final
+component of that reopened path — an ancestor of *that* path substituted
+between the `readlinkat` and the `open` is not defended against either.
+**Note the line-number discrepancy:** the finding's own text cites
+`storefs_linux.go:184`; the function is at line 194 and the vulnerable open is
+at line 211 in the current tree, and it was already at that line in the
+`145583a` commit the finding was measured against (`git show
+145583a:internal/store/storefs_linux.go` shows the same 194–223 span). The
+`:184` citation appears to simply be wrong, not stale — recorded here as a
+log/code disagreement per this document's own rule, not silently corrected
+into the finding text.
+
+**What is NOT true of this finding:** it is not a Windows-specific defect, it
+is not new to this spike's backend design, and it does not require the
+attacker to be unprivileged relative to the store — it requires the attacker
+to already have write access to a directory *above* the user's watched
+folder, which is a meaningfully high bar (on Linux, write access to an
+ancestor directory the user does not own; on Windows, equivalent DACL
+control). It is bounded, not absolute.
+
+**Disposition:** the structural fix on both platforms is to walk the target's
+path components handle-by-handle (open segment, verify its identity/tag,
+descend, repeat) rather than reopening a resolved string, closing the same
+class of window that `A1`–`A9` already close for the *store's own* tree. This
+is item 11 in §8: the P1.6 ADR's containment proof for "the browse walk
+cannot reach outside the watch boundary" must state the property as bounded
+and own a follow-up task for the handle-by-handle walk on both
+`storefs_linux.go` and the Windows backend it is designing.
+
+### 10.2 The rest of the containment tests: HELD
+
+Every other adversarial containment test in Run 9 **HELD**. Table format:
+property tested → verdict → id(s).
+
+| Threat | Verdict | ids |
+|---|---|---|
+| Mutation through a pinned ancestor handle survives ancestor substitution (realdir / junction / symlink / unknown tag) | **HELD** | `A1.ancestor_replaced.realdir`, `.junction`, `.symlink`, `.unknowntag` |
+| Destination substituted with a link/realdir/realfile in the window before an atomic write | **HELD** — write never reaches outside the store; temp always cleaned up | `A2.dest_replaced.*`, `A2.dest_replaced_cleanup.*` |
+| A second reparse point nested below an already-crossed boundary, at 1 and 2 levels, junction/symlink boundary × junction/symlink/unknown-tag nested | **HELD** — refused at any depth; the strict (tag-based) variant refuses independent of filter drivers | `A3.nested.*`, `A3.nested_strict.*` |
+| Root substituted (realdir/junction/symlink) after `OpenRoot`; a fresh open must not silently accept the substitute | **HELD** — pinned handle stays in the original object; a fresh open differs in identity | `A4.root_replaced.*` |
+| `OpenRoot` on a root that is itself a reparse point | **HELD** — refused | `A4.root_reparse_refused.junction`, `.symlink` |
+| Root removed while a handle is open | **INFO, not pass/fail** — the object stays alive and usable via the handle even though unreachable by name; "the ADR must decide whether that is acceptable or whether the root identity is re-verified per mutation" | `A4.root_removed` |
+| Unknown reparse tag refused **by its tag**, independent of whether a filter driver services it (the R3 self-correction, §10.3) | **HELD** | `A5.unknown_tag_refused`, `A5.strict_open`, `A5.strict_walk` |
+| Recursive delete does not descend through a planted junction/symlink/unknown-tag at depth 0 or depth 2 inside the artifact (**threat model RR1, Critical**) | **HELD** — negative control confirms the mechanical port *does* destroy the external target, so the assertion is meaningful | `A6.delete.junction.depth0`/`.depth2`, `A6.delete.symlink.*`, `A6.delete.unknowntag.*`, `A6.negative_control` |
+| Entry substituted with a link between enumeration and descent during a recursive delete | **HELD** | `A6.swap_midwalk` |
+| Delete through a pinned parent after the parent was renamed away and replaced by a junction | **HELD** | `A6.parent_replaced` |
+| Removing a watch link removes only the link, never the external target | **HELD** | `A6.unlink_watch.junction`, `.symlink` |
+| Exactly one of N concurrent create-only claims on one name wins | **HELD** — 16 racers, 1 winner, 15 `STATUS_OBJECT_NAME_COLLISION`, 0 other | `A8.concurrent_claim` |
+| A create-only claim during a delete-pending window gets a distinct, transient error (not "already exists") | **INFO** — confirms the Windows-only third outcome exists; POSIX-semantics delete removes the window entirely | `A8.delete_pending_claim` |
+| A file symlink / junction is refused as an openable document | **HELD** | `A10.file_link_refused`, `A10.dir_link_refused` |
+| A document substituted with a link after the parent handle was pinned is never served | **HELD** | `A10.rename_race` |
+| URL-shaped segments (`index.html:x`, `::$DATA`, `C:evil`, trailing dot) at the open layer | **INFO** — none of these fail at the open itself; `validateSegment` (R11) is the actual control | `A10.stream_syntax` |
+| 8 concurrent writers × 25 replaces of one notes document: no torn read, no temp residue | **HELD** (§9.4; discrepancy with `matrix_test.go`'s "40" noted there) | `A12.concurrent_writers`, `A12.concurrent_temp_residue` |
+| The target itself (not an ancestor) substituted with a link between the reparse-buffer read and the open | **HELD** | `A11.target_swapped` |
+| The watch target's ancestor substituted with a link in the same window | **BROKE — see §10.1** | `A11.ancestor_swapped` |
+
+### 10.3 The non-surrogate unknown-tag vector — R3 corrected
+
+Threat-model assumption invalidated and then re-closed within this batch
+(Runs 7→8, commit `47248c3`, "correct R3 after the runner invalidated it").
+At Run 7 (`6f8b5c3`), `A5.unknown_tag_refused` was `SECURITY-FAIL`: the
+no-follow walk relied on `OBJ_DONT_REPARSE` to refuse an unknown, non-Microsoft
+reparse tag, and the runner showed this refusal actually comes from
+`STATUS_IO_REPARSE_TAG_NOT_HANDLED` — no filter driver claims the tag — not
+from the no-follow rule itself. `A5.obj_dont_reparse_inert_for_unknown_tags`
+states the correction: "for a NON-MICROSOFT tag the WITH-flag and
+WITHOUT-flag opens return the SAME status... `OBJ_DONT_REPARSE` therefore does
+NOTHING for an unknown tag... On a machine that HAS the driver — Windows
+Containers (WCI*), VFS-for-Git (PROJFS*), a vendor filter — the same open
+would be SERVICED and the walk would traverse. R3 stated as 'OBJ_DONT_REPARSE
+on every component' is NECESSARY AND NOT SUFFICIENT."
+
+The fix, measured as holding by Run 8 and unchanged through Run 9:
+`A5.strict_open` opens with `FILE_OPEN_REPARSE_POINT` and reads
+`FILE_ATTRIBUTE_TAG_INFO` off the **same handle**, refusing by the tag value
+itself rather than by whether the open failed. `A5.unknown_tag_refused` —
+REQUIRED property holds: "a non-surrogate unknown reparse tag must be refused
+BY ITS TAG, read from a handle opened with `FILE_OPEN_REPARSE_POINT`, so the
+refusal does not depend on no filter driver servicing it." `A5.strict_walk` —
+REQUIRED property holds for the project-ancestor walk using the same
+mechanism. `A5.strict_open_admits_real_dirs` confirms the strict primitive
+still opens an ordinary directory (`got nil`) — "or it is useless."
+`A5.unknown_tag_removed` — REQUIRED property holds: removing an unknown-tag
+entry does not touch anything outside the store.
+
+### 10.4 The two-step link-creation window (`M8.symlinkat_excl`)
+
+`M8.symlinkat_excl` — **`NO`**: "handle-relative `Symlinkat` over a taken
+name -> `STATUS_REPARSE_POINT_ENCOUNTERED`. The NAME CLAIM is atomic
+(`FILE_CREATE`); the reparse tag is applied in a SECOND step, so a crash
+between the two leaves an EMPTY REAL DIRECTORY under the watch name, not a
+partial link. That intermediate state is indistinguishable from a
+published-but-empty artifact and must be handled by the ADR."
+
+The P1.5 batch adds the crash-window experiment this implies. `A7.two_step_residue`
+(INFO) confirms what the residue actually is: "after a crash between the two
+steps the name holds:... It is an ORDINARY EMPTY DIRECTORY — not a partial
+link, not a broken link, and indistinguishable from a published-but-empty
+artifact." `A7.two_step_recovery` (INFO) confirms **no existing CLI verb can
+clear it**: "re-running watch over the residue -> ... the create-only claim
+fails, as it must... `Delete` would refuse it because `dirHasHTML=false` so it
+is not an artifact... `Unwatch` would refuse it because it is a REAL
+directory, not a link. So today the name is STUCK... A handle-relative
+`rmdir` of the EMPTY directory does work (-> nil, gone=true), which is the
+candidate recovery: let `unwatch` remove a link OR an empty real directory,
+since an empty directory under a watch name carries no user data by
+definition." `A7.two_step_window` — REQUIRED-style conclusion: "the window is
+real and its residue is benign for CONTAINMENT (an empty real directory
+grants an attacker nothing) but is a usability trap: it consumes a name that
+create-only semantics will never release." This is item 12 in §8.
+
+---
+
+## 11. Security Test Matrix coverage
+
+Coverage against the spec's Security Test Matrix
+(`.agents/spec/native-windows-support.md`, "Security Test Matrix" table),
+measured by `internal/winspike/matrix_test.go`'s own `MATRIX.*` accounting.
+`MATRIX.SUMMARY` (Run 9): **"44 matrix cells accounted for: 26 DEMONSTRATED on
+the prototype, 9 MECHANISM-ONLY (handed to Phase 3 with the Windows primitive
+proven), 9 DOCUMENTED EXCLUSIONS. Zero silent gaps."** Independently counted
+from the raw `MATRIX.*` log lines: 26 `YES`, 9 `PARTIAL`, 9 `NOT-MEASURED`,
+matching the summary exactly.
+
+`Covered` below means the `MATRIX.*` verdict is `YES` (fully demonstrated on
+the prototype). `Partial` means the Windows **primitive** is demonstrated but
+part of the cell is `internal/store` policy that this spike cannot exercise
+(no `internal/store` import, per this document's introduction) — the P3 owner
+is named in each row. `Excluded` means `NOT-MEASURED`, reproduced verbatim in
+§11.2.
+
+| Area | Case | Status | Measurement ids | Partial: the internal/store half |
+|---|---|---|---|---|
+| Root | root missing | Covered | `MX.root_missing` |  |
+| Root | root file | Covered | `MX.root_file`, `P12.root_file` |  |
+| Root | root link/reparse point | Covered | `MX.root_reparse.junction`/`.symlink`/`.unknowntag`/`.volume_mount_point`, `P14.junction_modesymlink` |  |
+| Root | root replaced during operation | Covered | `A4.root_replaced.realdir`/`.junction`/`.symlink`, `A4.root_removed`, `R13.replace` |  |
+| Publish | concurrent same-name claim | Covered | `A8.concurrent_claim`, `A8.delete_pending_claim` |  |
+| Publish | ancestor replaced | Covered | `A1.ancestor_replaced.realdir`/`.junction`/`.symlink`/`.unknowntag`, `M7.redirect` |  |
+| Publish | ancestor link | Covered | `P12.junction_traverse`, `P12.junction_intermediate`, `P12.symlink_traverse`, `A5.strict_walk`, `A5.obj_dont_reparse_inert_for_unknown_tags` |  |
+| Publish | artifact ancestor | Partial | `P12.reject_artifact` | `dirHasHTMLFD` uses `strings.ToLower`, not the volume's `$UpCase` folding (M11), so a `.HTML` entry can miss the artifact test — fix + test owned by P3 |
+| Browse | one approved watch boundary | Covered | `P12.browsable_boundary`, `P12.browsable_tag_allowlist` |  |
+| Browse | nested link | Covered | `A3.nested.*`, `A3.nested_strict.*` (every boundary × nested flavour, 1 and 2 levels) |  |
+| Browse | cycle | Partial | `A3.nested.*` (a cycle needs a second link, which is refused), `M5.case` (EvalSymlinks canonicalises case, so RR9's case-alternating-cycle mechanism does not exist) | `List`'s string-keyed visited-set termination is `internal/store` code — owned by P3 |
+| Browse | broken target | Covered | `A11.target_swapped` (removes the target entirely; open fails cleanly) |  |
+| Browse | target replacement | **Partial — and it is the one that found a real gap** | `A11.target_swapped` (target itself: refused), `A11.ancestor_swapped` (ancestor of target: **not** refused, §10.1) | Not an `internal/store` gap — see §10.1/§8 item 11; the fix is a structural change to the walk on both platforms |
+| Documents | file link | Covered | `A10.file_link_refused` (hard-link variant is RR4, accepted not fixed: `MX.directory_hard_links`) |  |
+| Documents | directory link | Covered | `A10.dir_link_refused` |  |
+| Documents | alternate stream syntax | Partial | `A10.stream_syntax`, `M12` — a RootDirectory-relative open **accepts** `doc.html:hidden` | The control is `validateSegment` rejecting `:` (R11) — `internal/store`, 404 assertions owned by P3 |
+| Documents | case variation | Partial | `M11` — the volume's real `$UpCase` folding measured, including `.annotations`/`.Annotations` and `key.pem`/`key.PEM` folding (RR5 confirmed live) | The fix is `internal/store`'s `ignore.go` reserved-name check and `defaultIgnores` |
+| Documents | rename race | Covered | `A10.rename_race` |  |
+| Delete | target replaced | Covered | `A6.delete.junction/.symlink/.unknowntag` at depth 0/2, `A6.swap_midwalk`, `A6.negative_control` |  |
+| Delete | parent replaced | Covered | `A6.parent_replaced` |  |
+| Delete | link target untouched | Covered | `A6.unlink_watch.junction`/`.symlink`, `P14.unlink_junction` |  |
+| Delete | annotation subtree cleanup | Partial | `RemoveTreeAt` primitive proven containment-safe by `A6.*` | Whether `Delete` actually calls it for the notes subtree, and the re-published-name-inherits-no-notes assertion, is `internal/store` behaviour — owned by P3 |
+| Notes | annotation root link | Covered | `MX.notes_root_link.junction`/`.symlink` |  |
+| Notes | intermediate link | Covered | `MX.notes_intermediate_link.junction`/`.symlink` |  |
+| Notes | concurrent revisions | Partial | `A12.concurrent_writers` — 8 writers × 25 replaces, no torn read, no temp residue (§9.4; note the "40" discrepancy in `matrix_test.go`'s own description string) | The rev guard and `ErrRevMismatch` are `internal/store`; the Windows-extra RR6 (Delete racing SaveNotes without a store-root lock) needs the lock-file substitute chosen in the ADR (M14) and is a P3 test |
+| Notes | sharing violation | **Covered — and this cell does not exist on Linux** | `P13.sharing.*` (all 8 share masks × read/write × 3 mutation primitives), `P13.sharing_never_truncates`, `P13.bound`, `P13.bound_preserves_dest`, `P13.retry.hold*`, `M13.pending_status` |  |
+| Watch | same-target idempotence | Partial | `M8.claim_over.*` — a create-only claim over an existing LINK fails with `STATUS_REPARSE_POINT_ENCOUNTERED`, not `STATUS_OBJECT_NAME_COLLISION`, so a mechanical port of `Watch`'s `errors.Is(EEXIST)` relaxation turns every repeat `watch` into a hard error | The relaxation itself (`linksTo`) is `internal/store` — owned by P3 |
+| Watch | different target collision | Partial | `M8.createsymlink_excl`, `M8.symlinkat_excl` — link creation never replaces | The target-comparison policy (`linksTo`) is `internal/store`, and on Windows must compare OBJECT IDENTITY, not strings, because of 8.3 aliasing (`M6.prefix_defect`) |
+| Watch | junction/reparse variants | Covered | `P14.classify.*`, `M3.volume_mount_point`, `A5.*`, `A6.*`, `P14.unlink_junction` |  |
+| Watch | (Windows-only cell) no symlink privilege | Covered | `P14.devmode_off.*`, the P1.4 table; `ERROR_PRIVILEGE_NOT_HELD` = 1314 |  |
+| Watch | (Windows-only cell, added by this spike) two-step crash window | Covered | `A7.two_step_residue`, `A7.two_step_recovery` (§10.4) |  |
+| Names | reserved devices | Covered | `M18.*`, `M18.relative_open.*` |  |
+| Names | trailing dot/space | Covered | `MX.trailing_dot_space` |  |
+| Names | UNC/drive forms | Partial | none (pure string validation) | The syntactic half is `internal/store` and a P3 test with no Windows primitive to measure; the live half is `MATRIX.EXCLUDED.smb` |
+| Names | Unicode and case collisions | Covered | `M11` — the volume's real `$UpCase` against Go's `EqualFold`, including the Kelvin-sign and ß/ẞ disagreements and confirmation RR5 is live |  |
+
+Totals: **26 covered, 9 partial, 9 excluded** — 44 rows, matching
+`MATRIX.SUMMARY` exactly.
+
+### 11.1 `MATRIX.EXCLUDED` — the nine documented exclusions, verbatim
+
+Every excluded row carries a stated reason; none is a silent gap.
+
+- **`MATRIX.EXCLUDED.directory_hard_links`** — "CONCEPT DOES NOT EXIST ON
+  WINDOWS. `CreateHardLinkW` fails on a directory (`MX.directory_hard_links`
+  measures it rather than asserting it from documentation). There is no cell
+  to test; §4.4 says so and this confirms it."
+- **`MATRIX.EXCLUDED.smb`** — "NO SMB SHARE ON A GITHUB RUNNER. R18 already
+  requires refusing UNC for mutations, so this stays policy rather than
+  measurement; a live-share check belongs to a manual pre-beta pass."
+- **`MATRIX.EXCLUDED.refs_devdrive`** — "NO ReFS VOLUME ON A GITHUB RUNNER
+  (the image exposes NTFS C: and NTFS D:). This is the realistic gap — a Dev
+  Drive is exactly where developers keep source trees — and it is the one
+  thing CI cannot close. `FILE_RENAME_INFORMATION_EX` and
+  `FILE_DISPOSITION_INFORMATION_EX` are documented for ReFS but unverified
+  here."
+- **`MATRIX.EXCLUDED.fat32`** — "THE RUNNER'S ONLY FAT32 VOLUME IS THE
+  UNMOUNTED EFI PARTITION. POSIX semantics and class 65 are documented as
+  unsupported there; `A9.rename_failure_statuses` establishes which statuses
+  justify the class-10 fallback, which is the mechanism that would cover
+  FAT32."
+- **`MATRIX.EXCLUDED.cloud_placeholders`** — "NO ONEDRIVE ON A GITHUB RUNNER.
+  The 'broken target' cell's cloud variant (`ERROR_CLOUD_FILE_*` instead of
+  not-found) and RR10's mass-rehydration risk are documented exclusions with
+  a manual pre-beta check."
+- **`MATRIX.EXCLUDED.antivirus_distribution`** — "NOT MEASURABLE ON A RUNNER
+  (`M13.av`). Defender's realtime state on a CI image is not representative,
+  so the retryable set is chosen from documentation with a stated bound
+  (`RetryableStatuses`) and the DETERMINISTIC half — an interfering handle we
+  open ourselves — is measured instead (`P13.sharing.*`, `P13.retry.*`)."
+- **`MATRIX.EXCLUDED.readdirchanges_overflow`** — "NOT DETERMINISTICALLY
+  REPRODUCIBLE (`M15.overflow`). The `DirObserver` in this package DOES
+  detect the overflow condition (a 0-byte return) and reports it rather than
+  silently truncating, which is the shape `internal/watch` should copy in
+  Phase 3."
+- **`MATRIX.EXCLUDED.non_elevated_session`** — "GITHUB RUNNERS EXECUTE
+  ELEVATED WITH DEVELOPER MODE ON. The privilege-removal child
+  (`P14.noprivilege.*`) is a faithful simulation of the PRIVILEGE dimension
+  but not of every ACL difference; one manual confirmation on an ordinary
+  user account is still owed."
+- **`MATRIX.EXCLUDED.32bit`** — "NOT A TARGET. The `FILE_RENAME_INFORMATION`
+  layout in this prototype asserts a 64-bit `HANDLE` and returns an error
+  otherwise."
