@@ -1147,6 +1147,48 @@ default, unauthenticated, single user).
 | RR13 | **A4 (shared/redirected store path).** Explicitly out of scope. | **N/A** | **Yes**, by scope. Document that the store root must be a directory only the user can write. |
 | **RR14** | **8.3 alias defeats `Visible`'s `.annotations` reserved-name guard and every `defaultIgnores`/`.scratchpadignore` rule** for a requester-supplied path segment (§4.7(b), which named `Visible` but got no RR row of its own). Distinct from RR12: same aliasing mechanism, different consumer, and unlike RR12 this one is **not** bounded by the cycle guard. Exposure is the `.annotations` tree plus markdown and artifact **content** inside any ignore-hidden directory. | **Medium** (Medium-High under `LAN=1`) | **Added post-hoc and CLOSED, not accepted.** Raised as P6.3 F1; the 8.3 alias was measured to resolve through the store's own `RootDirectory`-relative open; fixed by `canonicalLookupName`. See P6.2 §10. |
 
+### 6.1 Measured, not hypothetical — a deliberately weakened build escaped
+
+Added after the AC5 migration (P6.2 §11.6). Every claim in §6 above is a
+prediction about what *would* happen if a guard were absent. During the AC5
+migration each new test was falsified against a build with that guard actually
+removed, on real Windows — CI run
+[32999441103](https://github.com/chaitanyaSoni96/scratchpad/actions/runs/32999441103),
+on a scratch branch since deleted. Two results are worth promoting out of the
+test file, because they convert §6 entries from reasoning into observation.
+
+**1. The annotation backend escaped the store.** With `annotationFS.openDir`
+made to follow reparse points — a raw `ntOpenAt` with neither
+`FILE_OPEN_REPARSE_POINT` nor `OBJ_DONT_REPARSE` — all four notes verbs accepted
+a junction as an `.annotations` path component, and the leak assertion fired:
+
+> `the annotation backend wrote through the junction: [- index.html.json]`
+
+The broken build **wrote a note sidecar into an external tree through a
+junction.** This is §3.13's hazard demonstrated end to end rather than argued,
+and it is the only place on this branch where a weakened build was observed
+performing an escape rather than merely failing to refuse one. Note what it
+implicates: not `Delete`, not the browse path, but the *annotation write* — the
+operation §3.13 flagged and which the spec's "Annotation atomicity" section
+does not discuss containment for at all (§9 item 4). Both link flavours
+discriminate: the pre-existing `TestAnnotationSymlinkComponentsRejected` failed
+under the same breakage.
+
+**2. A mode-shaped guard misses both junction and unknown-tag roots.** With the
+store-root check made mode-shaped instead of tag-shaped — i.e. refusing only
+`IO_REPARSE_TAG_SYMLINK` — `TestRootMustNotBeAReparsePoint` failed on *both* the
+junction and the unknown-tag flavour. The unknown-tag directory is invisible to
+`os.Lstat`'s mode bits entirely: it reports plain `ModeDir`. That is §4.2's
+table and §4.10(c)'s "compare objects, not names" argument shown directly, and
+it is **RR1's second vector** — the one a reader is most likely to under-rate,
+because the junction case is the memorable one and the unknown-tag case is the
+one no mode-based check can ever see.
+
+Neither result changes a disposition in §6. Both raise the confidence attached
+to RR1 and RR2 from *argued* to *observed*, and both are the reason the tag-
+versus-mode distinction (ADR §5.2, §7.4) should be treated as load-bearing
+rather than stylistic.
+
 ## 7. Requirements on the backend
 
 Numbered, falsifiable properties. P1.6's ADR is judged against this list; each

@@ -2542,6 +2542,22 @@ Authoritative run unless stated otherwise: **run 9,
 **97998072492** (`windows-11-arm`, arm64). Every design-deciding answer was
 identical on both architectures.
 
+> **The quotes below are the record; the run ids are provenance, not a
+> retrieval path.** This repository is public and GitHub's default workflow-log
+> retention is 90 days, so the *log lines* behind these ids — the measurement
+> output itself — expire around **2026-11-23**, while the run records persist.
+> Verified on 2026-08-27: all three cited runs still resolve and their logs
+> still fetch. After expiry a reader cannot go and re-read them, which is
+> precisely why each is quoted here in full rather than cited. **Do not
+> "tidy" these quotes down to their ids.**
+>
+> The fuller narrative for each measurement — fixtures, per-flavour tables, the
+> runs that disagreed — lives in `spike-findings.md`, which is a document and
+> survives the deletion of `internal/winspike`. This section is the subset that
+> must stand alone; that one is the subset that must stay findable. *(Its path
+> moves when this plan moves from `plans/in-progress/` to `plans/completed/`;
+> nine links in this ADR point into that directory.)*
+
 ---
 
 **1. `A5.obj_dont_reparse_inert_for_unknown_tags` — why the strict open exists.**
@@ -2576,7 +2592,12 @@ the same argument. `RequireProperty`, run 9:
 > point (R3)"
 
 with the observation recorded as *"OBJ_DONT_REPARSE, reparse point as an
-INTERMEDIATE component of `j\deep`"*.
+INTERMEDIATE component of `j\deep`"* — where the fixture is a **junction named
+`j`** containing an ordinary subdirectory `deep`, so the reparse point sits in
+the *middle* of the path being opened rather than at its end. That distinction
+is the entire measurement: `FILE_OPEN_REPARSE_POINT` is documented to affect the
+final component only, so an intermediate reparse point is the case it cannot
+cover and `OBJ_DONT_REPARSE` can.
 
 *Why it cannot be a product test:* it probes the raw unexported `ntOpenAt` with
 a **multi-component** name. `internal/store` cannot express that — `ntOpenAt`
@@ -2613,6 +2634,13 @@ guessed.
 recorded alongside: *"Go's RemoveAll is handle-based since 1.21 and removes the
 link without descending; a hand-rolled recursive delete that tests
 `FILE_ATTRIBUTE_DIRECTORY` instead WOULD descend (`P14.delete_attr_trap`)."*
+
+The cross-referenced measurement disappears with the package, so its content is
+inlined here: **`FILE_ATTRIBUTE_DIRECTORY` is SET on a junction** — the observed
+attribute word was `0x410`, i.e. `DIRECTORY|REPARSE_POINT` — which is why a walk
+that branches on the directory attribute alone descends through the link. That
+single fact is what makes `removeTreeAt`'s operation-as-classification shape
+necessary rather than stylistic, and it is restated in §4.5.
 
 *Why it cannot be a product test:* the store never calls `os.RemoveAll`. The
 measurement's value is the **contrast** — the standard library gets this right,
