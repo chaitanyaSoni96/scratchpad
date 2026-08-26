@@ -80,31 +80,20 @@ func serveMarkdownFile(w http.ResponseWriter, r *http.Request, f *os.File, title
 	}
 }
 
-// serveMarkdown renders a markdown file to a full standalone HTML page.
-// ?raw=1 serves the source instead.
-func serveMarkdown(w http.ResponseWriter, r *http.Request, path, title string) {
-	// Rendered fresh off disk on every request, so the browser must always
-	// revalidate rather than risk showing a stale render of an edited file.
-	w.Header().Set("Cache-Control", "no-cache")
-	if r.URL.Query().Get("raw") != "" {
-		http.ServeFile(w, r, path)
-		return
-	}
-	src, err := os.ReadFile(path)
-	if err != nil {
-		http.NotFound(w, r)
-		return
-	}
-	if err := writeMarkdownPage(w, title, src); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-	}
-}
-
-// writeMarkdownPage renders src (markdown source) into the same standalone
-// HTML shell serveMarkdown uses, so any caller with markdown bytes — a file
-// on disk, or a report assembled in memory (the notes endpoint) — gets a
-// browser the identical styled page every .md doc gets. It sets
-// Content-Type itself; the caller is responsible for any other headers.
+// writeMarkdownPage renders src (markdown source) into the standalone HTML
+// shell every .md doc gets, so any caller with markdown bytes — a file on
+// disk (serveMarkdownFile), or a report assembled in memory (the notes
+// endpoint) — gets an identically styled page. It sets Content-Type itself;
+// the caller is responsible for any other headers.
+//
+// P3.14 red-team L6: this file used to also carry serveMarkdown, a
+// path-based sibling of serveMarkdownFile with no production caller —
+// serveMarkdownFile (handle-based) is the only one server.go wires up.
+// Removed rather than left dead: it re-resolved a document from a string
+// (os.ReadFile(path)) rather than through a handle already validated by the
+// caller, and its own ?raw=1 branch was http.ServeFile, whose os.Open omits
+// FILE_SHARE_DELETE on Windows (P13.go_share_mode) — both exactly what this
+// design forbids, and a trap for whoever wired it up next in good faith.
 func writeMarkdownPage(w http.ResponseWriter, title string, src []byte) error {
 	var buf bytes.Buffer
 	if err := md.Convert(src, &buf); err != nil {
