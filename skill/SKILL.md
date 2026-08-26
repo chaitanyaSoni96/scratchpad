@@ -98,9 +98,10 @@ erasing and reopening are the user's, in the web UI.
   itself an artifact is refused.
 - `delete` and `unwatch` are the user's — run them only when explicitly asked,
   never to recycle a name.
-- A watch link is the only symlink boundary the site follows. Do not rely on
-  nested symlinks inside a watched tree: they are not browsed or listed, and
-  publish/delete/unwatch refuse symlinked project ancestors.
+- A watch link is the only link boundary the site follows. Do not rely on
+  nested links (symlinks, junctions) inside a watched tree: they are not
+  browsed or listed, and publish/delete/unwatch refuse linked project
+  ancestors.
 - On Windows the store is `%USERPROFILE%\.scratchpad` and the watch link is a
   reparse point: a directory symbolic link when the user has Developer Mode on,
   otherwise a junction. `watch` picks automatically and needs no elevation, so

@@ -18,7 +18,7 @@ that writes a folder there publishes an artifact.
   validation, visibility, and the review-notes sidecars (`annotations.go`;
   `report.go` renders the markdown report shared by the CLI and the HTTP
   read endpoint).
-- `internal/watch` — fsnotify over the whole root (following symlinks, with
+- `internal/watch` — fsnotify over the whole root (following watch links, with
   cycle guards), debounced 250ms with a 1s maximum latency into a fan-out hub
   the `/events` SSE handler subscribes to. Initial registration is synchronous
   and fatal on failure. Each refresh reconciles missing and stale watches;
@@ -120,16 +120,23 @@ reserved Windows device basenames (`CON`, `PRN`, `AUX`, `NUL`, `COM0`-`COM9`,
 extension doesn't hide them) and names ending in a trailing dot or space, so
 a store built on one OS stays movable to the other; lookups of what already
 exists (URLs, delete, unwatch) are looser, because a watched repo names its
-own folders, but still traversal-safe — the portable-name rule deliberately
-does not apply there, so an entry a watched repository already named `CON`
-stays reachable and deletable.
+own folders, but still traversal-safe. How much looser is a platform split
+(`names_linux.go` / `names_windows.go`): on Linux the portable-name rule
+deliberately does not apply to lookups, so an entry a watched repository
+already named `CON` stays reachable and deletable; on Windows lookups also
+refuse reserved device basenames, trailing dots or spaces, and `:` (an NTFS
+alternate-data-stream selector), because the underlying open primitives
+interpret those forms rather than merely failing to find them — such an
+entry is listed but cannot be addressed there
+([windows.md](windows.md#naming)).
 
 Filesystem containment is likewise explicit. Store-created project ancestors
-must be real directories, never symlinks. Resolution may cross one symlink
-rooted in the store because that is a deliberate `watch`, but will not follow
-another symlink inside the watched source; listing, markdown discovery, folder
-browsing, delete, and unwatch all preserve that boundary. Annotation paths
-reject symlink components under `.annotations` as well.
+must be real directories, never links (on Windows, never any reparse point).
+Resolution may cross one link rooted in the store because that is a
+deliberate `watch`, but will not follow another link inside the watched
+source; listing, markdown discovery, folder browsing, delete, and unwatch all
+preserve that boundary. Annotation paths reject link components under
+`.annotations` as well.
 
 Visibility is one decision function, `store.Visible` — every scan, the
 watcher, and every listing helper route through it, so nothing drifts out of

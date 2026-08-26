@@ -27,6 +27,19 @@ root — any `!line` overrides them.
 Precedence: built-ins first, then every `.scratchpadignore` from the root down.
 The deepest file wins, and within one file the last matching line wins.
 
+Matching is byte-exact on **Linux** and case-folded on **Windows**, following
+the filesystem underneath: NTFS treats `.SSH` and `.ssh` as one name, so on
+Windows `.SSH` matches the built-in `.ssh/` rule and `key.PEM` matches
+`*.pem` — which is what keeps case variants of credential files hidden there.
+Negations fold the same way: a `!readme` line un-hides `README` too. The same
+rule file therefore hides, and un-hides, more on Windows than on Linux.
+
+One name is reserved outside these rules: the top-level `.annotations`
+directory (notes storage — see
+[notes.md](notes.md#storage-and-visibility)) is always hidden and cannot be
+un-hidden with `!`. On Windows that reserved-name check folds case too, so
+`.Annotations` is equally reserved.
+
 Hidden means unreachable, not merely unlisted — hidden pages 404. Rules apply
 to the folder tree only; once inside an artifact, every file is an asset and is
 served as published.

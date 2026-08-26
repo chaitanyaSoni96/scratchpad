@@ -2141,3 +2141,46 @@ go test ./... -v -count=1 | grep -c '^--- SKIP'     # 0, unchanged on Linux
 Two commits: `fix(store): stop a root-level .html from disabling every
 ignore rule` (F-1) and `fix(store): implement the matchName platform pair
 for defaultIgnores` (F-2).
+
+## P4.7 — Documentation remediation (P-1a, P-2 doc half, P-7, P-8)
+
+Docs-only fix for the P4.7 review's FAIL against acceptance criterion 9. No
+Go file, script, workflow, ADR, or spec file was touched. Files edited:
+`README.md`, `docs/windows.md`, `docs/internals.md`, `docs/cli.md`,
+`docs/ignore-rules.md`, `skill/SKILL.md`.
+
+- **P-1a** — the false "a watched repository's `CON` entry stays reachable
+  and deletable" claim, stated unconditionally in `docs/windows.md` (Naming)
+  and `docs/internals.md` (Security model), now carries the platform split
+  the code actually implements: creation rule cross-platform; lookup refusal
+  (`checkLookupSegmentPlatform`: reserved device basenames, trailing
+  dot/space, `:`) Windows-only, with the entry still listed but unaddressable
+  there. `docs/cli.md`'s two "lookups validate looser" passages got the same
+  carve-out.
+- **P-2 (doc half)** — new `docs/windows.md` "Case-insensitivity" section
+  (publish collisions, URL case folding and the typed-vs-disk spelling,
+  ignore-rule folding, folded reserved names, folded notes sidecar paths);
+  `docs/ignore-rules.md` now states the `matchName` platform split
+  (byte-exact Linux, case-folded Windows, negations included) and the
+  hard-coded `.annotations` reserved name.
+  The spec's Compatibility Policy sentence "logical URL paths retain the
+  actual directory spelling returned by the filesystem" still disagrees with
+  `ResolvePath` (which echoes the URL segment); docs now describe the code.
+  Spec amendment or `ResolvePath` change remains with P6.4 — out of this
+  task's docs-only scope.
+- **P-7** — the four unconditional "symlink" claims (`README.md` CLI comment,
+  `docs/cli.md` x3, `docs/internals.md` x2, `skill/SKILL.md` boundary bullet)
+  now say "link"/"watch link", with the flavour detail delegated to
+  `docs/windows.md`.
+- **P-8** — "data-compatible in both directions" replaced with the real
+  guarantee: artifacts/notes/ignore files portable, watch links
+  machine-local (re-`watch` after a move), one-platform-only names and
+  case-folded ignore matching called out as the non-round-tripping cases.
+
+Verification: `make test` green (vet + all packages + `check-make.sh`); an ad
+hoc checker resolved every relative markdown link and `#anchor` across
+`README.md`, `docs/*.md`, `skill/SKILL.md` — zero broken.
+
+Pending: `make install-skill` was deliberately not run (writes outside the
+repo); the installed copies of `skill/SKILL.md` are stale until someone runs
+it.

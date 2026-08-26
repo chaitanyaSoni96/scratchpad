@@ -8,7 +8,7 @@ scratchpad publish -name hello -dir ./hello-folder
 scratchpad publish -project lab/graphs -name chart -dir ./chart-folder
 scratchpad publish -name hello -html page.html -css style.css -js app.js
 echo '<h1>hi</h1>' | scratchpad publish -name hello -html -
-scratchpad watch ./chart-folder     # symlink instead of copy
+scratchpad watch ./chart-folder     # link instead of copy
 scratchpad watch ./out -name dashboard -project lab
 scratchpad watches                  # every watch link and where it points
 scratchpad unwatch lab/graphs/chart # drop the link, keep the folder
@@ -57,14 +57,18 @@ folder. Also rejected: a reserved Windows device basename — `CON`, `PRN`,
 `AUX`, `NUL`, `COM0`-`COM9`, `LPT0`-`LPT9`, case-insensitive and regardless of
 extension (`nul.html`, `Com1.tar.gz`) — and a name ending in a trailing dot
 or space. This keeps a store created on Linux movable to a Windows machine
-(see [windows.md](windows.md));
-it applies only to names being created (publish, watch), never to looking up
-or deleting an entry a watched repository already named itself.
+(see [windows.md](windows.md)).
+It applies to names being *created* (publish, watch) on every platform. On
+Linux it never applies to looking up or deleting an entry a watched
+repository already named itself; on Windows lookups refuse these forms too —
+see below.
 
 ## watch / unwatch
 
-`watch` symlinks an external folder in — a single artifact or a whole tree of
-them — so every saved edit shows up live. The source stays where it is and
+`watch` links an external folder in — a single artifact or a whole tree of
+them — so every saved edit shows up live. (On Linux the link is a symlink; on
+Windows a directory symbolic link or a junction — see
+[windows.md](windows.md#watching-a-folder).) The source stays where it is and
 stays yours:
 
 - A watched folder with no top-level `.html` is a project tree; the first
@@ -79,9 +83,9 @@ stays yours:
   same folder under the same name is a no-op, so the command is safe to
   repeat. Any *other* target — or a real directory of that name — is refused.
 - Watching a folder already inside the scratchpad is refused.
-- A watch link is the only permitted symlink boundary. Browsing and listing
-  may cross that link, but do not follow further symlinks inside its source;
-  publish, delete, and unwatch never operate through a symlinked project path.
+- A watch link is the only permitted link boundary. Browsing and listing
+  may cross that link, but do not follow further links inside its source;
+  publish, delete, and unwatch never operate through a linked project path.
 - `unwatch` (or the button on any watched card) removes only the link. Files
   inside a watched folder can't be deleted through scratchpad at all, and
   under `make web` the container mounts `$HOME` read-only, so the web process
@@ -91,6 +95,10 @@ stays yours:
 
 Lookups of what already exists — URLs, delete, unwatch — validate looser than
 publish (a watched repo names its own folders) but still reject traversal.
+On Windows they additionally refuse names the platform cannot address
+safely — reserved device basenames, trailing dots or spaces, and `:` (an
+NTFS stream selector) — so an entry a watched repository named `CON` is
+reachable on Linux but not on Windows (see [windows.md](windows.md#naming)).
 
 ## notes
 

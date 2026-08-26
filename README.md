@@ -74,7 +74,7 @@ there is no MCP server, on purpose.
 ```bash
 echo '<h1>hi</h1>' | scratchpad publish -name hello -html -
 scratchpad publish -project lab/graphs -name chart -dir ./chart-folder
-scratchpad watch ./chart-folder     # symlink instead of copy: edits go live as you save
+scratchpad watch ./chart-folder     # link instead of copy: edits go live as you save
 scratchpad watches                  # every watch link and where it points
 scratchpad unwatch lab/graphs/chart # drop the link, keep the folder
 scratchpad list [-json]

@@ -86,7 +86,18 @@ user-PATH entry and the installed skill copies.
 .\scripts\install.ps1 uninstall
 ```
 
-Existing stores are data-compatible in both directions. There is no migration.
+Artifacts, notes and `.scratchpadignore` files are portable in both
+directions, with no migration step. Two things do not round-trip:
+
+- **Watch links are machine-local.** A link stores an absolute path on the
+  machine that created it, so after moving a store, re-create each one with
+  `scratchpad watch`. A link whose target no longer resolves is silently
+  dropped from listings, on both platforms.
+- **A name only one platform accepts.** A folder Linux allowed but Windows
+  reserves — `CON`, a trailing-dot name, two names differing only in case —
+  does not behave the same after the move: see [Naming](#naming) and
+  [Case-insensitivity](#case-insensitivity). Ignore rules also *match* more
+  on Windows than on Linux, because matching folds case there.
 
 ## Watching a folder
 
@@ -142,8 +153,43 @@ This rule applies **on every platform**, including Linux, so a store created on
 one machine stays movable to the other. It is a small narrowing of what Linux
 used to accept.
 
-Names the store merely **looks up** stay looser, so a watched repository that
-already contains a folder called `CON` remains reachable and removable.
+Names the store merely **looks up** — URL segments, `delete`, `unwatch` and
+notes document paths — stay looser than the create rule, because a watched
+repository names its own folders. How much looser is a platform split:
+
+- **On Linux** the portable-name rule does not apply to lookups at all, so a
+  watched repository that already contains a folder called `CON` remains
+  reachable and removable.
+- **On Windows** lookups additionally refuse the forms Win32 cannot address
+  safely: a reserved device basename, a trailing dot or space (Windows strips
+  them on resolution, so two spellings would collide), and any segment
+  containing `:` (NTFS reads it as an alternate-data-stream selector). A
+  watched repository's own `CON`-named entry therefore still appears in
+  listings on Windows but cannot be opened or deleted through scratchpad.
+
+## Case-insensitivity
+
+NTFS folds case, and scratchpad follows the filesystem rather than fighting
+it. Compared to Linux:
+
+- **Names collide across case.** `publish -name Report` then
+  `publish -name report` fails on Windows (both succeed on Linux). The error
+  quotes the spelling you typed, even when the folder on disk spells it
+  differently.
+- **URLs resolve across case.** `/a/REPORT/` finds an artifact whose folder
+  is `report`; on Linux it 404s. The page for a hand-typed case variant
+  echoes the spelling from the URL — links scratchpad generates always carry
+  the on-disk spelling.
+- **Ignore rules fold.** `.SSH` matches the built-in `.ssh/` rule and
+  `key.PEM` matches `*.pem`, so case variants of credential files stay
+  hidden. Negations fold too — `!readme` un-hides `README`. See
+  [ignore-rules.md](ignore-rules.md).
+- **Reserved names fold.** A top-level directory whose name folds to
+  `.annotations` (notes storage) or `.scratchpad-lock` is treated as reserved
+  in any case spelling.
+- **Notes fold with the document path.** Two case-variant document paths that
+  would keep separate note sets on Linux share one note set on Windows,
+  because the sidecar path folds the same way the document does.
 
 ## Unsupported filesystems
 
