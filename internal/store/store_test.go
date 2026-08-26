@@ -533,3 +533,228 @@ func TestIsLinkTruePositiveThroughResolvePath(t *testing.T) {
 		t.Errorf("ResolvePath: artifact nested in watched tree = IsLink=%v Linked=%v, want false, true", rp.IsLink, rp.Linked)
 	}
 }
+
+// TestBrowseRefusesWatchAncestorSymlinkSwap is the regression test for
+// A11.ancestor_swapped (spike-findings.md §10.1, P1.7 red-team finding F2):
+// an ancestor of a watch target — not the target itself — replaced with a
+// symlink into an attacker-controlled tree after the watch was created.
+// This is not a race: the store never re-validates a watch target's
+// ancestors after Watch runs, so the swap is simply the state on disk at
+// the next browse, exactly as a `git checkout` inside a watched repository
+// would produce it. Before the fix, openBrowsableDir re-opened the
+// readlink(2) result as a whole path string with O_NOFOLLOW, which only
+// protects the FINAL component — the "subdir" ancestor here was resolved by
+// the kernel like any other path component, and the attacker's tree was
+// reached and served.
+func TestBrowseRefusesWatchAncestorSymlinkSwap(t *testing.T) {
+	testutil.RequireSymlinks(t)
+	testRoot(t)
+
+	base := t.TempDir()
+	subdir := filepath.Join(base, "subdir")
+	if err := os.Mkdir(subdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(subdir, "target")
+	if err := os.Mkdir(target, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(target, "index.html"), []byte("<h1>legit</h1>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := Watch("", "linked", target); err != nil {
+		t.Fatal(err)
+	}
+
+	// Sanity: the legitimate watch browses fine before the ancestor is
+	// touched.
+	if f, ok := OpenDocument([]string{"linked", "index.html"}); !ok {
+		t.Fatal("sanity: legitimate watch did not browse before the swap")
+	} else {
+		f.Close()
+	}
+
+	// The attack: replace "subdir" — an ANCESTOR of the watch target, not
+	// the target itself — with a symlink into an attacker tree that mirrors
+	// enough of the path to reach a planted marker.
+	attacker := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(attacker, "target"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(attacker, "target", "index.html"), []byte("<h1>attacker</h1>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(attacker, "target", "LOOT.txt"), []byte("classified"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(subdir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(attacker, subdir); err != nil {
+		t.Fatal(err)
+	}
+
+	if a, file, ok := ResolvePath([]string{"linked", "LOOT.txt"}); ok {
+		t.Fatalf("ResolvePath reached the attacker's tree through the swapped ancestor: artifact=%+v file=%q", a, file)
+	}
+	if f, safe := OpenDocument([]string{"linked", "LOOT.txt"}); safe {
+		f.Close()
+		t.Fatal("OpenDocument served the attacker's marker file through the swapped ancestor")
+	}
+	if a, file, ok := ResolvePath([]string{"linked", "index.html"}); ok {
+		t.Fatalf("ResolvePath reached the attacker's index.html through the swapped ancestor: artifact=%+v file=%q", a, file)
+	}
+	if f, safe := OpenDocument([]string{"linked", "index.html"}); safe {
+		f.Close()
+		t.Fatal("OpenDocument served the attacker's index.html through the swapped ancestor")
+	}
+
+	// VisiblePath is a listing/ignore-rule filter (internal/store/ignore.go),
+	// not a content boundary: its walk (visibleSegments) uses plain
+	// os.Stat, which the kernel resolves exactly like any other program
+	// would — including through the swapped "subdir" symlink — so it still
+	// reports "linked/LOOT.txt" as visible. That is expected and harmless:
+	// nothing downstream treats VisiblePath's answer as permission to read
+	// content — the actual boundary is the openBrowsableDir walk just
+	// proved above (ResolvePath/OpenDocument), and end to end over HTTP in
+	// internal/web's TestArtifactHandlerRefusesWatchAncestorSymlinkSwap.
+	if !VisiblePath("linked/LOOT.txt") {
+		t.Error("VisiblePath unexpectedly refused a path it has no mechanism to detect the swap on; if this now fails, visibleSegments's own walk changed — re-examine, don't just flip this assertion")
+	}
+}
+
+// TestWatchResolvesSymlinkedAncestorAtCreation is the "legitimate symlinked
+// ancestor" side of the A11.ancestor_swapped trade-off (see Watch,
+// store.go): a caller who reaches their target through a symlinked
+// ancestor — a convenience symlink, or a system where e.g. /home itself is
+// a symlink — must not have the watch refused just because a symlink
+// happens to sit above the target. Watch resolves the whole path with
+// filepath.EvalSymlinks once, at creation time, and stores that resolved
+// path as the actual link target, so every later browse walks a path with
+// no symlinks left in it at all.
+//
+// The cost of resolving instead of refusing: once resolved, the watch is
+// pinned to the real directory found at creation time. If the convenience
+// symlink is later repointed elsewhere, the existing watch keeps serving
+// the OLD real directory rather than following the move — demonstrated
+// below. Re-running `scratchpad watch` picks up the new target.
+func TestWatchResolvesSymlinkedAncestorAtCreation(t *testing.T) {
+	testutil.RequireSymlinks(t)
+	testRoot(t)
+
+	realA := t.TempDir()
+	projA := filepath.Join(realA, "proj")
+	if err := os.Mkdir(projA, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(projA, "index.html"), []byte("<h1>A</h1>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	convDir := t.TempDir()
+	conv := filepath.Join(convDir, "conv") // symlinked ANCESTOR of the watch target
+	if err := os.Symlink(realA, conv); err != nil {
+		t.Fatal(err)
+	}
+	watchTarget := filepath.Join(conv, "proj") // reached only through the symlinked ancestor
+
+	if _, err := Watch("", "viaconv", watchTarget); err != nil {
+		t.Fatalf("Watch through a symlinked ancestor should succeed (resolved, not refused): %v", err)
+	}
+
+	links, err := Watches()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(links) != 1 || links[0].Target != projA {
+		t.Fatalf("Watches() = %+v, want one link resolved to %q", links, projA)
+	}
+
+	if f, safe := OpenDocument([]string{"viaconv", "index.html"}); !safe {
+		t.Fatal("OpenDocument did not serve through the resolved, symlink-free watch")
+	} else {
+		f.Close()
+	}
+
+	// Repoint the convenience symlink at a different real directory. The
+	// existing watch must keep pointing at the ORIGINAL resolved target,
+	// not silently follow the move — re-resolving on every browse would
+	// reopen exactly the ancestor-swap hole this fix closes.
+	realB := t.TempDir()
+	projB := filepath.Join(realB, "proj")
+	if err := os.Mkdir(projB, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(projB, "index.html"), []byte("<h1>B</h1>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(conv); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(realB, conv); err != nil {
+		t.Fatal(err)
+	}
+
+	links, err = Watches()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(links) != 1 || links[0].Target != projA {
+		t.Fatalf("after repointing the convenience symlink, Watches() = %+v, want the watch still pinned to %q (not %q)", links, projA, projB)
+	}
+	if f, safe := OpenDocument([]string{"viaconv", "index.html"}); !safe {
+		t.Fatal("OpenDocument stopped serving after the convenience symlink was repointed; want it to keep serving the original resolved target")
+	} else {
+		f.Close()
+	}
+}
+
+// TestOpenBrowsableDirStillRefusesNestedSymlinkAfterFix reconfirms, after
+// the openBrowsableDir rewrite, that "exactly one symlink boundary" still
+// holds: a second symlink planted INSIDE the watched source (not the watch
+// link itself) is still refused. TestWatch and
+// TestListDoesNotFollowSymlinksInsideWatch already cover this at other
+// layers; this one calls ResolvePath/OpenDocument directly so a regression
+// in the walk introduced by this fix would show up here first.
+func TestOpenBrowsableDirStillRefusesNestedSymlinkAfterFix(t *testing.T) {
+	testutil.RequireSymlinks(t)
+	testRoot(t)
+
+	source := t.TempDir()
+	if err := os.WriteFile(filepath.Join(source, "index.html"), []byte("<p>src</p>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "secret.txt"), []byte("nope"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(source, "nested")); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := Watch("", "watched", source); err != nil {
+		t.Fatal(err)
+	}
+
+	// The watch boundary itself still works.
+	if f, safe := OpenDocument([]string{"watched", "index.html"}); !safe {
+		t.Fatal("legitimate file through the single watch boundary should still serve")
+	} else {
+		f.Close()
+	}
+	// ResolvePath deliberately does NOT validate this: "watched" alone
+	// already satisfies the shallowest-html-directory rule, so ResolvePath
+	// returns as soon as it finds that boundary and reports everything
+	// past it as an unvalidated asset-path string (see ResolvePath's own
+	// doc comment) — it never walks "nested" itself. OpenDocument is the
+	// one that actually opens the asset path, via openBrowsableDir end to
+	// end, and is where the nested symlink must be refused.
+	if a, file, ok := ResolvePath([]string{"watched", "nested", "secret.txt"}); !ok || file != "nested/secret.txt" {
+		t.Fatalf("ResolvePath(watched/nested/secret.txt) = %+v, %q, %v; want the watched artifact with that file suffix (validation happens in OpenDocument, not here)", a, file, ok)
+	}
+	if f, safe := OpenDocument([]string{"watched", "nested", "secret.txt"}); safe {
+		f.Close()
+		t.Fatal("OpenDocument followed a nested symlink inside the watched source")
+	}
+}

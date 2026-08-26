@@ -79,6 +79,19 @@ func (r *rootedFS) openRealDir(segs []string, create, rejectArtifacts bool) (int
 	return -1, errWindowsUnimplemented
 }
 
+// openBrowsableDir's Linux implementation (storefs_linux.go) crosses the
+// single permitted watch-link boundary by walking the link target's path
+// components handle-by-handle from the filesystem root — openDirAt-style,
+// refusing a reparse point at any component, not just the final one — after
+// A11.ancestor_swapped (spike-findings.md §10.1) showed that re-opening the
+// readlink(2) result as a whole path string only protects the final
+// component from being a symlink, not any ancestor of it. The Windows
+// backend has the handle-relative primitive to do the same thing: the
+// strict open (`FILE_OPEN_REPARSE_POINT` + a `FILE_ATTRIBUTE_TAG_INFO`
+// check on the resulting handle, per P1.7 red-team finding F1 and
+// spike-findings.md §10.3) generalizes to every component of the resolved
+// target, not just the final one, exactly the way openDirAt already does on
+// Linux. That is Phase 3 scope; nothing here implements it.
 func (r *rootedFS) openBrowsableDir(segs []string) (int, error) {
 	return -1, errWindowsUnimplemented
 }

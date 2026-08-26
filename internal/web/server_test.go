@@ -91,3 +91,71 @@ func TestListFragmentAppliesFolderIgnoreRules(t *testing.T) {
 		t.Fatalf("folder ignore rules not applied: %s", body)
 	}
 }
+
+// TestArtifactHandlerRefusesWatchAncestorSymlinkSwap is the HTTP-layer half
+// of the A11.ancestor_swapped regression (internal/store's
+// TestBrowseRefusesWatchAncestorSymlinkSwap covers the store API directly):
+// the actual exposure named by the finding is read disclosure over this
+// unauthenticated endpoint, so the proof that matters is that a GET for the
+// attacker's planted marker — and even the attacker's own index.html — 404s
+// once an ancestor of a watch target has been swapped for a symlink into an
+// attacker tree, rather than being served.
+func TestArtifactHandlerRefusesWatchAncestorSymlinkSwap(t *testing.T) {
+	testutil.RequireSymlinks(t)
+	testRoot(t)
+
+	base := t.TempDir()
+	subdir := filepath.Join(base, "subdir")
+	if err := os.Mkdir(subdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(subdir, "target")
+	if err := os.Mkdir(target, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(target, "index.html"), []byte("<h1>legit</h1>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Watch("", "linked", target); err != nil {
+		t.Fatal(err)
+	}
+
+	mux := notesMux(t)
+
+	// Sanity: the legitimate artifact serves before the ancestor is swapped.
+	rec := doReq(t, mux, http.MethodGet, "/a/linked/index.html", nil, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("sanity GET /a/linked/index.html = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+
+	attacker := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(attacker, "target"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(attacker, "target", "index.html"), []byte("<h1>attacker</h1>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	const loot = "classified-over-http"
+	if err := os.WriteFile(filepath.Join(attacker, "target", "LOOT.txt"), []byte(loot), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(subdir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(attacker, subdir); err != nil {
+		t.Fatal(err)
+	}
+
+	rec = doReq(t, mux, http.MethodGet, "/a/linked/LOOT.txt", nil, nil)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("GET /a/linked/LOOT.txt after ancestor symlink swap = %d, want 404 (marker must not be served); body: %s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), loot) {
+		t.Fatalf("response leaked the marker content: %s", rec.Body.String())
+	}
+
+	rec = doReq(t, mux, http.MethodGet, "/a/linked/index.html", nil, nil)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("GET /a/linked/index.html after ancestor symlink swap = %d, want 404 (attacker's own index.html must not be served either); body: %s", rec.Code, rec.Body.String())
+	}
+}

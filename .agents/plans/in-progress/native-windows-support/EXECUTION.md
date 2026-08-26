@@ -356,3 +356,36 @@ Also open: F2 (domain policy inherited on the platform side — `dirHasHTMLFD`
 encodes the artifact definition, `openRealDir` owns two user-facing error
 strings, `openBrowsableDir` implements invariant 5) → P3.2/P3.6. F5, F7, F8, F9
 are recorded in the review.
+
+## Security fix — A11.ancestor_swapped closed on Linux (out-of-band)
+
+`internal/store/storefs_linux.go`'s `openBrowsableDir` re-opened the
+readlink(2) result of the store's one permitted watch-link boundary as a
+whole path string with `O_NOFOLLOW`. That flag protects only the final path
+component; every intermediate component was still resolved by the kernel
+following symlinks normally. `A11.ancestor_swapped` (spike-findings.md
+§10.1; P1.7 red-team finding F2) measured this on the Windows spike and
+confirmed it is platform-independent and already live in the Linux code
+that ships today — not a Phase 3 concern. Fixed out of Phase 1/2/3 sequence
+because it is a real defect in shipping code, reachable by watched-source
+content (a `git checkout` swapping a tracked directory for a symlink), with
+payoff being read disclosure over the unauthenticated HTTP endpoint.
+
+Fix: `openAbsoluteDirNoFollow` walks the link target's path components
+handle-by-handle from the filesystem root, refusing a symlink (or anything
+but a plain directory) at ANY component — the same structural fix both
+documents named. `Watch` now resolves the target with
+`filepath.EvalSymlinks` at creation time and stores that resolved,
+symlink-free path as the actual link target: a legitimately symlinked
+ancestor (a moved `/home`, a convenience symlink) is handled once, there;
+anything the browse-time walk refuses is therefore a path that changed
+*since* the watch was created, which is exactly the attack this closes. The
+cost: a convenience symlink repointed after `Watch` is not followed by the
+existing watch (it keeps serving the original resolved directory) — re-run
+`scratchpad watch` to pick it up.
+
+The Windows backend (Phase 3 stub) has the handle-relative primitive to do
+the same thing (the strict `FILE_OPEN_REPARSE_POINT` open from P1.3/P1.5,
+per spike-findings.md §10.3), applied to every component of the resolved
+target rather than just the final one — noted in `storefs_windows.go`'s
+`openBrowsableDir` stub; not implemented here.

@@ -584,11 +584,32 @@ func Watch(project, name, target string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if real, err := filepath.EvalSymlinks(abs); err == nil {
-		if realRoot, err := filepath.EvalSymlinks(root); err == nil {
-			if real == realRoot || strings.HasPrefix(real, realRoot+string(filepath.Separator)) {
-				return "", fmt.Errorf("%s is already inside the scratchpad", abs)
-			}
+	// real is abs with every symlink component resolved away — including a
+	// symlinked ANCESTOR of abs, not just abs itself if it happens to be a
+	// link. This is the creation-time half of the ancestor-symlink
+	// trade-off (see openAbsoluteDirNoFollow in storefs_linux.go for the
+	// browse-time half): a legitimately symlinked ancestor (e.g. /home
+	// itself is a symlink on some systems, or the caller reached the
+	// target through a convenience symlink) is resolved ONCE, here, so
+	// Watch keeps working for that case exactly as it always did — the
+	// watch link stored on disk points at the real, symlink-free path, not
+	// the possibly-symlinked one the caller typed. The cost: if an
+	// ancestor symlink used to reach the target is later repointed
+	// elsewhere, the existing watch keeps serving the directory it
+	// resolved to at watch time, not the new one — re-run `scratchpad
+	// watch` to pick up the move. What Watch refuses to do is silently
+	// paper over an ancestor that CANNOT be resolved right now (a symlink
+	// loop, a dangling link, a permission error partway down): that fails
+	// the call immediately, with the OS's own reason attached, rather than
+	// leaving the caller to discover a broken watch only when a browse
+	// later 404s.
+	real, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return "", fmt.Errorf("resolving %s: %w", abs, err)
+	}
+	if realRoot, err := filepath.EvalSymlinks(root); err == nil {
+		if real == realRoot || strings.HasPrefix(real, realRoot+string(filepath.Separator)) {
+			return "", fmt.Errorf("%s is already inside the scratchpad", abs)
 		}
 	}
 	link, err := artifactDir(root, project, name)
@@ -611,17 +632,19 @@ func Watch(project, name, target string) (string, error) {
 	// one exception is a link that already points at this exact folder —
 	// that is the state the caller asked for, so re-watching is a no-op and
 	// an agent can run watch unconditionally instead of probing `watches`
-	// first.
-	if err := symlinkAt(parent, abs, name); err != nil {
+	// first. The link is created pointing at real (the resolved path), not
+	// abs, so every subsequent browse walks a target with no symlinks left
+	// in its ancestry at all — see openAbsoluteDirNoFollow.
+	if err := symlinkAt(parent, real, name); err != nil {
 		if !errors.Is(err, errExists) {
 			return "", err
 		}
-		target, readErr := readlinkAt(parent, name)
-		if readErr != nil || target != abs {
+		linkTarget, readErr := readlinkAt(parent, name)
+		if readErr != nil || linkTarget != real {
 			return "", fmt.Errorf("%q already exists — delete it in the web UI or pick a different name", strings.TrimPrefix(link[len(root):], string(filepath.Separator)))
 		}
 	}
-	if !hasHTML(abs) {
+	if !hasHTML(real) {
 		fmt.Fprintln(os.Stderr, "note: no top-level .html in the watched folder — it will be treated as a project tree; only subfolders containing .html will show up")
 	}
 	return link, nil
