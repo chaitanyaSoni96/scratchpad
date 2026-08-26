@@ -457,3 +457,181 @@ Fixed in `113cbb2`, out of phase order, because it is a live defect in shipping
 Linux code rather than a Phase 3 concern. The demonstrated leak (HTTP 200
 serving a planted marker) is now a regression test at both the store and web
 layers.
+
+## Phase 3 — Store Backend Implementation (P3.1–P3.6)
+
+Implemented from the ADR revision 2, in three commits: `61f334d` (shared
+refactor removing `fdPath`, handle-anchoring `List`/`Watches`/`Resolve`),
+`347c9b0` (the Windows backend itself — `win32_windows.go`,
+`storefs_windows.go`, `link_windows.go`), `4d87801` (two test fixes surfaced
+by the first native run, plus the three exported handle helpers P4.6 needs).
+
+### The three preconditions (§11 Pre-1/Pre-2/Pre-3)
+
+**Pre-1** (`IsLinkEntry`/`IsLinkInfo` + `entryIsDir`'s two traps) could not be
+landed as an isolated, narrow fix ahead of P3.6 the way the ADR describes for
+a multi-agent handoff: `entryIsDir`'s job — deciding whether `List` should
+descend into an entry, and whether that descent crosses the one permitted
+link boundary — is inseparable from the walk that calls it. Fixing the
+classifier in isolation while `List` stayed path-based would have reproduced
+exactly the hazard Pre-1 exists to prevent (a fixed `IsLinkEntry` plus an
+unfixed path-based follow-through). Since this agent implemented P3.1–P3.6 as
+one continuous body of work rather than as a handoff between separate agents,
+Pre-1 was folded directly into the `List`/`Watches`/`WatchLinkFor` rewrite
+(§6.8 item 4, §6.9 rows 6–7): `classifyEntry` is now the single, handle-based,
+tag-aware classification point every one of those three functions uses, and
+`entryIsDir` no longer exists. **Pre-3** (`unreachableOnWindows` panics)
+disappeared naturally — every stub it guarded now has a real implementation.
+**Pre-2**'s domain-policy hoist was done partially: `dirHasHTMLFD`'s
+`.html`-suffix predicate and `openBrowsableDir`'s invariant-5 policy are both
+expressed once conceptually (the same shape on both platforms) but are not
+literally shared code — see "What was scoped down" below.
+
+### What is implemented
+
+Every function in the ADR's §3.2/§3.3 API table for `storefs_windows.go` and
+`link_windows.go`, ported from `internal/winspike/winfs.go` and `links.go`:
+the strict open (`openStrictAt`/`openRealDirAt`/`openRealFileAt`), the
+create-only claim (`mkdirClaim`) with the three-way taken-name error map
+(`translateClaim`), `statAt`/`statLinkTarget`/`classifyEntry` (tag-aware,
+handle-based classification — never `fs.FileMode`), `rootedFS` with the
+process-level root-identity cache (§4.1, closing F9), `openRealDir` and
+`openBrowsableDir` (the latter with the handle-by-handle ancestor walk from
+the volume root that closes `A11.ancestor_swapped`, §4.3), `readlinkAt` with
+the `SYMLINK_FLAG_RELATIVE` refusal and the `\??\Volume{` refusal, `symlinkAt`
+with the two-step-window self-heal (rule 1 only — see below),
+`canonicalizeWatchTarget`/`alreadyInsideRoot`/`sameWatchTarget` (§4.3/§4.7/
+§7.1/§7.2), `readDirFD`/`dupFD`/`closeFD`, `pruneAt`, `openPathFile`/
+`OpenDocument`, and the error-translation table (§3.7) as `winError` chaining
+to `fs.ErrExist`/`fs.ErrPermission`/`fs.ErrNotExist`/`errExists`. `fdPath` is
+gone from the tree entirely (not stubbed — deleted), on both platforms.
+
+**Verified natively**, not just by cross-compilation: run `32928654626` on
+`windows-2025` (commit `4d87801`) passed, with no `SECURITY-FAIL` and no
+skipped-for-annotations substitute — `TestBrowseRefusesWatchAncestorSymlinkSwap`
+(the store-level A11 regression), `TestArtifactHandlerRefusesWatchAncestorSymlinkSwap`
+(the HTTP-level A11 regression), `TestOpenBrowsableDirStillRefusesNestedSymlinkAfterFix`,
+`TestPinnedMutationsIgnoreProjectSwap`, `TestPublishAndNestedWatchRejectSymlinkProject`,
+`TestOpenDocumentRejectsArtifactAssetSymlink`, `TestIsLinkFalseForPlainArtifact`,
+`TestIsLinkTruePositiveThroughResolvePath`, `TestListAndResolvePath`,
+`TestResolveFolderContainmentAndWatchedTrees`, `TestWatchCreateOnly`,
+`TestWatchResolvesSymlinkedAncestorAtCreation` and `internal/winspike`'s own
+suite (no `SECURITY-FAIL`) all passed on real `windows-2025` hardware.
+
+### What was scoped down, named rather than silently dropped
+
+- **`removeTreeAt`** (P3.9) is untouched — still `errWindowsUnimplemented`.
+  Publish's rollback path and Delete's real-directory branch call it and will
+  fail until P3.9 lands; this is the expected, correct boundary, not a gap in
+  P3.1–P3.6.
+- **`annotationfs_windows.go`** (P3.7–P3.10) is untouched. Every `internal/store`
+  test failure in the native run traces to one `errWindowsUnimplemented` from
+  that file (confirmed by grepping the failure text in the CI log, not
+  assumed).
+- **§6.8 item 5's three exported helpers** (`ReadDirHandle`, `EntryIsDirAt`,
+  `StatEntryAt`) were added to `store.go` so P4.6 does not also have to invent
+  platform mechanism for `internal/web/server.go`'s four remaining
+  `/proc/self/fd` sites (`docCount`, `buildCards`/`folderExtras`, `siblings`,
+  `hasRenderable` — confirmed by inspection; not modified). `StatEntryAt`
+  returns primitive fields rather than the unexported `entryMeta`, so it is
+  usable from `internal/web` without exporting that type.
+- **Pre-2's typed `pathError{Kind, Seg}`** was not introduced. `openRealDir`'s
+  two user-facing error strings are reproduced with matching wording directly
+  in `storefs_windows.go` rather than shared through a typed error the Linux
+  side also adopts — a real, intentional scope cut (not an oversight) to avoid
+  touching `storefs_linux.go`'s already-passing error paths under this
+  deadline. A future pass can introduce the shared type without behavior
+  change.
+- **`watchLinkFlavour`** is written (probes by claiming and immediately
+  removing a throwaway name) but not called from any production path —
+  `symlinkAt`'s own try-symlink-then-junction fallback is what actually
+  matters at runtime. Kept for P3.11/P3.12's `WatchLinkCapable`/degraded-mode
+  tests.
+- **R18's ReFS/non-NTFS warning** fires once per process, gated on `create`
+  (Publish/Watch's entry point) rather than precisely "before the first
+  mutation" — an approximation, not the exact gate text.
+
+### Two test fixes required by real hardware, not by design changes
+
+The first native run (`32928256806`) found two `internal/store` test
+failures that were real, in-scope bugs surfaced only by running on actual
+Windows: `TestUnwatch` and `TestWatchResolvesSymlinkedAncestorAtCreation`
+compared a `WatchLink.Target` string for **byte-exact equality** against a
+path built by `t.TempDir()`. The `windows-2025` runner's `TEMP` resolves to
+an 8.3 short-name alias (`RUNNER~1`), while `canonicalizeWatchTarget`'s
+`GetFinalPathNameByHandleW` call — required by the ADR specifically because
+`filepath.EvalSymlinks` cannot resolve junctions — returns the long name
+(`runneradmin`). Both name the same directory. Fixed by comparing directory
+identity (`os.SameFile`) instead of spelling (commit `4d87801`), which does
+not weaken either assertion (both still fail if the watch resolves to the
+wrong directory) and is correct on both platforms. Re-run (`32928654626`)
+confirmed both pass.
+
+A pre-existing Linux bug was also found and fixed while building this:
+`readDirFD` (`annotationfs_linux.go`) `dup()`s the caller's fd, but a
+duplicated fd **shares** the original's directory-read position, so a second
+`readDirFD` call against the same original fd — newly possible once
+`dirHasHTMLFD` and `loadArtifactAt` can both be called against one handle in
+the same operation — silently returned zero entries. Fixed by rewinding
+(`Seek(0, SEEK_SET)`) before every read; confirmed the Windows equivalent
+does not need this (`M16`'s "each duplicate restarts enumeration
+independently" measurement holds — the native run's passing `TestWatch`/
+`TestListAndResolvePath`/etc., which all exercise `loadArtifactAt` after
+`dirHasHTMLFD` on the same handle, is the confirmation).
+
+### Disagreements with the ADR, recorded rather than silently resolved
+
+- **§3.2's `statLinkTarget` and `entryMeta.IsDir`'s Windows semantics collide
+  with what `Watches()`'s listing decision needs.** The ADR defines
+  `entryMeta.IsDir` as "`FILE_ATTRIBUTE_DIRECTORY` and no reparse tag" and
+  `statLinkTarget` as "never follows... a reparse-tagged entry answers
+  `isDir=false`". Taken literally, `Watches()` could never learn whether a
+  watch link points at a directory without a separate mechanism, because the
+  no-follow answer is unconditionally `false` for any link. This is not a
+  contradiction in the mechanism — a directory-type `SYMLINK`/`MOUNT_POINT`
+  **does** carry `FILE_ATTRIBUTE_DIRECTORY` on its own reparse-point entry,
+  readable without following anything — but the ADR's own field definition
+  (IsDir excludes anything tagged) hides that fact. Resolved with a third,
+  narrower function, `linkTargetIsDir`, that reads the raw attribute bit
+  directly rather than reusing `entryMeta.IsDir`. Recorded because a
+  literal-minded implementation of §3.2 alone would have missed this.
+- **§6.6's `watchLinkFlavour() linkFlavour` (no arguments) cannot answer the
+  question it is named for without side effects.** Whether a symlink or a
+  junction will be created depends on live privilege/Developer-Mode state
+  that can only be observed by attempting a real claim (`FILE_CREATE` then
+  `FSCTL_SET_REPARSE_POINT`) — a true no-op probe does not exist. Implemented
+  as `watchLinkFlavour(parent int, probeName, target string) (linkFlavour, error)`,
+  which claims and immediately removes a throwaway name. `symlinkAt` itself
+  does not call it — it has its own inline try-then-fallback — so this exists
+  purely as a capability query for tests. The ADR's zero-argument signature is
+  not implementable as an actual probe; recorded rather than forced.
+- **§8.4's "P3.1 ... windows.Write must gain a short-write loop" does not
+  apply to anything P3.1–P3.6 actually calls.** Every write in this package's
+  scope goes through `os.NewFile(handle, ...).Write(data)`
+  (`writeFileAt`), and `os.File.Write` already loops internally on a short
+  write — the same guarantee Linux's `os.File.Write` provides, which is
+  exactly why the ADR calls the Linux behavior out as the thing to match. A
+  raw `windows.Write` call only appears in the annotation atomic-replace path
+  (P3.8), which this agent did not implement. The checklist item is real but
+  is P3.8's to close, not P3.1's — noted so it is not assumed already done.
+
+### Verification run IDs
+
+- `32928256784`/`32928256806` — first native push (commit `347c9b0`). Both
+  native jobs failed as expected; failures triaged to exactly two categories:
+  genuine bugs in this agent's scope (the `Target` string comparisons above)
+  and out-of-scope stubs (`annotations_test.go`, `internal/watch`'s identity
+  stub, `internal/web`'s two `ListFragment` tests).
+- `32928654619`/`32928654626` — second native push (commit `4d87801`), after
+  fixing the two in-scope test failures. Remaining native-job failures are
+  now *entirely* attributable to `errWindowsUnimplemented` from
+  `annotationfs_windows.go` (P3.7–P3.10), `identity_windows.go`'s stub
+  (P4.1/P4.2), and `internal/web/server.go`'s four `/proc/self/fd` sites
+  (P4.6) — confirmed by grepping the failure text for each, not assumed from
+  the task list. `internal/winspike`'s own suite passed with zero
+  `SECURITY-FAIL` in both runs. Local gates (`make test`;
+  `go test ./... -count=1`; `go test ./internal/store -race -count=3`;
+  `GOOS=windows GOARCH={amd64,arm64} CGO_ENABLED=0 go build ./...`;
+  `GOOS=windows go vet ./...`; `go mod tidy -diff`) all clean at `4d87801`;
+  Linux passing-test count is 105 (up from 96 at the start of this branch),
+  0 skips.
