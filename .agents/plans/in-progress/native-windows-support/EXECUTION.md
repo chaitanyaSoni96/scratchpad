@@ -817,3 +817,117 @@ behaviour change, on Linux.
   -count=3`; `GOOS=windows GOARCH={amd64,arm64} CGO_ENABLED=0 go build
   ./...`; `GOOS=windows go vet ./...`; `go mod tidy -diff`) were clean at
   every commit in this range; Linux skip count stayed at 0.
+
+## Phase 4 — Web Layer (P4.6)
+
+### What is implemented
+
+The four `/proc/self/fd` sites ADR §6.8 item 5 named — `docCount` (was line
+296), `buildListView`/`buildCards`/`folderExtras` (was line 555), `siblings`
+(was line 605), `hasRenderable` (was line 648), all in
+`internal/web/server.go` — are replaced with the handle-taking primitives
+`internal/store` exported for exactly this (`ReadDirHandle`, `EntryIsDirAt`,
+`StatEntryAt` — the last was not needed, see below). None of the four sites
+now builds a path string from a directory handle; each reads and classifies
+directly off the `*os.File` `store.ResolveFolder` already returns:
+
+- `docCount` and `hasRenderable` drop their `dir` string entirely, exactly as
+  §6.8 item 5 anticipated — they already held the handle. `dirCount`'s
+  per-child `dirHasHTML(sub)` check (which also consumed the `/proc` path)
+  is replaced by a new `dirHasHTMLAt(rel string)`, a fresh
+  `ResolveFolder`+`ReadDirHandle` resolution keyed on the store-relative
+  child path rather than a path derived from the parent's handle — consistent
+  with `docCount`'s own recursion, which already re-resolves each child from
+  the root rather than threading handles down.
+- `buildCards`/`folderExtras` now take folder `f`'s pinned `*os.File`
+  directly instead of a `dir string` built from its fd. This also fixes the
+  latent bug the ADR called out: `folderExtras`'s `pageCard(...,
+  filepath.Join(dir, name), ...)` call for a loose markdown tile now joins
+  against `logicalFolderPath(f)` (an ordinary, already-computed absolute
+  path used elsewhere in the same function for visibility checks) instead of
+  the `/proc`-derived string, so the loose-markdown tile's size/mtime stat
+  resolves on Windows instead of silently failing.
+- `siblingItems` replaces `os.ReadDir(dirPath)` with `store.ReadDirHandle`
+  and its `dirHasHTML(filepath.Join(dirPath, name))` call with
+  `dirHasHTMLAt(rel)`, reusing the `rel` it already computes.
+
+`entryIsDirFS` (the old path-based classifier: `e.IsDir()` first, then an
+`os.Stat` fallback for link entries) and the old path-based `dirHasHTML` are
+both deleted — every call site now goes through `store.EntryIsDirAt` or the
+handle-based `dirHasHTMLAt`, so nothing in the package still builds an
+"is this a directory" answer from a path string. No `GetFinalPathNameByHandleW`
+or any other handle-to-path emulation was introduced; each comment at the
+four sites says explicitly why that would reinstate the TOCTOU the pin
+exists to remove (ADR §6.8, §2 table).
+
+`store.StatEntryAt` was exported for this refactor but is unused by it: none
+of the four sites need per-entry size/mtime, only the directory/link
+classification `EntryIsDirAt` gives. Left unused rather than removed, since
+`internal/store` was out of scope for this task and the helper is generically
+useful. No additional `internal/store` export was needed beyond the three
+already provided.
+
+### Preserved, and where the tests prove it
+
+- **Preview cap / `card.Heavy`.** `maxPreviewBytes` and `previewBytes` (which
+  measure the artifact's entry document via `os.Stat(filepath.Join(a.Dir,
+  a.Entry))`) are untouched — that call is §6.9 row 3, accepted, not one of
+  the four sites. `artifactCard`/`withPreview`/`pageCard` are unchanged;
+  `folderExtras`'s new `pageCard(..., filepath.Join(visibleDir, name), ...)`
+  call still goes through `pageCard`, so the cap still applies to loose
+  markdown tiles. No new card-construction path was added.
+- **Sandbox model.** Nothing in `templates/*.tmpl` or the iframe/`sandbox`
+  attributes was touched; this task only changed how folder contents are
+  enumerated and classified server-side.
+- **Notes shadowing rule.** `handleFolderPage`'s `/p/{path...}/notes`
+  fallback (resolved only after `resolveView`, `resolveCollection` and
+  `folderExists` all fail) is unchanged; `TestNotesFolderShadowing` passes.
+- **Visibility / collapse / collections / SSE.** Unchanged logic, same
+  `store.Visible` call sites (now fed `isDir` from `EntryIsDirAt` instead of
+  `entryIsDirFS`, which is the same classification `List` already uses via
+  `classifyEntry` — a junction reads as browsable identically in both
+  places). `handleEvents`/`gzip.go` untouched.
+
+Tests proving the specific regression is fixed:
+`TestListFragmentBrowsesWatchWithoutFollowingNestedLinks` and
+`TestListFragmentAppliesFolderIgnoreRules` (`internal/web/server_test.go`) —
+the exact two tests EXECUTION.md's Phase 3 entries traced to these four sites
+— both pass locally, along with the full `internal/web` suite (24 tests) at
+`-race -count=3`, `go test ./... -count=1`, both Windows cross-builds
+(amd64/arm64), `GOOS=windows go vet ./...`, and a Linux skip count of 0. Only
+`internal/web/server.go` was modified; no test was weakened, skipped, or
+deleted.
+
+### Other Linux-only assumptions checked for and not found live
+
+Grepped `internal/web` for `/proc`, `/dev`, `/tmp`, hardcoded path
+separators, and `filepath` vs `path` confusion:
+
+- `strings.Split(path, "/")` / `strings.Split(rel, "/")` call sites
+  (`crumbs`, `resolveRequest`, `resolveView`, `handleSiblings`, etc.) all
+  operate on store-relative/URL paths, which are a "/"-separated convention
+  independent of OS (`store.Artifact.RelPath()` and the `/p/`, `/a/` URL
+  space are always "/"-joined) — not native filesystem paths. Correct as-is.
+- `handleArtifact` already converts the URL-style suffix to a native path
+  correctly (`filepath.Clean(filepath.FromSlash(file))`) before
+  `filepath.Join(a.Dir, clean)`.
+- `folderUnwatch`'s `os.Lstat(filepath.Join(root, filepath.FromSlash(rel)))`
+  already uses `FromSlash` and classifies via `store.IsLinkInfo`, which ADR
+  §3.3 confirms is the measured-correct cross-platform classifier (junction →
+  `ModeIrregular`, no separate Windows path). Not a `/proc` bug and not one
+  of the four named sites; left as is.
+- `markdown.go`'s path-taking `serveMarkdown(w, r, path, title)` (as opposed
+  to the handle-taking `serveMarkdownFile`) has no live caller in
+  `server.go`/`notes.go` — dead code, unrelated to this task, not removed
+  since removing unrelated dead code was not asked for.
+- No other `/proc`, `/dev`, or `/tmp` reference exists anywhere in
+  `internal/web`.
+
+### Verification run IDs
+
+- Baseline (before this task's push): `32931416952`/`32931416953` — the two
+  `internal/web` failures on both native jobs were confirmed to be
+  `TestListFragmentBrowsesWatchWithoutFollowingNestedLinks` and
+  `TestListFragmentAppliesFolderIgnoreRules`, matching Phase 3's trace.
+- [Fill in after push: run ID where `internal/web` reports `ok` on both
+  native Windows jobs.]

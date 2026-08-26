@@ -287,32 +287,37 @@ func pageCards(a store.Artifact) []card {
 
 // docCount counts markdown files in a subtree, skipping ignored dirs and not
 // descending into artifacts (their pages are counted as theirs).
+//
+// dirFile is read through store.ReadDirHandle/EntryIsDirAt rather than a
+// path built from the handle: there is no Windows analogue of
+// /proc/self/fd/N (ADR §6.8), and reconstructing a readable path from a
+// handle (e.g. GetFinalPathNameByHandleW) would force the OS to re-resolve
+// it by name — reinstating exactly the TOCTOU window a pinned handle exists
+// to remove. The handle-taking helpers consume it directly instead.
 func docCount(rel string) int {
 	dirFile, ok := store.ResolveFolder(rel)
 	if !ok {
 		return 0
 	}
 	defer dirFile.Close()
-	dir := fmt.Sprintf("/proc/self/fd/%d", dirFile.Fd())
 	visibleDir := logicalFolderPath(rel)
 	n := 0
-	entries, err := dirFile.ReadDir(-1)
+	entries, err := store.ReadDirHandle(dirFile)
 	if err != nil {
 		return 0
 	}
 	for _, e := range entries {
 		name := e.Name()
-		isDir := entryIsDirFS(dir, e)
+		isDir := store.EntryIsDirAt(dirFile, e)
 		if !store.Visible(visibleDir, name, isDir) {
 			continue
 		}
 		if isDir {
-			sub := filepath.Join(dir, name)
-			if !dirHasHTML(sub) {
-				child := name
-				if rel != "" {
-					child = rel + "/" + name
-				}
+			child := name
+			if rel != "" {
+				child = rel + "/" + name
+			}
+			if !dirHasHTMLAt(child) {
 				n += docCount(child)
 			}
 		} else if strings.HasSuffix(strings.ToLower(name), ".md") {
@@ -322,19 +327,18 @@ func docCount(rel string) int {
 	return n
 }
 
-func entryIsDirFS(parent string, e os.DirEntry) bool {
-	if e.IsDir() {
-		return true
-	}
-	if !store.IsLinkEntry(e) {
+// dirHasHTMLAt reports whether the folder at store-relative path rel
+// directly contains an html file, without descending. Resolved fresh
+// through the store (ResolveFolder + ReadDirHandle) rather than a path
+// derived from an already-open handle, so it needs no /proc/self/fd
+// equivalent and works unchanged on Windows.
+func dirHasHTMLAt(rel string) bool {
+	dirFile, ok := store.ResolveFolder(rel)
+	if !ok {
 		return false
 	}
-	fi, err := os.Stat(filepath.Join(parent, e.Name()))
-	return err == nil && fi.IsDir()
-}
-
-func dirHasHTML(dir string) bool {
-	entries, err := os.ReadDir(dir)
+	defer dirFile.Close()
+	entries, err := store.ReadDirHandle(dirFile)
 	if err != nil {
 		return false
 	}
@@ -348,9 +352,11 @@ func dirHasHTML(dir string) bool {
 
 // folderExtras appends cards artifacts can't produce: loose markdown files
 // directly in folder f, and doc-only subfolders (no artifacts anywhere but
-// markdown within).
-func folderExtras(f, dir string, used map[string]bool) []card {
-	entries, err := os.ReadDir(dir)
+// markdown within). dirFile is the pinned handle ResolveFolder(f) returned;
+// entries and classification come from it directly (see docCount's comment
+// on why no path is derived from it).
+func folderExtras(f string, dirFile *os.File, used map[string]bool) []card {
+	entries, err := store.ReadDirHandle(dirFile)
 	if err != nil {
 		return nil
 	}
@@ -362,10 +368,11 @@ func folderExtras(f, dir string, used map[string]bool) []card {
 	visibleDir := logicalFolderPath(f)
 	for _, e := range entries {
 		name := e.Name()
-		if used[name] || !store.Visible(visibleDir, name, entryIsDirFS(dir, e)) {
+		isDir := store.EntryIsDirAt(dirFile, e)
+		if used[name] || !store.Visible(visibleDir, name, isDir) {
 			continue
 		}
-		if entryIsDirFS(dir, e) {
+		if isDir {
 			child := name
 			if f != "" {
 				child = f + "/" + name
@@ -379,14 +386,16 @@ func folderExtras(f, dir string, used map[string]bool) []card {
 			cards = append(cards, pageCard(
 				strings.TrimSuffix(name, filepath.Ext(name)),
 				"/a/"+prefix+name, "/fragments/viewer/"+prefix+name,
-				filepath.Join(dir, name), true))
+				filepath.Join(visibleDir, name), true))
 		}
 	}
 	return cards
 }
 
 // buildCards turns the newest-first artifact list into tiles for folder f.
-func buildCards(artifacts []store.Artifact, f, dir string) []card {
+// dirFile is folder f's pinned directory handle, threaded through to
+// folderExtras (see its comment).
+func buildCards(artifacts []store.Artifact, f string, dirFile *os.File) []card {
 	prefix := ""
 	if f != "" {
 		prefix = f + "/"
@@ -438,7 +447,7 @@ func buildCards(artifacts []store.Artifact, f, dir string) []card {
 			}
 		}
 	}
-	return append(cards, folderExtras(f, dir, used)...)
+	return append(cards, folderExtras(f, dirFile, used)...)
 }
 
 // childDocs counts markdown under child folder of the current folder; a
@@ -552,7 +561,7 @@ func buildListView(f string) (listView, error) {
 	if err != nil {
 		return view, err
 	}
-	view.Cards = withNoteCounts(buildCards(artifacts, f, fmt.Sprintf("/proc/self/fd/%d", dir.Fd())))
+	view.Cards = withNoteCounts(buildCards(artifacts, f, dir))
 	return view, nil
 }
 
@@ -602,9 +611,12 @@ func siblingItems(parent string) []sibItem {
 		return nil
 	}
 	defer dir.Close()
-	dirPath := fmt.Sprintf("/proc/self/fd/%d", dir.Fd())
 	visibleDir := logicalFolderPath(parent)
-	entries, err := os.ReadDir(dirPath)
+	// Entries and classification come straight off the pinned handle
+	// (see docCount's comment on why no /proc-style path is derived from
+	// it — there is no Windows analogue, and one would just re-resolve by
+	// name).
+	entries, err := store.ReadDirHandle(dir)
 	if err != nil {
 		return nil
 	}
@@ -615,12 +627,13 @@ func siblingItems(parent string) []sibItem {
 	var items []sibItem
 	for _, e := range entries {
 		name := e.Name()
-		if !store.Visible(visibleDir, name, entryIsDirFS(dirPath, e)) {
+		isDir := store.EntryIsDirAt(dir, e)
+		if !store.Visible(visibleDir, name, isDir) {
 			continue
 		}
 		rel := prefix + name
-		if entryIsDirFS(dirPath, e) {
-			if dirHasHTML(filepath.Join(dirPath, name)) {
+		if isDir {
+			if dirHasHTMLAt(rel) {
 				if a, _, ok := store.ResolvePath(strings.Split(rel, "/")); ok && !a.MultiPage() {
 					items = append(items, sibItem{Name: name, Href: "/fragments/viewer/" + rel, Viewer: true})
 					continue
@@ -645,15 +658,16 @@ func hasRenderable(rel string) bool {
 		return false
 	}
 	defer dirFile.Close()
-	dir := fmt.Sprintf("/proc/self/fd/%d", dirFile.Fd())
 	visibleDir := logicalFolderPath(rel)
-	entries, err := dirFile.ReadDir(-1)
+	// Same reasoning as docCount: read and classify off the handle itself,
+	// never a path reconstructed from it.
+	entries, err := store.ReadDirHandle(dirFile)
 	if err != nil {
 		return false
 	}
 	for _, e := range entries {
 		name := e.Name()
-		isDir := entryIsDirFS(dir, e)
+		isDir := store.EntryIsDirAt(dirFile, e)
 		if !store.Visible(visibleDir, name, isDir) {
 			continue
 		}
