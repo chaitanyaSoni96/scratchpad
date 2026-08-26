@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -38,8 +40,6 @@ func (r *rootedFS) close() error { return r.root.Close() }
 
 func dupFD(fd int) (int, error) { return unix.FcntlInt(uintptr(fd), unix.F_DUPFD_CLOEXEC, 0) }
 
-func fdPath(fd int) string { return fmt.Sprintf("/proc/self/fd/%d", fd) }
-
 // closeFD closes fd, discarding the error like every existing call site
 // already did (most are deferred; the rest are best-effort cleanup on an
 // error path already being reported through a different return value).
@@ -67,18 +67,143 @@ func rmdirAt(parent int, name string) error {
 	return unix.Unlinkat(parent, name, unix.AT_REMOVEDIR)
 }
 
-func dirHasHTMLFD(fd int) bool {
+// dirHasHTMLFD reports whether fd directly contains a regular *.html file.
+// The error return exists so callers can choose fail-open or fail-closed on
+// "could not tell" (a read error): storefs_windows.go's twin has the same
+// shape for the same reason (ADR §4.3, "one place the prototype is stricter
+// than Linux — keep it"). openBrowsableDir's boundary guard fails CLOSED on
+// error (refuses to cross when it cannot rule out an artifact); openRealDir's
+// artifact-nesting guard keeps its historical fail-open-on-error behaviour,
+// since it only gates directory *creation*, not a security boundary crossing.
+func dirHasHTMLFD(fd int) (bool, error) {
 	entries, err := readDirFD(fd)
 	if err != nil {
-		return false
+		return false, err
 	}
 	for _, e := range entries {
 		var st unix.Stat_t
 		if strings.HasSuffix(strings.ToLower(e.Name()), ".html") && unix.Fstatat(fd, e.Name(), &st, unix.AT_SYMLINK_NOFOLLOW) == nil && st.Mode&unix.S_IFMT == unix.S_IFREG {
-			return true
+			return true, nil
 		}
 	}
-	return false
+	return false, nil
+}
+
+// objectID is the Linux dev+ino twin of the Windows FILE_ID_INFO-based type
+// (ADR §3.2): comparable, opaque to shared code, never rendered into a path.
+type objectID struct{ dev, ino uint64 }
+
+func objectIDOf(fd int) (objectID, error) {
+	var st unix.Stat_t
+	if err := unix.Fstat(fd, &st); err != nil {
+		return objectID{}, err
+	}
+	return objectID{dev: uint64(st.Dev), ino: st.Ino}, nil
+}
+
+// entryMeta is the shared (store.go) classification shape statAt fills in.
+// See store.go's doc comment on the type for the cross-platform contract.
+
+// statAt is fstatat(parent, name, AT_SYMLINK_NOFOLLOW): classification of a
+// single directory entry from a pinned parent, without following it. This is
+// the Linux twin of the Windows strict-open-plus-tag-read primitive (ADR
+// §3.2) — on Linux there is only one link type, so "IsLink" is simply
+// S_IFLNK and "Tag" is always 0.
+func statAt(parent int, name string) (entryMeta, error) {
+	if strings.ContainsAny(name, `\/`) {
+		return entryMeta{}, fmt.Errorf("statAt requires a single component, got %q", name)
+	}
+	var st unix.Stat_t
+	if err := unix.Fstatat(parent, name, &st, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		return entryMeta{}, err
+	}
+	m := entryMeta{
+		Size:    st.Size,
+		ModTime: time.Unix(st.Mtim.Sec, st.Mtim.Nsec),
+	}
+	switch st.Mode & unix.S_IFMT {
+	case unix.S_IFDIR:
+		m.IsDir = true
+	case unix.S_IFREG:
+		m.IsRegular = true
+	case unix.S_IFLNK:
+		m.IsLink = true
+	}
+	return m, nil
+}
+
+// statLinkTarget is statAt reduced to "is this a real directory, was the
+// answer obtained" — never follows. See store.go's classifyEntry, which is
+// the only caller: a symlink entry answers isDir=false here (Linux symlinks
+// carry no separate directory bit, unlike a Windows directory reparse
+// point), which is correct for statLinkTarget's contract and is why
+// classifyEntry, not statLinkTarget, is what decides whether to follow a
+// link entry once for listing purposes (crossWatchBoundary).
+func statLinkTarget(parent int, name string) (isDir, ok bool) {
+	m, err := statAt(parent, name)
+	if err != nil {
+		return false, false
+	}
+	return m.IsDir, true
+}
+
+// openRealDirAt is openDirAt under the ADR §3.2 name shared code uses so the
+// same call sites compile against either platform's strict primitive: on
+// Linux, O_NOFOLLOW already refuses every link at the final component, so
+// this is a thin alias, not a second mechanism.
+func openRealDirAt(parent int, name string) (int, error) { return openDirAt(parent, name) }
+
+// statSelf classifies the handle itself (Fstat, not Fstatat) — used for a
+// directory's own ModTime baseline in loadArtifactAt, where there is no
+// parent/name pair to statAt with.
+func statSelf(fd int) (entryMeta, error) {
+	var st unix.Stat_t
+	if err := unix.Fstat(fd, &st); err != nil {
+		return entryMeta{}, err
+	}
+	m := entryMeta{Size: st.Size, ModTime: time.Unix(st.Mtim.Sec, st.Mtim.Nsec)}
+	switch st.Mode & unix.S_IFMT {
+	case unix.S_IFDIR:
+		m.IsDir = true
+	case unix.S_IFREG:
+		m.IsRegular = true
+	case unix.S_IFLNK:
+		m.IsLink = true
+	}
+	return m, nil
+}
+
+// linkTargetIsDir reports whether the link entry (parent, name) — already
+// known via classifyEntry to be a link — points at a directory. Unlike
+// Windows, a Linux symlink carries no separate "directory reparse point"
+// bit of its own (statAt/lstat always report IsDir=false for any symlink,
+// directory-target or not), so this does the one bounded follow Scope A
+// already permits at exactly this boundary — the same semantics the
+// pre-refactor os.Stat(filepath.Join(parent, name)) had, now
+// handle-relative instead of path-based. It is used only for listing
+// decisions (Watches); every mutation path classifies via statAt/isLinkAt
+// alone and never calls this.
+func linkTargetIsDir(parent int, name string) bool {
+	fd, err := unix.Openat(parent, name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return false
+	}
+	unix.Close(fd)
+	return true
+}
+
+// crossWatchBoundary is the ONE forgiven link-boundary crossing (invariant
+// 5, ADR §4.3), factored out of openBrowsableDir so store.go's handle-
+// anchored List/Watches walk can reuse the identical mechanism instead of a
+// second, weaker copy. name must already be known to be a link entry
+// (typically via statAt's IsLink) relative to the pinned parent.
+func crossWatchBoundary(parent int, name string) (int, error) {
+	buf := make([]byte, 4096)
+	n, err := unix.Readlinkat(parent, name, buf)
+	if err != nil {
+		return -1, err
+	}
+	return openAbsoluteDirNoFollow(string(buf[:n]))
 }
 
 // openRealDir walks only real directory entries. The returned descriptor owns
@@ -105,9 +230,14 @@ func (r *rootedFS) openRealDir(segs []string, create, rejectArtifacts bool) (int
 			return -1, openErr
 		}
 		fd = next
-		if rejectArtifacts && dirHasHTMLFD(fd) {
-			unix.Close(fd)
-			return -1, fmt.Errorf("%q is an artifact, not a project", strings.Join(segs[:i+1], "/"))
+		if rejectArtifacts {
+			// Fail-open on a read error here (does not gate a security
+			// boundary — only whether directory creation is permitted at
+			// this name).
+			if hasHTML, _ := dirHasHTMLFD(fd); hasHTML {
+				unix.Close(fd)
+				return -1, fmt.Errorf("%q is an artifact, not a project", strings.Join(segs[:i+1], "/"))
+			}
 		}
 	}
 	return fd, nil
@@ -201,16 +331,18 @@ func (r *rootedFS) openBrowsableDir(segs []string) (int, error) {
 	crossed := false
 	for _, seg := range segs {
 		next, openErr := openDirAt(fd, seg)
-		if (errors.Is(openErr, unix.ELOOP) || errors.Is(openErr, unix.ENOTDIR)) && !crossed && !dirHasHTMLFD(fd) {
-			buf := make([]byte, 4096)
-			n, readErr := unix.Readlinkat(fd, seg, buf)
-			if readErr != nil {
-				unix.Close(fd)
-				return -1, readErr
-			}
-			next, openErr = openAbsoluteDirNoFollow(string(buf[:n]))
-			if openErr == nil {
-				crossed = true
+		if (errors.Is(openErr, unix.ELOOP) || errors.Is(openErr, unix.ENOTDIR)) && !crossed {
+			// Fail CLOSED here: this guards a security boundary (invariant
+			// 5's single crossing), unlike openRealDir's fail-open use above.
+			// A read error must not be treated as "not an artifact" — ADR
+			// §4.3, "one place the prototype is stricter than Linux — keep
+			// it".
+			hasHTML, htmlErr := dirHasHTMLFD(fd)
+			if htmlErr == nil && !hasHTML {
+				next, openErr = crossWatchBoundary(fd, seg)
+				if openErr == nil {
+					crossed = true
+				}
 			}
 		}
 		unix.Close(fd)
@@ -302,6 +434,25 @@ func openAbsoluteDirNoFollow(target string) (int, error) {
 		fd = next
 	}
 	return fd, nil
+}
+
+// canonicalizeWatchTarget is filepath.EvalSymlinks, unchanged: the Linux half
+// of the ADR §4.3/§4.7 platform pair. See store.go's Watch for why the
+// result — not abs — is what gets stored as the link target.
+func canonicalizeWatchTarget(target string) (string, error) {
+	return filepath.EvalSymlinks(target)
+}
+
+// alreadyInsideRoot is the pre-existing "already inside the scratchpad"
+// guard (ADR §7.1), byte-identical to the code it replaces: EvalSymlinks on
+// the root, then a string-prefix test against the already-canonicalized
+// target.
+func alreadyInsideRoot(target, root string) bool {
+	realRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return false
+	}
+	return target == realRoot || strings.HasPrefix(target, realRoot+string(filepath.Separator))
 }
 
 func openPathFile(segs []string) (*os.File, error) {

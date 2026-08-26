@@ -170,6 +170,20 @@ func readDirFD(fd int) ([]os.DirEntry, error) {
 	if err != nil {
 		return nil, err
 	}
+	// A dup()'d descriptor shares the ORIGINAL's open file description,
+	// directory read position included, so a second readDirFD call against
+	// the same original fd (now reachable from store.go's handle-anchored
+	// List/loadArtifactAt/dirHasHTMLFD, which were not written with a
+	// once-per-fd assumption the way the original annotation-tree callers
+	// were) would silently see zero entries rather than a fresh listing.
+	// Rewinding here — which affects the original fd too, since the offset
+	// is shared — makes every call a full, independent enumeration, which is
+	// the property callers actually rely on (and the property M16 measured
+	// on Windows via a fresh DuplicateHandle + ReadDir per call).
+	if _, err := unix.Seek(dup, 0, unix.SEEK_SET); err != nil {
+		unix.Close(dup)
+		return nil, err
+	}
 	f := os.NewFile(uintptr(dup), "annotations")
 	defer f.Close()
 	return f.ReadDir(-1)

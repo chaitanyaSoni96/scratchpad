@@ -42,6 +42,10 @@ func unlinkAt(parent int, name string) error {
 	return unix.Unlinkat(parent, name, 0)
 }
 
+// sameWatchTarget is Watch's idempotence comparison (ADR §7.2): on Linux,
+// byte-exact string equality, unchanged from before this was given a name.
+func sameWatchTarget(existing, abs string) bool { return existing == abs }
+
 // isLinkAt classifies name, relative to the open directory parent, without
 // following it: err is the stat failure (e.g. the entry does not exist);
 // isLink is meaningful only when err == nil. This backs Unwatch and Delete's

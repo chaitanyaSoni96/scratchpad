@@ -8,7 +8,6 @@ package store
 import (
 	"errors"
 	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -45,6 +44,48 @@ type Artifact struct {
 	ModTime time.Time
 	IsLink  bool // Dir itself is a symlink (a watched folder: delete = unlink)
 	Linked  bool // Dir lives inside a watched folder; not deletable here
+}
+
+// entryMeta is the shared classification shape statAt fills in from a single
+// no-follow open of one directory entry, relative to a pinned parent. It is
+// the cross-platform "fstatat(AT_SYMLINK_NOFOLLOW)" twin: Tag is always 0 on
+// Linux (there is only one link type there) and is the raw reparse tag on
+// Windows, present so callers and error messages can name it. IsLink means
+// "this entry is a link the store itself might create or remove" (a Linux
+// symlink, or a Windows tag on the watch allowlist) — never "carries any
+// reparse tag at all", which is why a Windows entry with a Tag the allowlist
+// does not recognise reports IsLink == false (see classifyEntry).
+type entryMeta struct {
+	IsDir     bool // real directory, no reparse tag (Windows) / S_IFDIR (Linux)
+	IsRegular bool
+	IsLink    bool // an entry the store may create/remove as a watch link
+	Tag       uint32
+	Size      int64
+	ModTime   time.Time
+}
+
+// classifyEntry is the single decision List/Watches/WatchLinkFor's
+// handle-anchored walk uses to decide what a directory entry is, from
+// statAt's tag-aware, no-follow classification alone — never from
+// os.DirEntry.IsDir() and never from a path-based follow-through. This is
+// the fix for both traps Pre-1 (ADR §11) named in the old path-based
+// entryIsDir: a non-surrogate unknown reparse tag can report
+// DirEntry.IsDir() == true (RR1.unknown_tag_isdir) despite being neither a
+// real directory nor a link the store understands, and the old
+// follow-through os.Stat resolved a link by path, which is exactly the
+// A11-style redirection this store now refuses everywhere else. explore
+// reports whether the entry should be considered at all (false for "an
+// unrecognized reparse tag" — Scope C, never explored, never listed); m is
+// meaningful only when explore is true.
+func classifyEntry(parentFD int, name string) (m entryMeta, explore bool) {
+	meta, err := statAt(parentFD, name)
+	if err != nil {
+		return entryMeta{}, false
+	}
+	if meta.Tag != 0 && !meta.IsLink {
+		return entryMeta{}, false // Scope C: a reparse tag we do not understand
+	}
+	return meta, true
 }
 
 // MultiPage reports whether the artifact is a page collection: several
@@ -189,7 +230,7 @@ func ResolveFolder(p string) (*os.File, bool) {
 	if err != nil {
 		return nil, false
 	}
-	if dirHasHTMLFD(fd) {
+	if hasHTML, _ := dirHasHTMLFD(fd); hasHTML {
 		closeFD(fd)
 		return nil, false
 	}
@@ -265,45 +306,89 @@ func hasHTML(dir string) bool {
 	return false
 }
 
-// entryIsDir reports whether a directory entry is a directory, following
-// symlinks (watched folders appear as symlinks in the store).
-func entryIsDir(parent string, e os.DirEntry) bool {
-	if e.IsDir() {
-		return true
-	}
-	if !IsLinkEntry(e) {
-		return false
-	}
-	fi, err := os.Stat(filepath.Join(parent, e.Name()))
-	return err == nil && fi.IsDir()
-}
-
-// annotate fills the symlink-related fields of an artifact. It must be given
-// the artifact's real, logical store path — never a handle path such as
-// fdPath's /proc/self/fd/N, which os.Lstat always reports as a symlink
-// regardless of what it points to. That is why annotate is not called from
-// inside loadArtifact: two of its callers (ResolvePath, Publish) load through
-// an fd and only learn the real Dir afterward, so annotate must run at the
-// call site, after Dir is set to that real path. See the Windows ADR §6.8
-// item 2, which found and named this same defect.
-func annotate(a *Artifact) {
-	if fi, err := os.Lstat(a.Dir); err == nil && IsLinkInfo(fi) {
+// annotate fills the symlink-related fields of an artifact from a
+// handle-relative, no-follow classification of (parentFD, name) — never
+// from a path. This replaces a latent defect (ADR §6.8 item 2): two former
+// callers loaded an artifact through a Linux-only /proc/self/fd handle path,
+// which os.Lstat always reports as a symlink regardless of what the fd
+// points to, so annotate must run at the call site using the parent handle
+// and the entry's own name — never a.Dir — once Project/Name are set.
+// isLinkAt is the same fd-relative primitive Unwatch/Delete already use to
+// make this decision, so there is exactly one "is this entry a link"
+// mutation-path check in the whole store.
+func annotate(a *Artifact, parentFD int, name string) {
+	if isLink, err := isLinkAt(parentFD, name); err == nil && isLink {
 		a.IsLink = true
 		return
 	}
-	real, err := filepath.EvalSymlinks(a.Dir)
-	if err == nil && real != a.Dir {
+	if link := WatchLinkFor(a.RelPath()); link != "" {
 		a.Linked = true
 	}
 }
 
-// loadArtifact reads dir and builds the Artifact if it qualifies (contains at
-// least one top-level .html). It intentionally leaves IsLink/Linked unset:
-// dir may be a handle path (fdPath) rather than the artifact's real logical
-// path, so callers must call annotate(&a) themselves once a.Dir holds that
-// real path — see annotate's doc comment.
-func loadArtifact(project, name, dir string) (Artifact, bool) {
-	entries, err := os.ReadDir(dir)
+// maxArtifactWalkDepth bounds the handle-anchored walks below (R16): List's
+// descent into project trees and loadArtifactAt's own size/mtime walk inside
+// one artifact. Neither platform enforced a bound before this; it is a
+// carried-forward gap being closed here, not a regression (ADR §4.5's
+// "carried-forward gap" note, §11 P3.9 fixes the analogous removeTreeAt bound).
+const maxArtifactWalkDepth = 64
+
+// sizeWalkAt sums file sizes and finds the newest mtime under the directory
+// named by dirFD, handle-anchored and depth-bounded (R16). A link entry
+// (Scope A tag on Windows, any symlink on Linux) is never descended for size
+// accounting, matching filepath.WalkDir's own no-follow default, which this
+// replaces; an entry with an unrecognized reparse tag (Scope C) is likewise
+// skipped, never explored.
+func sizeWalkAt(dirFD, depth int) (size int64, modTime time.Time) {
+	if depth > maxArtifactWalkDepth {
+		return 0, time.Time{}
+	}
+	entries, err := readDirFD(dirFD)
+	if err != nil {
+		return 0, time.Time{}
+	}
+	for _, e := range entries {
+		name := e.Name()
+		meta, explore := classifyEntry(dirFD, name)
+		if !explore || meta.IsLink {
+			continue
+		}
+		if meta.IsDir {
+			childFD, err := openRealDirAt(dirFD, name)
+			if err != nil {
+				continue
+			}
+			s, m := sizeWalkAt(childFD, depth+1)
+			closeFD(childFD)
+			size += s
+			if m.After(modTime) {
+				modTime = m
+			}
+			continue
+		}
+		if !meta.IsRegular {
+			continue
+		}
+		size += meta.Size
+		if meta.ModTime.After(modTime) {
+			modTime = meta.ModTime
+		}
+	}
+	return size, modTime
+}
+
+// loadArtifactAt reads the directory named by dirFD — a pinned handle to the
+// artifact's own directory, already resolved past any link by the caller —
+// and builds the Artifact if it qualifies (contains at least one top-level
+// .html). It leaves IsLink/Linked/Dir unset: callers must set Dir to the
+// artifact's logical display path and call annotate(&a, parentFD, name)
+// themselves — see annotate's doc comment. This replaces loadArtifact +
+// fdPath, which had no Windows equivalent (ADR §6.8): fdPath was a
+// /proc/self/fd/N string fed back into os.ReadDir/os.Stat/filepath.WalkDir,
+// none of which exist without a real filesystem path, and all of which are
+// gone from this function.
+func loadArtifactAt(project, name string, dirFD int) (Artifact, bool) {
+	entries, err := readDirFD(dirFD)
 	if err != nil {
 		return Artifact{}, false // tolerate concurrent deletes
 	}
@@ -332,71 +417,99 @@ func loadArtifact(project, name, dir string) (Artifact, bool) {
 			break
 		}
 	}
-	a := Artifact{Project: project, Name: name, Dir: dir, Entry: entry, Pages: pages}
-	sizeRoot := dir
-	if real, err := filepath.EvalSymlinks(dir); err == nil {
-		sizeRoot = real // WalkDir does not follow a symlinked root
-	}
-	if fi, err := os.Stat(dir); err == nil {
-		a.ModTime = fi.ModTime()
+	a := Artifact{Project: project, Name: name, Entry: entry, Pages: pages}
+	if m, err := statSelf(dirFD); err == nil {
+		a.ModTime = m.ModTime
 	}
 	// ModTime is the newest mtime in the tree, not the directory's: editing a
 	// file in place leaves the directory untouched, and the web UI keys
 	// preview iframes on the modtime to reload them when content changes.
-	filepath.WalkDir(sizeRoot, func(_ string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
-			return nil
-		}
-		if fi, err := d.Info(); err == nil {
-			a.Size += fi.Size()
-			if fi.ModTime().After(a.ModTime) {
-				a.ModTime = fi.ModTime()
-			}
-		}
-		return nil
-	})
+	size, newest := sizeWalkAt(dirFD, 0)
+	a.Size = size
+	if newest.After(a.ModTime) {
+		a.ModTime = newest
+	}
 	return a, true
 }
 
 // List walks the whole root and returns all artifacts, newest first.
 // Artifact directories are not descended into: their subtrees are assets.
+// Handle-anchored end to end (ADR §6.8 item 4): classifyEntry decides
+// real-directory-vs-link-vs-unrecognized-tag from a single no-follow stat of
+// each entry, and crossWatchBoundary is the same mechanism openBrowsableDir
+// uses for the one link crossing invariant 5 permits per branch. The visited
+// set is keyed on objectID (R16), not on a resolved path string, so it is
+// meaningful on both platforms and cannot be defeated by two path spellings
+// of one directory.
 func List() ([]Artifact, error) {
 	root, err := EnsureRoot()
 	if err != nil {
 		return nil, err
 	}
+	rfs, err := openRootedFS(false)
+	if err != nil {
+		return nil, err
+	}
+	defer rfs.close()
+	rootFD, err := dupFD(int(rfs.root.Fd()))
+	if err != nil {
+		return nil, err
+	}
 	var out []Artifact
-	visited := map[string]bool{} // symlink-cycle guard
-	var walk func(dir, project string, crossedLink bool)
-	walk = func(dir, project string, crossedLink bool) {
-		if real, err := filepath.EvalSymlinks(dir); err != nil || visited[real] {
+	visited := map[objectID]bool{}
+	var walk func(dirFD int, dirPath, project string, crossedLink, ownFD bool, depth int)
+	walk = func(dirFD int, dirPath, project string, crossedLink, ownFD bool, depth int) {
+		if ownFD {
+			defer closeFD(dirFD)
+		}
+		if depth > maxArtifactWalkDepth {
+			return
+		}
+		if id, err := objectIDOf(dirFD); err != nil || visited[id] {
 			return
 		} else {
-			visited[real] = true
+			visited[id] = true
 		}
-		entries, err := os.ReadDir(dir)
+		entries, err := readDirFD(dirFD)
 		if err != nil {
 			return
 		}
 		for _, e := range entries {
-			isLink := IsLinkEntry(e)
-			if !entryIsDir(dir, e) || !Visible(dir, e.Name(), true) || isLink && crossedLink {
+			name := e.Name()
+			if !Visible(dirPath, name, true) {
 				continue
 			}
-			sub := filepath.Join(dir, e.Name())
-			if a, ok := loadArtifact(project, e.Name(), sub); ok {
-				annotate(&a) // sub is already the real logical path
+			meta, explore := classifyEntry(dirFD, name)
+			if !explore || meta.IsLink && crossedLink {
+				continue
+			}
+			var childFD int
+			if meta.IsLink {
+				childFD, err = crossWatchBoundary(dirFD, name)
+			} else if meta.IsDir {
+				childFD, err = openRealDirAt(dirFD, name)
+			} else {
+				continue
+			}
+			if err != nil {
+				continue
+			}
+			sub := filepath.Join(dirPath, name)
+			if a, ok := loadArtifactAt(project, name, childFD); ok {
+				a.Dir = sub
+				annotate(&a, dirFD, name)
 				out = append(out, a)
+				closeFD(childFD)
 				continue
 			}
-			child := e.Name()
+			child := name
 			if project != "" {
-				child = project + "/" + e.Name()
+				child = project + "/" + name
 			}
-			walk(sub, child, crossedLink || isLink)
+			walk(childFD, sub, child, crossedLink || meta.IsLink, true, depth+1)
 		}
 	}
-	walk(root, "", false)
+	walk(rootFD, root, "", false, true, 0)
 	sort.Slice(out, func(i, j int) bool { return out[i].ModTime.After(out[j].ModTime) })
 	return out, nil
 }
@@ -411,11 +524,54 @@ func Resolve(project, name string) (Artifact, bool, error) {
 	if err != nil {
 		return Artifact{}, false, err
 	}
-	a, ok := loadArtifact(project, name, dir)
+	// existingDir already validated project/name with the LOOSER lookup
+	// rules (validateSegment) a watched folder's own name needs — do not
+	// re-split with SplitProject, which enforces validateName's stricter
+	// creation-time regex and would wrongly refuse a lookup existingDir just
+	// allowed.
+	var segs []string
+	if project != "" {
+		segs = strings.Split(strings.Trim(project, "/"), "/")
+	}
+	rfs, err := openRootedFS(false)
+	if err != nil {
+		return Artifact{}, false, err
+	}
+	defer rfs.close()
+	parent, err := rfs.openBrowsableDir(segs)
+	if err != nil {
+		return Artifact{}, false, err
+	}
+	defer closeFD(parent)
+	childFD, err := crossOrOpen(parent, name)
+	if err != nil {
+		return Artifact{}, false, nil
+	}
+	defer closeFD(childFD)
+	a, ok := loadArtifactAt(project, name, childFD)
 	if ok {
-		annotate(&a) // dir is already the real logical path
+		a.Dir = dir
+		annotate(&a, parent, name)
 	}
 	return a, ok, nil
+}
+
+// crossOrOpen opens name relative to parent for read-only classification:
+// a real directory via the strict primitive, or the one allowed link
+// boundary via crossWatchBoundary — the same two-way choice List's walk and
+// openBrowsableDir make, exposed for the single-entry callers (Resolve).
+func crossOrOpen(parent int, name string) (int, error) {
+	meta, explore := classifyEntry(parent, name)
+	if !explore {
+		return -1, fmt.Errorf("%q is not a usable entry", name)
+	}
+	if meta.IsLink {
+		return crossWatchBoundary(parent, name)
+	}
+	if meta.IsDir {
+		return openRealDirAt(parent, name)
+	}
+	return -1, fmt.Errorf("%q is not a directory", name)
 }
 
 // ResolvePath walks URL path segments and splits them into the artifact and
@@ -435,25 +591,31 @@ func ResolvePath(segs []string) (a Artifact, file string, ok bool) {
 	}
 	defer rfs.close()
 	for i, s := range segs {
-		fd, openErr := rfs.openBrowsableDir(segs[:i+1])
+		parent, openErr := rfs.openBrowsableDir(segs[:i])
 		if openErr != nil {
 			return Artifact{}, "", false
 		}
-		if dirHasHTMLFD(fd) {
+		fd, openErr := crossOrOpen(parent, s)
+		if openErr != nil {
+			closeFD(parent)
+			return Artifact{}, "", false
+		}
+		hasHTML, _ := dirHasHTMLFD(fd)
+		if hasHTML {
 			project := strings.Join(segs[:i], "/")
-			a, ok := loadArtifact(project, s, fdPath(fd))
+			a, ok := loadArtifactAt(project, s, fd)
 			closeFD(fd)
 			if !ok {
+				closeFD(parent)
 				return Artifact{}, "", false
 			}
-			// loadArtifact was given fdPath(fd), a /proc/self/fd handle path
-			// that os.Lstat always reports as a symlink — annotate must not
-			// run against it. Set the real logical Dir first, then annotate.
 			a.Dir = filepath.Join(append([]string{root}, segs[:i+1]...)...)
-			annotate(&a)
+			annotate(&a, parent, s)
+			closeFD(parent)
 			return a, strings.Join(segs[i+1:], "/"), true
 		}
 		closeFD(fd)
+		closeFD(parent)
 	}
 	return Artifact{}, "", false
 }
@@ -550,16 +712,13 @@ func Publish(project, name string, files map[string][]byte) (Artifact, error) {
 			return Artifact{}, err
 		}
 	}
-	a, ok := loadArtifact(project, name, fdPath(artifactFD))
-	// As in ResolvePath: fdPath is a handle path, always reported as a
-	// symlink by os.Lstat, so annotate must run after Dir is set to the
-	// real logical path, not against fdPath(artifactFD).
+	a, ok := loadArtifactAt(project, name, artifactFD)
 	a.Dir = dir
 	if !ok {
 		cleanup()
 		return Artifact{}, errors.New("publish verification failed")
 	}
-	annotate(&a)
+	annotate(&a, parent, name)
 	return a, nil
 }
 
@@ -603,14 +762,12 @@ func Watch(project, name, target string) (string, error) {
 	// the call immediately, with the OS's own reason attached, rather than
 	// leaving the caller to discover a broken watch only when a browse
 	// later 404s.
-	real, err := filepath.EvalSymlinks(abs)
+	real, err := canonicalizeWatchTarget(abs)
 	if err != nil {
 		return "", fmt.Errorf("resolving %s: %w", abs, err)
 	}
-	if realRoot, err := filepath.EvalSymlinks(root); err == nil {
-		if real == realRoot || strings.HasPrefix(real, realRoot+string(filepath.Separator)) {
-			return "", fmt.Errorf("%s is already inside the scratchpad", abs)
-		}
+	if alreadyInsideRoot(real, root) {
+		return "", fmt.Errorf("%s is already inside the scratchpad", abs)
 	}
 	link, err := artifactDir(root, project, name)
 	if err != nil {
@@ -640,7 +797,7 @@ func Watch(project, name, target string) (string, error) {
 			return "", err
 		}
 		linkTarget, readErr := readlinkAt(parent, name)
-		if readErr != nil || linkTarget != real {
+		if readErr != nil || !sameWatchTarget(linkTarget, real) {
 			return "", fmt.Errorf("%q already exists — delete it in the web UI or pick a different name", strings.TrimPrefix(link[len(root):], string(filepath.Separator)))
 		}
 	}
@@ -660,18 +817,41 @@ type WatchLink struct {
 // itself when it is the link, an ancestor when rel lives inside a watched
 // tree — or "" when nothing on the path is a link.
 func WatchLinkFor(rel string) string {
-	root, err := Root()
-	if err != nil || rel == "" {
+	if rel == "" {
+		return ""
+	}
+	rfs, err := openRootedFS(false)
+	if err != nil {
+		return ""
+	}
+	defer rfs.close()
+	fd, err := dupFD(int(rfs.root.Fd()))
+	if err != nil {
 		return ""
 	}
 	segs := strings.Split(rel, "/")
-	cur := root
 	for i, seg := range segs {
-		cur = filepath.Join(cur, seg)
-		if fi, err := os.Lstat(cur); err == nil && IsLinkInfo(fi) {
+		meta, explore := classifyEntry(fd, seg)
+		if !explore {
+			closeFD(fd)
+			return ""
+		}
+		if meta.IsLink {
+			closeFD(fd)
 			return strings.Join(segs[:i+1], "/")
 		}
+		if !meta.IsDir {
+			closeFD(fd)
+			return ""
+		}
+		next, err := openRealDirAt(fd, seg)
+		closeFD(fd)
+		if err != nil {
+			return ""
+		}
+		fd = next
 	}
+	closeFD(fd)
 	return ""
 }
 
@@ -683,36 +863,72 @@ func Watches() ([]WatchLink, error) {
 	if err != nil {
 		return nil, err
 	}
+	rfs, err := openRootedFS(false)
+	if err != nil {
+		return nil, err
+	}
+	defer rfs.close()
+	rootFD, err := dupFD(int(rfs.root.Fd()))
+	if err != nil {
+		return nil, err
+	}
 	var out []WatchLink
-	var walk func(dir, rel string)
-	walk = func(dir, rel string) {
-		entries, err := os.ReadDir(dir)
+	visited := map[objectID]bool{}
+	var walk func(dirFD int, dirPath, rel string, depth int)
+	walk = func(dirFD int, dirPath, rel string, depth int) {
+		defer closeFD(dirFD)
+		if depth > maxArtifactWalkDepth {
+			return
+		}
+		if id, err := objectIDOf(dirFD); err != nil || visited[id] {
+			return
+		} else {
+			visited[id] = true
+		}
+		entries, err := readDirFD(dirFD)
 		if err != nil {
 			return
 		}
 		for _, e := range entries {
 			name := e.Name()
-			sub, child := filepath.Join(dir, name), name
+			sub, child := filepath.Join(dirPath, name), name
 			if rel != "" {
 				child = rel + "/" + name
 			}
 			// Links are reported whatever the ignore rules say: hiding a
 			// watched folder from the UI must not strand its link with no
-			// way to list or unwatch it. Rules only prune the descent.
-			if IsLinkEntry(e) {
-				target, lerr := os.Readlink(sub)
-				fi, serr := os.Stat(sub)
-				if lerr == nil && serr == nil && fi.IsDir() {
+			// way to list or unwatch it. Rules only prune the descent. An
+			// unrecognized reparse tag (Scope C) is never listed here — it
+			// gets its own inert "unsupported entry" affordance (RW15,
+			// owner P4.6), not a phantom watch.
+			meta, explore := classifyEntry(dirFD, name)
+			if !explore {
+				continue
+			}
+			if meta.IsLink {
+				if !linkTargetIsDir(dirFD, name) {
+					continue // a file-type link is not a watched folder
+				}
+				if target, err := readlinkAt(dirFD, name); err == nil {
 					out = append(out, WatchLink{Path: child, Target: target})
 				}
 				continue
 			}
-			if e.IsDir() && Visible(dir, name, true) && !hasHTML(sub) {
-				walk(sub, child)
+			if !meta.IsDir || !Visible(dirPath, name, true) {
+				continue
 			}
+			childFD, err := openRealDirAt(dirFD, name)
+			if err != nil {
+				continue
+			}
+			if hasHTML, _ := dirHasHTMLFD(childFD); hasHTML {
+				closeFD(childFD)
+				continue
+			}
+			walk(childFD, sub, child, depth+1)
 		}
 	}
-	walk(root, "")
+	walk(rootFD, root, "", 0)
 	sort.Slice(out, func(i, j int) bool { return out[i].Path < out[j].Path })
 	return out, nil
 }
@@ -813,13 +1029,16 @@ func Delete(project, name string) error {
 		}
 	} else {
 		artifactFD, err := openDirAt(parent, name)
-		if err != nil || !dirHasHTMLFD(artifactFD) {
-			if err == nil {
-				closeFD(artifactFD)
+		if err == nil {
+			hasHTML, htmlErr := dirHasHTMLFD(artifactFD)
+			closeFD(artifactFD)
+			if htmlErr != nil || !hasHTML {
+				err = fmt.Errorf("could not verify %q is an artifact", name)
 			}
+		}
+		if err != nil {
 			return fmt.Errorf("artifact %s not found", (Artifact{Project: project, Name: name}).RelPath())
 		}
-		closeFD(artifactFD)
 		if err := removeTreeAt(parent, name); err != nil {
 			return err
 		}
