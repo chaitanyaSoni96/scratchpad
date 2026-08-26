@@ -800,8 +800,14 @@ func mkdirsAt(root int, segs []string) (int, error) {
 // created — R15's "documents are never served through os.Open" applies
 // symmetrically to writes: FILE_CREATE|FILE_NON_DIRECTORY_FILE|
 // FILE_OPEN_REPARSE_POINT|OBJ_DONT_REPARSE means a pre-planted link at this
-// name cannot capture the write (it is refused, translated to
-// errExistsReparse, never silently followed).
+// name cannot capture the write: FILE_CREATE sees the reparse point as an
+// existing entry rather than resolving through it, so the claim COLLIDES.
+// The status is STATUS_OBJECT_NAME_COLLISION and translateClaim maps it to
+// errExists — not errExistsReparse, which is what this said before the flag
+// was added and is now only reachable if some filter driver returns a
+// reparse status anyway. Either sentinel satisfies errors.Is(_, errExists),
+// which is all any caller here tests, so the refusal is unchanged; only its
+// spelling is (P6.3 F4).
 //
 // FILE_OPEN_REPARSE_POINT (M3): this site has NO pre-existing compensating
 // control — unlike Publish's directory claim, nothing reopens this write

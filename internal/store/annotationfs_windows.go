@@ -163,6 +163,10 @@ func resetLockIdentityCacheForTest() {
 // identity CHANGING between calls; it never had a way to tell "the object at
 // this name is legitimately inside the store" from "the open just walked
 // through a reparse point to somewhere else" in the first place.
+//
+// What the flag buys on a FILE_OPEN_IF is "never traversed", not "refused" —
+// see openLockFileAt below for the full statement of that distinction, which
+// applies identically here (P6.3 F4).
 func openRendezvousLockFile(parent int, rootPath string) (*os.File, error) {
 	h, err := ntOpenAt(windows.Handle(parent), lockFileName,
 		windows.FILE_GENERIC_READ|windows.FILE_GENERIC_WRITE, windows.FILE_OPEN_IF,
@@ -249,15 +253,26 @@ func unlockRendezvous(a *annotationFS) error {
 
 // openLockFileAt creates or opens name (a per-document lock file) relative
 // to parent, via the strict open's disposition (FILE_OPEN_IF) so a lock file
-// the store creates itself is never silently redirected by a planted link:
-// OBJ_DONT_REPARSE, FILE_OPEN_REPARSE_POINT and FILE_NON_DIRECTORY_FILE
-// together refuse a reparse point or a directory at this name outright
-// rather than transparently opening through it.
+// the store creates itself is never silently redirected by a planted link.
 //
 // FILE_OPEN_REPARSE_POINT (M3): this site had NO pre-existing compensating
 // control, same shape as openRendezvousLockFile above — a serviced unknown
 // tag at a document's lock-file name would previously have been traversed,
 // silently defeating that document's lock rather than refusing the open.
+//
+// Be precise about what the three flags actually do, because this comment
+// used to claim they "refuse a reparse point or a directory at this name
+// outright" and only half of that is true (P6.3 F4). FILE_NON_DIRECTORY_FILE
+// does refuse a DIRECTORY-shaped reparse point — a junction or a directory
+// symlink — with STATUS_FILE_IS_A_DIRECTORY. A FILE-shaped one is not
+// refused: FILE_OPEN_REPARSE_POINT means it is opened AS ITSELF, which is
+// exactly what the flag is for and what Go's own Symlinkat relies on. The
+// property bought here is "the open never lands outside the store", not "the
+// open fails", and that property is what the rendezvous needs: every process
+// that opens this name reaches the same object and therefore still contends
+// on the same lock. If LockFileEx then refuses that handle,
+// lockFileHandleWithRetry exhausts its bound and the annotation write fails
+// loudly — fail-closed in both directions.
 func openLockFileAt(parent int, name string) (*os.File, error) {
 	h, err := ntOpenAt(windows.Handle(parent), name, windows.FILE_GENERIC_READ|windows.FILE_GENERIC_WRITE,
 		windows.FILE_OPEN_IF, windows.FILE_NON_DIRECTORY_FILE|windows.FILE_OPEN_REPARSE_POINT, noFollowAttrs, windows.FILE_ATTRIBUTE_NORMAL)
