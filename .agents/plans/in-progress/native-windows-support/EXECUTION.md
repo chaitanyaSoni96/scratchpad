@@ -946,3 +946,244 @@ separators, and `filepath` vs `path` confusion:
   `GOOS=windows go vet ./...`) were clean; Linux skip count stayed at 0; the
   passing `internal/web` test-name set (24 tests) is unchanged from before
   this task — none renamed, skipped, or removed.
+
+## Phase 4 — Watcher Identity and Reconciliation (P4.1/P4.2)
+
+### What is implemented
+
+**P4.1 — `identity(*os.File)`.** `identity_windows.go` replaces the Phase 2
+stub with `GetFileInformationByHandleEx(FileIdInfo)` read from the
+already-open handle — volume serial (`uint64`) plus the 128-bit `FileId`
+(`[16]byte`), never `ByHandleFileInformation`'s 64-bit file index (ADR §3.5,
+survey Finding 6: insufficient on ReFS). `dirIdentity`'s field layout, which
+P2.3 deliberately deferred, moved out of `watch.go` entirely and into the two
+platform files — `identity_unix.go` keeps `dev, ino uint64`;
+`identity_windows.go` gets `vol uint64, id [16]byte`. The two platforms do
+not share one struct shape (Windows's identity is one opaque 16-byte object
+id plus a separate volume serial, not two independent numbers the way
+dev+ino are), so rather than force a common shape this is P2.3's decision,
+made now: each platform owns its own type, and shared code only ever
+compares values with `==` or stores them as map values, which needs nothing
+more than that.
+
+No `internal/store` export was needed for this, and none was added.
+`ntOpenAt`/`attrTagOf`/`fileIDOf`/`openStrictAt` are all package-private to
+`internal/store`, and `store.ReadDirHandle`/`EntryIsDirAt`/`StatEntryAt`
+(P4.6's exports) are root-pinned-handle-relative — they answer questions
+about a path already resolved through the store's containment walk, which
+does not describe what `desiredDirs` does: it walks arbitrary absolute
+filesystem paths, including ones outside `SCRATCHPAD_ROOT` entirely (a
+watched project tree reached through a symlink target). `identity_windows.go`
+calls `windows.GetFileInformationByHandleEx`/`windows.FileIdInfo` directly —
+both already exported by `golang.org/x/sys/windows` — and declares its own
+24-byte `fileIDInfo` struct mirroring `FILE_ID_INFO`'s layout, because that
+struct itself (not the call, not the constant) is the one thing
+`x/sys/windows` v0.41.0 doesn't export and `internal/store`'s copy
+(`fileIDInfoRaw` in `win32_windows.go`) is package-private. This is an
+unavoidable two-line restatement of a public, stable Win32 ABI shape, not a
+duplication of any containment mechanism — nothing NT-call-shaped
+(`ntOpenAt`'s marshaling, the strict-open tag check, error translation) is
+reimplemented. If a single source of truth for this struct is wanted later,
+the fix is trivial (`internal/store` exports a `DirFileID(*os.File) (vol
+uint64, id [16]byte, err error)` wrapping the existing `fileIDOf`), but it
+was not added unasked, per the brief's instruction to report rather than
+restructure `internal/store`.
+
+**P4.2 / F6 / §6.11 — the reconcile-triage boot loop.** This was treated as
+the most important part of this task, per the brief. Traced exactly as the
+ADR describes: `desiredDirs`' `walk` (`watch.go`) returned a hard
+`fmt.Errorf` from any `os.Open`/identify/`ReadDir` error that was not
+`os.IsNotExist`; on Windows an unserviced reparse tag — `APPEXECLINK`, a
+OneDrive placeholder, a ProjFS entry — returns `STATUS_IO_REPARSE_TAG_NOT_HANDLED`
+→ Win32 `ERROR_CANT_ACCESS_FILE` (1920), which is not `IsNotExist`; that
+error propagated out of `reconcile()`, out of `newWatcher()` (called
+synchronously at startup), and `cmd/scratchpad-web/main.go`'s
+`log.Fatalf` turned a single such directory anywhere under the store root
+into a permanent failure to start — confirmed live on this run's baseline
+(`32932994845`): every `internal/watch` test failed with `identify
+directory ...: scratchpad: Windows directory identity is not implemented
+yet`, and, once identity landed, a dedicated regression test reproduced the
+exact 1920 failure end to end before the triage fix (see below).
+
+The fix is a narrow carve-out, not a relaxation: a new per-platform
+`skipWalkError(err) bool` (in `identity_unix.go`/`identity_windows.go`)
+classifies an error from resolving/opening/identifying/reading one directory
+during the walk as either "this one entry is unreachable" (skip, log once,
+via `watch.go`'s new `skipEntry`) or everything else, which still returns a
+hard error and is still fatal through the same
+`reconcile`→`newWatcher`→`main.go` chain as before. On Linux
+`skipWalkError` is unchanged behaviour: `os.IsNotExist` only. On Windows the
+skip set is explicit and named, not a numeric range (the Win32 error space
+interleaves unrelated codes — thread/process background-mode, GDI handle
+leaks, SMB1 — among the `ERROR_CLOUD_FILE_*` codes, so a range check would
+misclassify them): `os.IsNotExist`, `fs.ErrPermission`,
+`ERROR_CANT_ACCESS_FILE` (1920, the boot-loop trigger itself),
+`ERROR_SHARING_VIOLATION`/`ERROR_LOCK_VIOLATION`, the five
+`ERROR_FILE_SYSTEM_VIRTUALIZATION_*` codes (ProjFS/Windows Containers — the
+ADR's third named example alongside `APPEXECLINK` and OneDrive), and the
+full `ERROR_CLOUD_FILE_*` family by name. Root's own open/read (`required =
+true` in `walk`) is deliberately **not** given this leniency: root failing
+to open at all means there is nothing to watch, which is a real "the watch
+subsystem cannot start" condition, not a single-entry problem — the ADR's
+boot-loop scenario is specifically about an ordinary entry *inside* the
+tree, and item 3's "startup gets the same triage as steady state" is
+satisfied for free, because `reconcile()` (which item 3 is about) is the
+same function whether called from `newWatcher` at startup or from `Run` at
+steady state.
+
+**RW24 — `desiredDirs`' share mode.** `os.Open` is replaced by a new
+`openWatchDir(path string) (*os.File, error)`, per platform.
+`identity_unix.go`'s version is a passthrough (the share-mode concept does
+not exist on Linux). `identity_windows.go`'s version is a direct
+`windows.CreateFile` granting `FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE`
+plus `FILE_FLAG_BACKUP_SEMANTICS` (required to open a directory at all) —
+measured as the fix `P13.go_share_mode` calls for: Go's `syscall.Open` (what
+`os.Open` uses) and `golang.org/x/sys/windows.Open` both hard-code
+`FILE_SHARE_READ|FILE_SHARE_WRITE` only, confirmed by reading both
+implementations, not just the ADR's citation. This does not reuse
+`internal/store`'s `ntOpenAt`/`openStrictAt`: those are handle-relative,
+single-component, root-pinned primitives built for the store's containment
+proof, and `desiredDirs` walks arbitrary absolute paths that can be outside
+the root entirely — the root-anchored primitive does not apply. What ships
+is a plain, path-based `CreateFile`, the same shape as `os.Open`, with the
+one flag that matters fixed.
+
+**`M15.overflow`.** No code change was made or needed. Reading
+`github.com/fsnotify/fsnotify@v1.10.1`'s `backend_windows.go` (the version
+this module already pins) shows its completion-port loop already detects
+the `ReadDirectoryChangesW` buffer-overflow condition as a 0-byte
+`GetQueuedCompletionStatus` return — exactly the shape
+`internal/winspike/dirnotify.go`'s `DirObserver` uses and the shape the ADR
+says to copy — and reports it as the same cross-platform
+`fsnotify.ErrEventOverflow` sentinel Linux's inotify backend uses.
+`watch.go`'s `Run` already special-cases `errors.Is(err,
+fsnotify.ErrEventOverflow)` and routes it to `reconcile()` + broadcast,
+never treating it as fatal, identically on both platforms — this predates
+this task and needed no change. This satisfies the ADR's ask ("map the
+Windows overflow error explicitly") because the mapping already happens one
+layer down, inside fsnotify itself, into a value `internal/watch` already
+handles correctly. **Verified by source inspection, not by CI
+reproduction** — consistent with `M15.overflow` being recorded as not
+deterministically reproducible on a runner; the existing
+`TestOverflowReconcilesAndBroadcastsImmediately` (fake backend, synthetic
+`fsnotify.ErrEventOverflow`) is the only executable coverage and passes
+natively on both Windows jobs, which shows `internal/watch`'s side of the
+contract is correct but does not exercise real `ReadDirectoryChangesW`
+overflow.
+
+### New tests
+
+`reparse_windows_test.go` (Windows-only): stamps an empty directory with a
+non-Microsoft reparse tag via `FSCTL_SET_REPARSE_POINT`/
+`REPARSE_GUID_DATA_BUFFER` — the wire format mirrors
+`internal/winspike/links.go`'s `SetUnknownTag`, measured working in this
+repo's own CI evidence, but is reimplemented rather than imported, since
+`internal/winspike` is scheduled for deletion (ADR §11.1) and `internal/watch`
+must not depend on it.
+
+- `TestDesiredDirsSkipsUnservicedReparseTagInsteadOfFailing` — the tagged
+  directory is excluded from the desired watch set; its sibling and the root
+  are not.
+- `TestNewWatcherStartsDespiteUnservicedReparseTag` — the end-to-end
+  regression test for the boot loop: `newWatcher` (the startup path) must
+  not fail because of the tagged directory.
+- `TestOpenWatchDirGrantsFileShareDelete` — a directory held open by
+  `openWatchDir` does not veto a concurrent rename of it.
+
+All three passed on the native run cited below. A fourth defensive posture —
+skip the whole test via `t.Skip` if `FSCTL_SET_REPARSE_POINT` with a
+non-Microsoft tag is refused on some future runner policy — mirrors
+`testutil.RequireSymlinks`'s existing pattern for a missing OS capability;
+not exercised on either evidence runner (the write succeeded on both).
+
+### A latent test bug this task's fix surfaced, and fixed
+
+Before `identity()` worked, every `internal/watch` test failed at the first
+`os.Open`/identify call, so four tests' actual assertions were never
+reached natively. Once identity worked, native CI (run `32932994845`) showed
+`TestReconcileReplacesWatchWhenDirectoryIdentityChanges`,
+`TestReconcileReplacesWatchWhenLinkTargetIdentityChanges`,
+`TestReconcileRemovesTargetWatchAfterUnwatch`, and
+`TestRealBackendWatchesReplacementDirectory` all failing — not because
+identity or reconciliation were wrong, but because each test compared a raw
+`t.TempDir()`-built path against backend bookkeeping keyed on
+`canonicalDir`'s output. On the `windows-2025` runner `TEMP` resolves to an
+8.3 short-name alias (`RUNNER~1`) while `canonicalDir`'s
+`filepath.EvalSymlinks` normalizes to the long name (`runneradmin`) — the
+identical symptom, and identical fix, already applied once in this branch to
+`internal/store`'s tests for an analogous comparison (commit `4d87801`,
+`TestUnwatch`/`TestWatchResolvesSymlinkedAncestorAtCreation`'s `sameTarget`).
+Fixed with a `mustCanonical(t, path)` test helper built on the package's own
+`canonicalDir`, used at each comparison site. This also caught a masked bug
+in `TestRealBackendWatchesReplacementDirectory` itself: it read
+`w.registered[dir]` with the raw (uncanonicalized) key, which silently
+missed the map and returned the zero `dirIdentity` both before and after the
+replacement — passing for the wrong reason on any platform where the string
+mismatch is large enough to always miss. Fixed by reading under the
+canonical key and asserting the pre-replacement identity is not the zero
+value. No test's assertion was weakened; each still checks exactly what it
+checked before, with a comparison that is correct on both platforms.
+
+### Verification run IDs
+
+- Baseline: run `32932994845` (commit `2ef00a8`, this task's first push,
+  identity implemented, triage/share-mode fix present, new tests present) —
+  `scratchpad/internal/watch` **passed 10 of 14 tests** on the
+  `full suite, symlink-capable` job (the three new boot-loop/share-mode
+  tests included), confirming F6/RW23/RW24 fixed; the four canonicalization
+  tests above failed, root-caused as above from this run's raw log rather
+  than guessed.
+- `32933382724` (commit `c74db88`, this task's second push, test-only fix)
+  — **`scratchpad/internal/watch` reports `ok` on both native jobs**
+  (`Windows amd64 native — full suite, symlink-capable` and
+  `Windows amd64 native — degraded mode, no symlinks`), confirmed by
+  grepping each job's raw log for the package result line and for zero
+  `--- FAIL` occurrences in either log. Both jobs report an overall
+  **`success`** conclusion (not merely `continue-on-error` masking a
+  failure) — the first time either native job has been fully green.
+  `scratchpad/internal/store` and `scratchpad/internal/web` also `ok` on
+  both native jobs. Windows arm64 native build and both Windows cross-builds
+  (amd64/arm64, `go vet` included) passed, as did the Linux job. Local gates
+  before each push (`make test`; `go test ./... -count=1`; `go test
+  ./internal/watch -race -count=3`; `go test ./internal/watch -count=20`;
+  `GOOS=windows GOARCH={amd64,arm64} go build ./...`; `GOOS=windows go vet
+  ./...`; `go mod tidy -diff`) were clean; Linux skip count stayed at 0. One
+  unrelated, non-reproducing flake (`TestPublishAndNestedWatchRejectSymlinkProject`
+  in `internal/store`, a package this task did not touch) was observed once
+  locally under load and did not reproduce across five standalone reruns or
+  three full-suite reruns; not investigated further as out of scope.
+  `continue-on-error` was left on both native jobs untouched, per
+  instruction — only `internal/web`'s two `/proc/self/fd` tests (P4.6,
+  already landed by another agent on this branch) and this task's own watch
+  fixes were in scope, and both are now clean; the only thing keeping either
+  native job's allowance in place is that removing it is explicitly owned by
+  other tasks (P3.11/P4 and P4.4), not this one.
+
+### Under-specified in the ADR
+
+- §6.11 names the skip set as "`errReparse` (including 1920), `errSharing`,
+  `fs.ErrPermission`, and the `ERROR_CLOUD_FILE_*` family" but does not
+  mention the `ERROR_FILE_SYSTEM_VIRTUALIZATION_*` codes, even though §6.11's
+  own prose names ProjFS as a boot-loop trigger alongside `APPEXECLINK` and
+  OneDrive. Included them anyway (five named constants), since a ProjFS
+  provider that is not running or not installed produces exactly one of
+  these, not `ERROR_CANT_ACCESS_FILE`.
+- Root's own leniency is left to the implementer. §6.11 says "a single
+  unreadable entry anywhere under the store root" and §11's P4.2 row says
+  nothing about the root directory itself; this report states the decision
+  made (root stays strict) and the reasoning, since the ADR does not settle
+  it explicitly.
+- "Logged once" (§6.11 item 1) is not defined precisely — once ever, once
+  per process, once per reconcile pass, or once per occurrence. Implemented
+  as "log a line every time `skipEntry` is called", i.e., once per walk
+  visit to that entry per `reconcile()` invocation; no cross-reconcile
+  deduplication state was added. If a persistently-unreadable entry logging
+  on every 250 ms–1 s reconcile cycle is judged too noisy in practice, adding
+  a `map[string]bool` on `*Watcher` to deduplicate across calls is a small,
+  self-contained follow-up.
+- M15.overflow's Windows-side mapping turned out to already be handled by
+  the fsnotify dependency rather than needing new code in this package; the
+  ADR's phrasing ("must be mapped explicitly in Phase 3/4") reads as if
+  `internal/watch` itself needs new mapping logic, when in fact the mapping
+  is fsnotify's and was already consumed correctly. Worth a note for anyone
+  auditing this against the ADR literally.
