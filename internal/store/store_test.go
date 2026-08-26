@@ -211,7 +211,7 @@ func TestUnwatch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(links) != 2 || links[0].Path != "lab/art" || links[0].Target != src || links[1].Path != "tree" {
+	if len(links) != 2 || links[0].Path != "lab/art" || !sameTarget(links[0].Target, src) || links[1].Path != "tree" {
 		t.Fatalf("Watches() = %+v", links)
 	}
 
@@ -624,6 +624,26 @@ func TestBrowseRefusesWatchAncestorSymlinkSwap(t *testing.T) {
 	}
 }
 
+// sameTarget reports whether a watch link's recorded Target names the same
+// directory as want. On Windows, canonicalizeWatchTarget resolves through
+// GetFinalPathNameByHandleW (ADR §4.3/§4.7 — required because
+// filepath.EvalSymlinks does not resolve junctions), which normalizes case
+// and 8.3 short-name aliases; t.TempDir() on a runner whose TEMP env var is
+// itself an 8.3 alias (observed: RUNNER~1 vs runneradmin) can therefore
+// disagree with the resolved Target by spelling alone while naming the
+// identical directory. A byte-exact comparison is exactly the wrong test
+// here — the ADR's own §7.2 reasoning for sameWatchTarget applies equally
+// to this assertion — so this checks object identity, falling back to
+// string equality only if either path cannot be stat'd.
+func sameTarget(target, want string) bool {
+	if target == want {
+		return true
+	}
+	a, err1 := os.Stat(target)
+	b, err2 := os.Stat(want)
+	return err1 == nil && err2 == nil && os.SameFile(a, b)
+}
+
 // TestWatchResolvesSymlinkedAncestorAtCreation is the "legitimate symlinked
 // ancestor" side of the A11.ancestor_swapped trade-off (see Watch,
 // store.go): a caller who reaches their target through a symlinked
@@ -667,7 +687,7 @@ func TestWatchResolvesSymlinkedAncestorAtCreation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(links) != 1 || links[0].Target != projA {
+	if len(links) != 1 || !sameTarget(links[0].Target, projA) {
 		t.Fatalf("Watches() = %+v, want one link resolved to %q", links, projA)
 	}
 
@@ -700,7 +720,7 @@ func TestWatchResolvesSymlinkedAncestorAtCreation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(links) != 1 || links[0].Target != projA {
+	if len(links) != 1 || !sameTarget(links[0].Target, projA) {
 		t.Fatalf("after repointing the convenience symlink, Watches() = %+v, want the watch still pinned to %q (not %q)", links, projA, projB)
 	}
 	if f, safe := OpenDocument([]string{"viaconv", "index.html"}); !safe {
