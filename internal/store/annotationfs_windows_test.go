@@ -225,6 +225,43 @@ func TestAtomicWriteFileHappyPath(t *testing.T) {
 	}
 }
 
+// Namespace-removal audit state (P3.14 red-team L5). Owns the mutex/log this
+// package's production recordNamespaceRemoval used to carry directly;
+// annotationfs_windows.go now only ever compares namespaceRemovalHook to nil
+// on the production path, and this init wires the hook to the state below
+// for the one test that needs it.
+var (
+	writeAuditMu  sync.Mutex
+	writeAuditOn  bool
+	writeAuditLog []string
+)
+
+func init() {
+	namespaceRemovalHook = func(name string) {
+		writeAuditMu.Lock()
+		if writeAuditOn {
+			writeAuditLog = append(writeAuditLog, name)
+		}
+		writeAuditMu.Unlock()
+	}
+}
+
+func writeAuditStart() {
+	writeAuditMu.Lock()
+	writeAuditOn = true
+	writeAuditLog = nil
+	writeAuditMu.Unlock()
+}
+
+func writeAuditStop() []string {
+	writeAuditMu.Lock()
+	defer writeAuditMu.Unlock()
+	writeAuditOn = false
+	out := writeAuditLog
+	writeAuditLog = nil
+	return out
+}
+
 // TestAtomicWriteNeverRemovesDestination migrates P13.no_dest_removal/
 // P13.audit, with P13.audit_control as its own negative control.
 func TestAtomicWriteNeverRemovesDestination(t *testing.T) {

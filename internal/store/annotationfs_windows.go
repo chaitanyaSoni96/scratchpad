@@ -667,8 +667,7 @@ func deleteEntryAt(parent int, name string) error {
 }
 
 // ---------------------------------------------------------------------------
-// Namespace-removal audit — TEST INSTRUMENTATION ONLY, off by default (a
-// single untaken branch on the production path when not armed). Migrates
+// Namespace-removal audit hook — TEST INSTRUMENTATION ONLY. Migrates
 // winspike's audit (P13.audit/P13.no_dest_removal, with its own
 // P13.audit_control) into a permanent property: proving atomicWriteFileAt's
 // replace never degrades into a separate removal of the destination
@@ -677,36 +676,22 @@ func deleteEntryAt(parent int, name string) error {
 // destination by name before renaming the temp into place; the write path's
 // OWN temp cleanup goes through deleteByHandlePosix directly (never through
 // this function), so it never appears in the log during a correct replace.
+//
+// P3.14 red-team L5: this used to be an unconditional sync.Mutex acquisition
+// on EVERY entry removal (once per file in every tree delete), armed or not,
+// plus its own state living in the shipped Windows binary — the Linux
+// backend has no equivalent. recordNamespaceRemoval is now a nil-checked
+// function pointer, same shape as runStoreOpHook (store.go): nil (a single
+// comparison, no lock) in production, set only from
+// annotationfs_windows_test.go, which owns all of the mutex/log state below.
 // ---------------------------------------------------------------------------
 
-var (
-	writeAuditMu  sync.Mutex
-	writeAuditOn  bool
-	writeAuditLog []string
-)
-
-func writeAuditStart() {
-	writeAuditMu.Lock()
-	writeAuditOn = true
-	writeAuditLog = nil
-	writeAuditMu.Unlock()
-}
-
-func writeAuditStop() []string {
-	writeAuditMu.Lock()
-	defer writeAuditMu.Unlock()
-	writeAuditOn = false
-	out := writeAuditLog
-	writeAuditLog = nil
-	return out
-}
+var namespaceRemovalHook func(string)
 
 func recordNamespaceRemoval(name string) {
-	writeAuditMu.Lock()
-	if writeAuditOn {
-		writeAuditLog = append(writeAuditLog, name)
+	if namespaceRemovalHook != nil {
+		namespaceRemovalHook(name)
 	}
-	writeAuditMu.Unlock()
 }
 
 // removeTreeAt is RemoveTreeAt (internal/winspike/atomicwrite.go) ported. The
