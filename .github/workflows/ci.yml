@@ -359,6 +359,51 @@ jobs:
         shell: pwsh
         run: go test ./internal/watch -count=20
 
+  # ------------------------------------------------------------------
+  # P5.1/P5.2/P5.5 — installer verification on a real Windows runner.
+  # scripts/verify-install.ps1 exercises every install.ps1 operation
+  # (cli, skill, all, drop-mcp, install, startup, start, status, stop,
+  # remove-startup, uninstall, unknown-verb exit 2), runs each twice to
+  # prove idempotence, pre-creates %USERPROFILE%\.scratchpad with a
+  # marker and asserts it survives a full install + uninstall (the
+  # review-checklist rule), drives the Scheduled Task through
+  # register/start/status/stop/unregister with live HTTP probes of
+  # 127.0.0.1:8737, and covers the P5.5 edge cases: an install path
+  # with a space and a non-ASCII character, a non-administrator local
+  # user, and an overridden SCRATCHPAD_ROOT (shell-only vs persisted).
+  #
+  # The matrix runs the same assertions against both engines: pwsh
+  # (PowerShell 7) and powershell (Windows PowerShell 5.1). The harness
+  # itself always runs under pwsh; -Engine selects what executes
+  # install.ps1. Matrix legs mutate per-user state (HKCU PATH, the
+  # scheduled task, %LOCALAPPDATA%), which is safe only because each
+  # leg gets its own ephemeral VM.
+  # ------------------------------------------------------------------
+  windows-installer:
+    name: Windows installer verification — ${{ matrix.engine }} (P5.1/P5.2/P5.5)
+    runs-on: windows-2025
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        engine: [pwsh, powershell]
+    env:
+      CGO_ENABLED: 0
+      # env indirection, not run-block ${{ }} interpolation (house style;
+      # the values are workflow literals, but the discipline is uniform).
+      INSTALL_ENGINE: ${{ matrix.engine }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build both commands natively
+        shell: pwsh
+        run: go build -o bin/ ./cmd/...
+      - name: Verify install.ps1 end to end
+        shell: pwsh
+        run: pwsh -NoProfile -File scripts/verify-install.ps1 -Engine $env:INSTALL_ENGINE
+
   windows-artifacts:
     name: Windows release archives (cross-built from Linux)
     runs-on: ubuntu-latest

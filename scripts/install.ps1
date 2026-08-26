@@ -414,7 +414,10 @@ function Uninstall-All {
     foreach ($name in @('scratchpad.exe', 'scratchpad-web.exe')) {
         $p = Join-Path $BinDir $name
         if (Test-Path -LiteralPath $p) {
-            Remove-Item -LiteralPath $p -Force
+            # Same exe-lock race as Install-Binary: the server Remove-Startup
+            # just stopped can hold its file lock for a moment after
+            # Stop-ScheduledTask returns.
+            Invoke-WithRetry { Remove-Item -LiteralPath $p -Force }
             Write-Host "uninstall: removed $p"
         }
     }
