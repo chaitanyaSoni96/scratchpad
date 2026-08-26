@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"syscall"
 )
 
@@ -40,6 +41,25 @@ func identity(dir *os.File) (dirIdentity, error) {
 		return dirIdentity{}, fmt.Errorf("filesystem does not expose inode identity")
 	}
 	return dirIdentity{dev: uint64(stat.Dev), ino: uint64(stat.Ino)}, nil
+}
+
+// canonicalDir is desiredDirs'/reconcile's per-platform dedup/identity key
+// (watch.go's doc comment on the type). filepath.EvalSymlinks already
+// resolves every link flavour a Linux watch tree can contain — there is no
+// junction here — so this is unchanged from before the per-platform split;
+// see identity_windows.go's canonicalDir for why Windows needs a different
+// primitive (P-5,
+// .agents/plans/in-progress/native-windows-support/reviews/P4.7-semantic-parity.md).
+func canonicalDir(path string) (string, error) {
+	real, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return "", err
+	}
+	abs, err := filepath.Abs(real)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Clean(abs), nil
 }
 
 // openWatchDir opens dir for desiredDirs' walk. On Linux os.Open already

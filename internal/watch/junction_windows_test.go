@@ -3,6 +3,7 @@
 package watch
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -20,23 +21,35 @@ import (
 // P-4). RequireWatchLinks, not RequireSymlinks: junction creation needs no
 // privilege at all, so this should never skip on an ordinary box.
 //
-// This test is also the empirical check P4.7 finding P-5 asked for, and it
-// settles P-5 with real evidence from Windows CI (Go 1.26.5,
-// windows-amd64), not just reasoning from Go's source: canonicalDir
-// (filepath.EvalSymlinks) succeeds resolving a path UP TO AND INCLUDING a
-// junction component, but FAILS with "the system cannot find the path
-// specified" for any path that continues PAST it — even though the OS
-// itself resolves that exact path transparently for ordinary I/O (ReadDir
-// through the junction's handle, below, works fine). desiredDirs' walk
-// reaches that failing path (it must, to have discovered "inside" exists
-// at all), and skipWalkError/skipEntry treat the failure as "the entry
-// disappeared" and silently drop it. So unlike a directory symlink, where
-// everything below the link is watched, a junction's watch coverage stops
-// one level short: content nested inside it is never registered, and
-// changes there never trigger a live refresh. This is a real functional
-// gap — worse than P-5's original "registered under a different key"
-// framing — and belongs to P-5's own owner to fix, not P-4 (which asked
-// only for the coverage that would settle it either way).
+// This test previously asserted the BROKEN behaviour P4.7 finding P-5
+// diagnosed and 185b37d then measured on real Windows CI (run 32969235815),
+// disproving P-5's own "registered under a different key" framing:
+// canonicalDir (then filepath.EvalSymlinks) succeeded resolving a path UP TO
+// AND INCLUDING a junction component, but FAILED with "the system cannot
+// find the path specified" for any path that continued PAST it — even
+// though the OS itself resolves that exact path transparently for ordinary
+// I/O (ReadDir through the junction's handle, and openWatchDir's CreateFile,
+// both work fine). desiredDirs' walk reaches that failing path (it must, to
+// have discovered "inside" exists at all), and skipWalkError/skipEntry
+// treated the failure as "the entry disappeared" and silently dropped it.
+// So unlike a directory symlink, where everything below the link is
+// watched, a junction's watch coverage stopped one level short: content
+// nested inside it was never registered, and changes there never triggered
+// a live refresh.
+//
+// canonicalDir is now handle-based on Windows (identity_windows.go):
+// it opens the path FOLLOWING reparse points — the same kind of open
+// openWatchDir already performs — and reads
+// GetFinalPathNameByHandleW(VOLUME_NAME_DOS) from that handle instead of
+// walking the path string component by component, so a junction resolves
+// transparently the same way CreateFile always did. This test now asserts
+// the FIXED behaviour: a directory nested below a junction watch link is
+// registered, the same as one nested below a directory symlink
+// (TestDesiredDirsFollowsWatchLinkButNotNestedDirectorySymlink, watch_test.go).
+// TestNestedChangeUnderJunctionReachesHub below goes one step further and
+// proves the property this mechanism exists for — that a change nested
+// below a junction actually reaches a live-refresh subscriber, not just
+// that the directory is present in desiredDirs' map.
 func TestDesiredDirsFollowsJunctionWatchLink(t *testing.T) {
 	testutil.RequireWatchLinks(t)
 	root := t.TempDir()
@@ -62,11 +75,67 @@ func TestDesiredDirsFollowsJunctionWatchLink(t *testing.T) {
 		t.Fatal("the junction's own directory was not registered — junction watch links are not being followed at all")
 	}
 
-	if _, err := canonicalDir(filepath.Join(link, "inside")); err == nil {
-		t.Fatalf("canonicalDir(%q) unexpectedly succeeded — if a Go toolchain change made EvalSymlinks "+
-			"resolve through an intermediate junction, P-5's nested-registration gap may now be fixed, "+
-			"and this test should be updated to assert the nested directory IS registered instead",
-			filepath.Join(link, "inside"))
+	insideCanonical, err := canonicalDir(filepath.Join(link, "inside"))
+	if err != nil {
+		t.Fatalf("canonicalDir(%q): %v — P-5's fix requires this to resolve THROUGH the junction, not just up to it",
+			filepath.Join(link, "inside"), err)
+	}
+	if _, ok := dirs[insideCanonical]; !ok {
+		t.Fatal("a directory nested below the junction watch link was not registered — P-5: junction watch coverage stopped one level short")
+	}
+}
+
+// TestNestedChangeUnderJunctionReachesHub is
+// TestDesiredDirsFollowsJunctionWatchLink taken one step further:
+// "registered in desiredDirs' map" is the mechanism, but "a change there
+// triggers a live refresh" is the property a user actually observes, and
+// that is exactly what P-5's gap broke — a junction-backed watch tree's
+// nested content was never registered with the real fsnotify backend at
+// all, so saving a file inside it never produced a Hub.Broadcast and the
+// site never live-refreshed. This exercises the full stack — New's real
+// fsnotify.Watcher and Watcher.Run, not newWatcher+fakeBackend — so a
+// regression here would mean the fix works for desiredDirs' bookkeeping but
+// not for an actual ReadDirectoryChangesW registration.
+func TestNestedChangeUnderJunctionReachesHub(t *testing.T) {
+	testutil.RequireWatchLinks(t)
+	root := t.TempDir()
+	source := t.TempDir()
+	inside := filepath.Join(source, "inside")
+	if err := os.Mkdir(inside, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "watch")
+	if err := testutil.MakeJunction(link, source); err != nil {
+		t.Fatal(err)
+	}
+
+	hub := NewHub()
+	w, err := New(root, hub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changes, cancel := hub.Subscribe()
+	defer cancel()
+
+	ctx, stop := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- w.Run(ctx) }()
+	defer func() {
+		stop()
+		if err := <-done; err != nil && err != context.Canceled {
+			t.Errorf("Run: %v", err)
+		}
+	}()
+
+	if err := os.WriteFile(filepath.Join(inside, "new.txt"), []byte("hi"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case <-changes:
+	case <-time.After(5 * time.Second):
+		t.Fatal("a change nested below a junction watch link never reached the hub — " +
+			"junction watch coverage stopped one level short of the link (P-5)")
 	}
 }
 

@@ -6,6 +6,8 @@ import (
 	"errors"
 	"io/fs"
 	"os"
+	"path/filepath"
+	"strings"
 	"structs"
 	"syscall"
 	"unsafe"
@@ -67,6 +69,95 @@ func identity(dir *os.File) (dirIdentity, error) {
 		return dirIdentity{}, err
 	}
 	return dirIdentity{vol: info.VolumeSerialNumber, id: info.FileID}, nil
+}
+
+// canonicalDir is desiredDirs'/reconcile's per-platform dedup/identity key
+// (watch.go's doc comment on the type; identity_unix.go's canonicalDir is
+// the Linux twin). filepath.EvalSymlinks cannot do this job on Windows (P-5,
+// .agents/plans/in-progress/native-windows-support/reviews/P4.7-semantic-parity.md,
+// M5.junction in spike-findings.md): it resolves ModeSymlink reparse points
+// but not junctions — the default watch-link flavour for any
+// Developer-Mode-off user (i.e. an ordinary Windows machine). P-5's own text
+// reasoned from Go's source that this would merely leave a junction
+// unresolved-but-passable, so a junction watch tree would still be walked
+// and registered, just under a different canonical key than the same tree
+// reached via a symlink. Real Windows CI (run 32969235815, recorded in
+// 185b37d) disproved that: EvalSymlinks succeeds resolving a path up to and
+// including a junction component, but FAILS resolving anything nested past
+// one, with "the system cannot find the path specified" — even though
+// ordinary I/O (CreateFile, which openWatchDir below uses) follows the exact
+// same path transparently, because the filesystem itself services a
+// junction's reparse point for a plain open, unlike EvalSymlinks' manual
+// component-by-component walk. desiredDirs calls canonicalDir before it ever
+// reaches openWatchDir, so that failure was misclassified by skipEntry as
+// "this entry disappeared" and silently dropped — a junction-backed watch's
+// coverage stopped one level short of the link itself, and nothing nested
+// inside it was ever registered or reached the SSE hub.
+//
+// The fix mirrors internal/store's canonicalizeWatchTarget
+// (storefs_windows.go): open path FOLLOWING reparse points (plain
+// FILE_FLAG_BACKUP_SEMANTICS, no FILE_FLAG_OPEN_REPARSE_POINT — the OS
+// resolves the junction during the open itself) and read
+// GetFinalPathNameByHandleW(VOLUME_NAME_DOS) from that handle, which
+// M6.resolution measured returns the long-name canonical form. This is a
+// deliberately separate, un-exported copy rather than a call into
+// internal/store: canonicalizeWatchTarget is a containment primitive for
+// Watch's single call site under SCRATCHPAD_ROOT (its result is a durable
+// link target, re-validated with validateAbsoluteWindowsPath and walked
+// handle-by-handle before any later use), while this function runs on every
+// directory desiredDirs' walk visits, including watched trees entirely
+// outside SCRATCHPAD_ROOT — a root-anchored primitive does not apply here,
+// and canonicalDir's job is deduplication/identity keying on a read-only
+// registration path, not containment. Reusing or generalizing
+// canonicalizeWatchTarget for this weaker, broader use would blur that line
+// rather than strengthen anything.
+func canonicalDir(path string) (string, error) {
+	p, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return "", &os.PathError{Op: "open", Path: path, Err: err}
+	}
+	h, err := windows.CreateFile(
+		p,
+		windows.GENERIC_READ,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		nil,
+		windows.OPEN_EXISTING,
+		windows.FILE_FLAG_BACKUP_SEMANTICS,
+		0,
+	)
+	if err != nil {
+		return "", &os.PathError{Op: "open", Path: path, Err: err}
+	}
+	defer windows.CloseHandle(h)
+	final, err := finalPathDOS(h)
+	if err != nil {
+		return "", &os.PathError{Op: "GetFinalPathNameByHandle", Path: path, Err: err}
+	}
+	return filepath.Clean(final), nil
+}
+
+// finalPathDOS is GetFinalPathNameByHandleW(VOLUME_NAME_DOS), trimmed of its
+// \\?\ prefix — the same shape, and for the same reason (x/sys/windows
+// v0.41.0 does not name the VOLUME_NAME_DOS flag), as internal/store's
+// win32_windows.go function of the same name, duplicated here rather than
+// exported: it is a ~15-line wrapper directly over an already-exported
+// x/sys/windows call, not shared mechanism (the same judgment call this
+// file already makes for dirIdentity/fileIDInfo above and identity's doc
+// comment explains at length).
+func finalPathDOS(h windows.Handle) (string, error) {
+	const volumeNameDOS = 0x0
+	buf := make([]uint16, windows.MAX_LONG_PATH)
+	n, err := windows.GetFinalPathNameByHandle(h, &buf[0], uint32(len(buf)), volumeNameDOS)
+	if err != nil {
+		return "", err
+	}
+	if int(n) > len(buf) {
+		buf = make([]uint16, n+1)
+		if _, err = windows.GetFinalPathNameByHandle(h, &buf[0], uint32(len(buf)), volumeNameDOS); err != nil {
+			return "", err
+		}
+	}
+	return strings.TrimPrefix(windows.UTF16ToString(buf), `\\?\`), nil
 }
 
 // openWatchDir opens dir for desiredDirs' walk with the full share mode

@@ -294,17 +294,13 @@ func desiredDirs(root string) (map[string]desiredDir, error) {
 	return dirs, nil
 }
 
-func canonicalDir(path string) (string, error) {
-	real, err := filepath.EvalSymlinks(path)
-	if err != nil {
-		return "", err
-	}
-	abs, err := filepath.Abs(real)
-	if err != nil {
-		return "", err
-	}
-	return filepath.Clean(abs), nil
-}
+// canonicalDir is defined per-platform (identity_unix.go / identity_windows.go),
+// not here, for the same reason as dirIdentity above and P-5
+// (.agents/plans/in-progress/native-windows-support/reviews/P4.7-semantic-parity.md):
+// filepath.EvalSymlinks — sufficient on Linux, where every link flavour is a
+// true ModeSymlink — cannot canonicalise a Windows junction, the default
+// watch-link flavour for a Developer-Mode-off user. See identity_windows.go
+// for the measured failure mode and the handle-based replacement.
 
 // skipEntry reports whether err, encountered while resolving, opening,
 // identifying or reading dir during desiredDirs' walk, means "this one entry
