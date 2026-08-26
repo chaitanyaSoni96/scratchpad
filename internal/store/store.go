@@ -175,14 +175,32 @@ func validateSegment(s string) error {
 // syntactically safe and, while the path is still store tree, not hidden by
 // ignore rules. It stops checking at an artifact directory — everything below
 // one is that artifact's assets, served as published, not filtered.
+//
+// The store root itself is never an artifact for this purpose (List,
+// ResolvePath and Watches all start their own "does this directory hold
+// html" test one level below the root, never at it), so the short-circuit
+// below is gated on dir != root. Evaluating it at dir == root was P3.13 F-1:
+// a single stray *.html file placed directly in the store root made
+// hasHTML(root) true before any segment's Visible check ran, so the loop
+// returned true unconditionally on the very first iteration — for every
+// lookup path, regardless of what segments followed. That disabled the
+// hard-coded .annotations/.scratchpad-lock reserved-name guard, every
+// defaultIgnores entry (.ssh/, .env, *.pem, .git/, node_modules/, ...) and
+// every .scratchpadignore rule in the store, the moment any artifact
+// happened to be published at top level. Gating on dir != root preserves the
+// genuine behaviour the short-circuit exists for: once a real, non-hidden
+// artifact directory has been entered (dir has advanced past the root at
+// least once), everything below it is that artifact's assets and must not
+// be filtered by ignore rules — see TestIgnoreDoesNotFilterArtifactAssets
+// and TestRootLevelHTMLDoesNotDisableIgnoreRules's positive control.
 func visibleSegments(root string, segs []string) bool {
 	dir := root
 	for _, s := range segs {
 		if err := validateSegment(s); err != nil {
 			return false
 		}
-		if hasHTML(dir) {
-			return true // inside an artifact: the rest is assets
+		if dir != root && hasHTML(dir) {
+			return true // inside a real (non-root) artifact: the rest is assets
 		}
 		full := filepath.Join(dir, s)
 		fi, err := os.Stat(full)

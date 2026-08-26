@@ -159,3 +159,63 @@ func TestArtifactHandlerRefusesWatchAncestorSymlinkSwap(t *testing.T) {
 		t.Fatalf("GET /a/linked/index.html after ancestor symlink swap = %d, want 404 (attacker's own index.html must not be served either); body: %s", rec.Code, rec.Body.String())
 	}
 }
+
+// TestRootLevelHTMLDoesNotExposeHiddenPathsOverHTTP is the HTTP-layer half of
+// the P3.13 F-1 regression (internal/store's
+// TestRootLevelHTMLDoesNotDisableIgnoreRules covers the store API directly):
+// the actual exposure the finding names is unauthenticated reads and deletes
+// reaching content that ignore rules are supposed to make unreachable, once a
+// stray .html sits directly in the store root. This reproduces the review's
+// live appendix end to end against the real mux.
+func TestRootLevelHTMLDoesNotExposeHiddenPathsOverHTTP(t *testing.T) {
+	root := testRoot(t)
+	// The bug trigger: an .html file directly in the store root.
+	if err := os.WriteFile(filepath.Join(root, "index.html"), []byte("<h1>root</h1>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, ".git", "hooks"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".git", "secret.md"), []byte("SECRET-IN-GIT"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".git", "hooks", "index.html"), []byte("<h1>git artifact</h1>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	seedArtifact(t, root, "demo")
+
+	mux := notesMux(t)
+
+	// Loose markdown inside a hidden directory (.git/secret.md) must 404 and
+	// must never leak its content.
+	rec := doReq(t, mux, http.MethodGet, "/a/.git/secret.md", nil, nil)
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("GET /a/.git/secret.md = %d, want 404 (root-level html must not disable ignore rules); body: %s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "SECRET-IN-GIT") {
+		t.Fatal("response leaked the hidden file's content")
+	}
+
+	// An artifact living inside a hidden directory (.git/hooks) must 404 too.
+	rec = doReq(t, mux, http.MethodGet, "/a/.git/hooks/", nil, nil)
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("GET /a/.git/hooks/ = %d, want 404", rec.Code)
+	}
+
+	// The unauthenticated DELETE the review reproduced live must not reach
+	// content inside a hidden directory.
+	rec = doReq(t, mux, http.MethodDelete, "/a/.git/hooks", nil, nil)
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("DELETE /a/.git/hooks = %d, want 404 (must not delete inside a hidden directory); body: %s", rec.Code, rec.Body.String())
+	}
+	if _, err := os.Stat(filepath.Join(root, ".git", "hooks", "index.html")); err != nil {
+		t.Errorf(".git/hooks/index.html was removed by the refused DELETE: %v", err)
+	}
+
+	// Positive control: an ordinary, non-hidden artifact must still be served
+	// fine even with the stray root-level index.html present.
+	rec = doReq(t, mux, http.MethodGet, "/a/demo/", nil, nil)
+	if rec.Code != http.StatusOK {
+		t.Errorf("GET /a/demo/ = %d, want 200 (real artifacts must still serve); body: %s", rec.Code, rec.Body.String())
+	}
+}

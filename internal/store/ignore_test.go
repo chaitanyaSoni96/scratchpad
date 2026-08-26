@@ -301,6 +301,58 @@ func TestIgnoreDoesNotFilterArtifactAssets(t *testing.T) {
 	}
 }
 
+// TestRootLevelHTMLDoesNotDisableIgnoreRules is F-1's store-layer
+// regression: visibleSegments' artifact short-circuit ("we are inside an
+// artifact, the rest is assets") must never fire against the store root
+// itself. Before the fix, a single stray .html directly in the root made
+// hasHTML(root) true on the very first loop iteration (dir == root), so
+// visibleSegments returned true unconditionally for every path — disabling
+// the hard-coded .annotations guard and every defaultIgnores/
+// .scratchpadignore rule. Reproduces the P3.13 F-1 finding's appendix.
+func TestRootLevelHTMLDoesNotDisableIgnoreRules(t *testing.T) {
+	root := testRoot(t)
+	resetIgnoreCache()
+	// The bug trigger: an .html file sitting directly in the store root,
+	// which is never itself an artifact for visibility purposes (List,
+	// ResolvePath and Watches all start their artifact test one level down).
+	writeFile(t, root, "index.html", "<h1>root</h1>")
+	writeFile(t, root, ".git/secret.md", "SECRET-IN-GIT")
+	writeFile(t, root, "node_modules/pkg/readme.md", "SECRET-IN-NM")
+	mkdirs(t, root, ".venv/site")
+	writeFile(t, root, ".venv/site/index.html", "<h1>v</h1>")
+	writeFile(t, root, ".venv/site/key.pem", "PRIVATE-KEY-BYTES")
+
+	hidden := []string{
+		".annotations",   // hard-coded reserved-name guard
+		".git",           // defaultIgnores directory rule
+		".git/secret.md", // credential-adjacent content below it
+		"node_modules",   // defaultIgnores directory rule
+		"node_modules/pkg/readme.md",
+		".venv",              // defaultIgnores directory rule
+		".venv/site",         // an artifact living inside a hidden dir
+		".venv/site/key.pem", // the credential itself
+	}
+	for _, p := range hidden {
+		if VisiblePath(p) {
+			t.Errorf("VisiblePath(%q) = true, want false (a root-level .html must not disable ignore rules)", p)
+		}
+	}
+
+	// Positive control: assets inside a REAL, non-hidden artifact must stay
+	// reachable and unfiltered, exactly as TestIgnoreDoesNotFilterArtifactAssets
+	// checks without a stray root-level .html in play.
+	mkdirs(t, root, "demo/build")
+	writeFile(t, root, "demo/index.html", "<h1>hi</h1>")
+	writeFile(t, root, "demo/build/app.js", "// asset")
+	writeFile(t, root, ".scratchpadignore", "build\n")
+	if !VisiblePath("demo/build/app.js") {
+		t.Error("VisiblePath(demo/build/app.js) = false, want true (assets inside a real artifact must stay reachable even with a stray root .html present)")
+	}
+	if a, file, ok := ResolvePath([]string{"demo", "build", "app.js"}); !ok || file != "build/app.js" || a.Name != "demo" {
+		t.Errorf("ResolvePath into a real artifact's assets must still work, got ok=%v file=%q", ok, file)
+	}
+}
+
 func TestValidateSegment(t *testing.T) {
 	for _, s := range []string{"a", "My Docs", ".agents", "v1.2_final", "café"} {
 		if err := validateSegment(s); err != nil {
