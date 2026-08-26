@@ -296,6 +296,61 @@ jobs:
   # until it lands, mkrelease warns and builds the archive without it.
   # Only the tagged-release path makes its absence fatal.
   # ------------------------------------------------------------------
+  # ------------------------------------------------------------------
+  # P6.1 / P6.6 — stress and race campaigns. The plan's "Verification
+  # Commands" list these explicitly; P0.5 finding F7 deferred them here
+  # rather than to the Phase 0 gate.
+  #
+  # Repetition and -race catch a different class of defect than a single
+  # pass: the store and watcher both hold handles across concurrent
+  # mutation, and several bugs found during this port (a dup'd fd sharing
+  # its read offset, reconcile identity churn) only surface on repeat.
+  #
+  # Deliberately NOT continue-on-error: if this goes red it is either a
+  # real race or a flaky test, and the plan says to investigate flakes
+  # rather than paper over them with broad retries.
+  # ------------------------------------------------------------------
+  stress-linux:
+    name: Linux — race and repetition (P6.1)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: go test -race
+        run: go test -race ./internal/store ./internal/watch ./internal/web
+      - name: store, 20 runs
+        run: go test ./internal/store -count=20
+      - name: watch, 20 runs
+        run: go test ./internal/watch -count=20
+
+  stress-windows:
+    name: Windows amd64 — race and repetition (P6.1)
+    runs-on: windows-2025
+    timeout-minutes: 45
+    # Windows repetition is slower and newer than the Linux equivalent;
+    # it stays advisory until P6.1 has run it enough times to establish a
+    # flake baseline. Removing this allowance is a P6.1 deliverable.
+    continue-on-error: true
+    env:
+      CGO_ENABLED: 0
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: go test -race
+        shell: pwsh
+        run: go test -race ./internal/store ./internal/watch ./internal/web
+      - name: store, 20 runs
+        shell: pwsh
+        run: go test ./internal/store -count=20
+      - name: watch, 20 runs
+        shell: pwsh
+        run: go test ./internal/watch -count=20
+
   windows-artifacts:
     name: Windows release archives (cross-built from Linux)
     runs-on: ubuntu-latest
