@@ -1187,3 +1187,161 @@ checked before, with a comparison that is correct on both platforms.
   `internal/watch` itself needs new mapping logic, when in fact the mapping
   is fsnotify's and was already consumed correctly. Worth a note for anyone
   auditing this against the ADR literally.
+
+## Phase 4 — CLI End-to-End Tests (P4.5)
+
+### What is implemented
+
+New file `cmd/scratchpad/main_e2e_test.go`. Every test drives the actual
+compiled CLI as a subprocess against a real temporary `SCRATCHPAD_ROOT`
+(`t.TempDir()`) — not the internal helper functions `main_test.go` already
+unit-tests (`publishFiles`, `filesFromDir`).
+
+`TestMain` lets the compiled test binary double as `scratchpad` itself:
+re-exec'd with `SCRATCHPAD_CLI_E2E_HELPER=1` (set only by this file's
+`runCLI`/`runCLINoArgs` helpers), the process calls `main()` on its own
+`os.Args` and exits exactly as the production binary would — the
+`testing.M` + `os.Executable()` re-exec pattern named in the task, chosen
+over `go build`: it needs no build step and no `.exe`-suffix bookkeeping,
+and it was confirmed to type-check on Windows by running `GOOS=windows
+GOARCH={amd64,arm64} go vet ./...`, which compiles test files too.
+`SCRATCHPAD_URL` is pointed at a closed local port (`http://127.0.0.1:1`) in
+every invocation so `webAlive()`'s liveness probe fails on immediate
+connection refusal instead of blocking its 700ms timeout — keeps the suite
+fast (`-race -count=3` ~141s for ~100 subprocess spawns) without touching
+`main.go`'s networking code at all.
+
+Coverage, by area (exit codes asserted as literal integers throughout, per
+the task's "assert the actual codes" instruction):
+
+- **publish**: `-html`, `-html -css -js`, stdin (`-`), `-dir` with nested
+  assets; the create-only guarantee (a second publish of a taken name fails
+  exit 1 with the actionable "already exists" message, and the original
+  bytes on disk are unchanged); the P2.5 portable-name rule — `CON` as
+  `-name`, `COM1` as a `-project` segment, trailing dot, trailing space,
+  `nul.html` and `COM1.tar.gz` as file paths inside `-dir` (whole publish
+  fails, nothing partial lands on disk), plus a negative control
+  (`console`/`nul2.html` are correctly NOT rejected); exactly-one-of-`-dir`/
+  `-html`; `-css`/`-js` require `-html`; excess positional arguments (exit
+  2).
+- **list**: `-json` shape parsed back into `[]store.Artifact` (checks
+  `Name`, `Entry`, `Size`), plain-text output, excess arguments (exit 2),
+  and the empty-store shape for both forms.
+- **watch/watches/unwatch**: full lifecycle (watch → watches → list →
+  unwatch → watches empty → source content unchanged); same-target
+  idempotence (re-watching is a no-op, not an error — exactly one entry
+  remains); different-target collision under the same name (exit 1,
+  "already exists", the original watch's target is provably unchanged);
+  excess arguments on both `watch` and `unwatch` (exit 2); empty `watches`.
+- **delete**: normal delete, delete of a nonexistent name (exit 1), excess
+  arguments (exit 2), and delete of a *watched* top-level entry — CLAUDE.md
+  documents "`Delete` unlinks watched entries without touching the source",
+  confirmed here by reading the source file's content back unchanged and
+  confirming the link vanishes from both `watches` and `list`.
+- **notes**: markdown report and `-json`; `reply` (appends without
+  closing) and `resolve` (closes with a summary) verified both by CLI
+  stdout and by re-reading the sidecar via `store.LoadNotes`; `-all` vs the
+  default open-only view; `resolve` on a missing id (exit 1, "no such
+  note"); `resolve`/`reply` without `-m` (exit 2); the `userOnlyVerbs`
+  rejection for `create`/`edit`/`delete`/`reopen` (exit 2, the real
+  explanation text, and explicitly asserted to NOT contain "No open notes"
+  — the text a silently-read-as-a-path regression would produce instead);
+  a negative control confirming a real document path that merely starts
+  with a rejected verb's letters (`deleteme-report/index.html`) is still
+  read as a path; excess positional arguments on read/resolve/reply.
+  Notes are authored directly through `store.SaveNotes` in test setup
+  (`t.Setenv(store.RootEnv, root)`) since the CLI deliberately has no way to
+  create one — the exact asymmetry these tests protect.
+- **general**: no arguments, unknown command, `-h`/`--help`/`help`, and the
+  web-down warning on stderr (every command that prints a hosted URL warns
+  there without failing when the server is unreachable).
+
+### Windows specifics
+
+- No new `testutil.RequireSymlinks` call was added, deliberately, after
+  checking `symlinkAt` (`internal/store/link_windows.go`) rather than
+  assuming: it tries a real symlink first and, on
+  `ERROR_PRIVILEGE_NOT_HELD` (or any reparse-set failure), falls back to a
+  junction — the file's own comment: "Junctions are accepted at the same
+  trust tier as symlinks... rejecting them would only remove `watch` from
+  every machine with Developer Mode off." `scratchpad watch` is therefore
+  expected to succeed on a Developer-Mode-off machine via that fallback,
+  and gating the CLI's watch/watches/unwatch tests behind
+  `RequireSymlinks` would have wrongly skipped exactly the scenario P4.4/
+  P4.5 exist to cover. Every watch-lifecycle test in this file
+  (`TestCLIWatchListUnwatch`, `TestCLIWatchSameTargetIsIdempotent`,
+  `TestCLIWatchDifferentTargetCollision`) is ungated and asserts success
+  purely by CLI exit code and `watches`/`list` output, never by inspecting
+  the link's raw reparse type.
+- Also confirmed CI's "degraded mode" job (`windows-degraded-test`,
+  `SCRATCHPAD_TEST_SYMLINKS=0`) is a test-harness-only switch:
+  `testutil.SymlinkCapable`/`RequireSymlinks` are the only readers of that
+  env var anywhere in the tree (`grep -rn SCRATCHPAD_TEST_SYMLINKS internal/
+  cmd/` finds nothing else); production `symlinkAt` never consults it. An
+  ungated CLI watch test therefore still exercises the real OS symlink path
+  in both native jobs (both `windows-2025` runners are genuinely
+  symlink-capable at the OS level; only the test suite's *belief* differs
+  between the two jobs) — correct for CLI-level tests, since whether
+  `watch` truly falls back to a junction with the privilege genuinely
+  absent is `internal/store`'s own concern (P1.4/P3.11/P3.12), not
+  re-verified at this layer.
+- Path-identity trap (8.3 short names / canonicalization, the trap already
+  hit twice per the task brief): `store.Watch` canonicalizes its target
+  (`canonicalizeWatchTarget`) before storing the link, so the path a test
+  passes to `watch` and the path `watches` prints back can legitimately
+  differ in spelling on Windows. Every comparison against a watch target in
+  this file goes through a local `sameDir(t, a, b)` helper (`os.Stat` +
+  `os.SameFile`) rather than a raw string comparison — the same fix class
+  as commit `4d87801` (`internal/store`) and `internal/watch`'s
+  `mustCanonical`, applied at the CLI layer.
+- `runCLI`/`os.Executable()` re-exec avoids a separate `go build` step and
+  any `.exe`-suffix handling entirely: the already-running test binary IS
+  the CLI under test on every platform `go test` itself runs on.
+
+### CLI bug found and fixed
+
+`list -json` on an empty store encoded the literal JSON `null` (a nil Go
+slice marshals that way) instead of `[]`, while `notes -json` already
+normalizes the equivalent nil-slice case via `openOnly`. Fixed in
+`cmd/scratchpad/main.go`'s `list` case: `artifacts` is defaulted to
+`[]store.Artifact{}` before encoding when `store.List()` returns nil.
+`TestCLIListJSONEmpty` pins the corrected shape. This is the only
+production-code change in this task; no existing test's assertions were
+touched or weakened.
+
+Also noted, not changed (a small independent behavior/exit-code decision,
+out of this task's scope): `watch`'s missing-target and `unwatch`'s
+missing-name paths exit 1 via `fatal()` even though their message text is a
+usage string ("usage: scratchpad watch <folder>..."), while every
+*excess-argument* case in the same two commands exits 2 via
+`usageFatal()`. This reads as an existing, intentional-looking asymmetry
+(missing a required value vs. a malformed argument shape) rather than a
+bug, so it was left alone; the new tests assert the current real exit code
+(1) for the missing-argument cases rather than assuming 2, per the task's
+"assert the actual codes, not merely non-zero" instruction.
+
+### Verification (local, before push)
+
+```
+go build ./...                                              clean
+go vet ./...                                                clean
+go test ./... -count=1                                      ok (all 5 packages)
+go test ./cmd/... -race -count=3                             ok, 141s
+GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go vet ./...          clean
+GOOS=windows GOARCH=arm64 CGO_ENABLED=0 go vet ./...          clean
+GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build ./cmd/...    scratchpad.exe + scratchpad-web.exe produced
+GOOS=windows GOARCH=arm64 CGO_ENABLED=0 go build ./cmd/...    scratchpad.exe + scratchpad-web.exe produced
+go test ./... -v -count=1 | grep -c '^--- SKIP'               0
+```
+
+Test-name set is a pure superset of before: all four pre-existing
+`cmd/scratchpad` tests (`TestPublishFilesValidation`,
+`TestPublishFilesReadsStdin`, `TestFilesFromDirRejectsNonRegularEntries`,
+`TestFilesFromDirRejectsNamedPipe`) are present and pass unmodified, plus
+25 new top-level `TestCLI*` functions (several table-driven with subtests)
+added by `main_e2e_test.go`.
+
+### Verification run IDs
+
+Pending: recorded in a follow-up entry immediately after this task's push,
+once both native Windows CI jobs report on the new commit.

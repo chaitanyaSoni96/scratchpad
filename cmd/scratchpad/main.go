@@ -269,6 +269,9 @@ func main() {
 			fatal(err)
 		}
 		if *asJSON {
+			if artifacts == nil {
+				artifacts = []store.Artifact{}
+			}
 			json.NewEncoder(os.Stdout).Encode(artifacts)
 			return
 		}
