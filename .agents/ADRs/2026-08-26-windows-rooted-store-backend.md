@@ -54,9 +54,30 @@ identity revalidation does not restore mutual exclusion) and §4.3 (leaving the
 ancestor case merely "recorded and bounded"). Both rejections are argued in
 place rather than left silent.
 
+## Corrections after revision 2
+
+Revision 2 closed P1.7. These are amendments made *after* it, each raised by a
+later review against the shipped code and each edited in place at the row or
+section named. They are listed here because a reader who trusts a disposition
+without re-deriving it is the failure mode this project has now hit three times.
+
+| Raised by | What was wrong | Corrected at |
+|---|---|---|
+| P3.13 F-5 → **P6.2 FD-2** | §4.5 and §5.1's Scope C said `Delete` **unlinks** an unrecognised reparse tag. The shipped code **refuses** it, and is right to. The rule holds only one layer down, inside `removeTreeAt` | §4.5 bullet 2, §5.1 Scope C |
+| P3.13 F-8 → **P6.2 FD-4** | §6.9 claimed to be "the complete list" and instructed reviewers to treat any omission as a document defect. P3.13 found seven omissions; four other rows were meanwhile *better* than their disposition. The framing itself was the defect | §6.9 header, rows 5–8, new rows A–G; RW3 |
+| **P6.2 FD-1** | RW13, RW15 and RW19 were dispositioned "Deferred, owner **P4.6**". P4.6 closed without delivering any of the three | RW13, RW15, RW19 rows; new §9.1 |
+| **P6.3 F1** | §7.4 closed the *case* half of the name-comparison problem and left the *spelling* half open: an NTFS 8.3 alias defeated `Visible`'s reserved-name deny and every ignore rule. Now measured live and fixed | §7.4 (see P6.2 §10 for the adjudication, the measurement and the rejected alternatives) |
+
+Revision 1's lesson was *"an unmeasured assumption presented as a fact is the
+worst thing this document could contain."* Revision 2's, from the four rows
+above, is narrower and sharper: **a disposition is a claim about code, and it
+decays.** Three of the four corrections here are not wrong measurements — they
+are statements that were true when written and were not re-checked when the code
+moved underneath them.
+
 ## Status
 
-**Proposed (revision 2).** P1.6 deliverable, revised against P1.7. P1.8 accepts
+**Proposed (revision 2, with the corrections above).** P1.6 deliverable, revised against P1.7. P1.8 accepts
 it or stops the project; per P1.7's recommendation, a re-run of P1.7 against
 §2 / §3.2 / §4.3 / §4.5 / §6.7 / §9 is expected before acceptance. Phase 3 is
 implemented from this document; where it disagrees with
@@ -864,9 +885,37 @@ and then reported distinguishably.
   relative to a pinned parent leaves the target byte-intact
   (`P14.unlink_junction`, REQUIRED). Invariant 7 holds for junctions as it does
   for symlinks.
-- **Any other reparse tag** → `unlinkAt` as well, never a descent. Removing a
-  directory entry in the store's own namespace cannot affect a target whose
-  semantics we do not honour.
+- **Any other reparse tag** → **refused, not unlinked.** *(Corrected after
+  P6.2's FD-2; revision 2 originally read "`unlinkAt` as well, never a
+  descent", which the shipped code does not do and should not.)* `isLinkAt`
+  reports `IsLink == false` for a tag outside Scope A, so `Delete` takes the
+  real-directory branch, `openDirAt`'s strict open fails with a
+  `reparseRefusal`, and the operation returns `artifact … not found` without
+  removing anything. Pinned by `TestUnknownTagEntryIsInvisibleAndInert`
+  (`internal/store/storefs_windows_attack_test.go`), which asserts `List`
+  omits the entry, `Watches` omits it, `Delete` refuses it, and it is still
+  on disk afterwards.
+
+  **Why the code is right and this document was wrong.** An unrecognised tag
+  is, by Scope C's own definition, semantics we do not honour — and
+  `unlinkAt` hard-codes `FILE_DIRECTORY_FILE`, so what "unlink it anyway"
+  actually means depends on a shape we have not established. Refusing costs
+  the user an inert entry they must remove with Explorer; unlinking on a
+  guess is an irreversible removal decided by a classification we just
+  admitted we could not make. On the store's highest-severity operation,
+  refuse is the correct default. The consequence — such an entry is
+  invisible in listings *and* not removable through the tool — is **RW15**,
+  and it is a real cost, not a free win.
+
+  **Position matters, and that is what made this row easy to get wrong.**
+  The rule *does* hold one layer down: `removeTreeAt` meeting an
+  unrecognised tag **mid-tree** unlinks the entry via `deleteEntryAt` rather
+  than descending, exactly as written above. The correction is only about
+  `Delete`'s **top-level dispatch**, where no removal has been authorised
+  yet. Prototype and product genuinely diverge here — the prototype removes
+  such an entry (`A5.unknown_tag_removed`, REQUIRED), the product refuses it
+  — so that measurement must **not** be migrated as an assertion about
+  `internal/store`. See P6.2's migration inventory.
 - **Real directory** → `openRealDirAt` + `dirHasHTMLFD`, then `removeTreeAt`.
 
 #### `removeTreeAt`: the operation IS the classification
@@ -1135,8 +1184,12 @@ Conflating the three scopes is the bug this section exists to prevent.
   stated as a property of the primitive and not of a flag.
 - **Scope C — classification for `Delete`/`Unwatch`/listing:** Scope A's set is
   "a link the store may remove"; every other tag is "a reparse point we do not
-  understand" — never descended, never followed, unlinked by `Delete`, refused by
-  `Unwatch`.
+  understand" — never descended, never followed, **refused by both `Delete`
+  and `Unwatch`**, and never listed. *(Corrected after P6.2's FD-2: this
+  bullet read "unlinked by `Delete`", which the shipped code does not do. It
+  refuses at the top level; only `removeTreeAt` meeting such a tag mid-tree
+  unlinks the entry. §4.5 carries the full argument and the RW15
+  consequence.)*
 
 ### 5.2 Why the policy cannot be "refuse name surrogates"
 
@@ -1638,8 +1691,27 @@ strictly more anchored than it is today.
 
 This section exists so P3.13's trace review can find zero *unlisted* ones.
 **Revision 1 listed three and its own text introduced more**, which made that
-criterion unmeetable. The list is now exhaustive; anything P3.13 finds that is
-not here is a defect in this document, not in the trace.
+criterion unmeetable.
+
+> **CORRECTION — revision 2 was wrong too, in both directions (P6.2's FD-4).**
+> Revision 2 claimed "the list is now exhaustive; anything P3.13 finds that is
+> not here is a defect in this document, not in the trace." P3.13 took that at
+> its word and found **seven** live sites the table did not list; it recorded
+> them as its own finding F-8 and this section was never revised. Taking the
+> standing instruction seriously, they are added below as rows A–G. In the
+> other direction, four rows are now **better** than their stated disposition:
+> rows 5, 6, 7 and 8 are closed outright. Both corrections were re-verified
+> against the shipped code by P6.2.
+>
+> **The "complete list" framing is retired.** A single document promising to
+> enumerate every path re-resolution in a moving codebase is a promise that
+> decays silently between reviews — which is exactly what happened. What
+> replaces it: rows 1–8 are the *containment-relevant* set and are complete
+> for `internal/store`'s mutation and browse paths; rows A–G are the advisory
+> and display-layer set, none of which gates a containment decision. A future
+> reviewer should re-derive the second group rather than trust it, and the
+> gating question to ask is the narrow one — *does any of them decide a
+> create, delete, rename or serve?* — for which the answer today is no.
 
 | # | Site | What it is now | Disposition |
 |---|---|---|---|
@@ -1647,15 +1719,35 @@ not here is a defect in this document, not in the trace.
 | 2 | `visibleSegments`' `os.Stat` per segment (`store.go:140`) | Advisory by its own comment; the authoritative walk is handle-relative | Accepted. On Windows `os.Stat` follows reparse points, so a junction reports `IsDir()==true`; the only consequence is which ignore rules are evaluated. Low |
 | 3 | `pageCard`'s `os.Stat(filepath.Join(a.Dir, f))` for preview weight | Reads a size and an mtime; feeds `maxPreviewBytes`, a DoS guard | Accepted. Not a containment control |
 | 4 | `statLinkTarget` | Revision 1 described it two ways; §3.2 resolves it as handle-relative and no-follow | **Not a re-resolution.** Listed because revision 1's §3.2 wording made it one |
-| 5 | `annotate`'s `os.Lstat(a.Dir)` and `filepath.EvalSymlinks(a.Dir)` (`store.go:289-298`) | Path-based classification of an artifact directory | **Must be replaced** by `statAt(parentFD, name)` — §6.8 item 2. Owner P3.6. Until then, `IsLink`/`Linked` are decided from a path on Windows, where a junction defeats both |
-| 6 | `WatchLinkFor(rel)`'s *n*-`os.Lstat` walk (`store.go:639-653`) | Decides whether a card offers **Unwatch** or **Delete** | Accepted for correctness, listed for honesty (§6.8 item 3). Handle-anchoring it is folded into P3.6. The failure mode is the wrong button, i.e. threat model §3.11 |
-| 7 | `Watches()`'s `os.ReadDir(dir)`, `os.Readlink(sub)`, `os.Stat(sub)` and `hasHTML(sub)` (`store.go:663-694`) | The entire watch enumeration is a path walk | **Not mentioned anywhere in revision 1.** Must become `readDirFD` + `statAt` + `readlinkAt` from the pinned root, with the same depth bound and identity-keyed visited set as `List` (R16). Owner **P3.6** |
-| 8 | `entryIsDir`'s first line (`store.go:270-278`) | `if e.IsDir() { return true }` before any link test | **A live trap, and Pre-1 names only the second one.** `RR1.unknown_tag_isdir` (**NO** verdict, used correctly as a negative result) shows a non-surrogate tag makes `DirEntry.IsDir()` **true**, so this line returns before `IsLinkEntry`'s over-approximation can save it. Pre-1 must fix the first line as well as the follow-through `os.Stat` |
+| 5 | `annotate`'s `os.Lstat(a.Dir)` and `filepath.EvalSymlinks(a.Dir)` | Path-based classification of an artifact directory | **CLOSED** (P3.6, re-verified P6.2). `annotate` now takes `(parentFD, name)` and classifies via `isLinkAt`; no `os.Lstat`/`EvalSymlinks` remains. Regression test `TestIsLinkFalseForPlainArtifact` |
+| 6 | `WatchLinkFor(rel)`'s *n*-`os.Lstat` walk | Decides whether a card offers **Unwatch** or **Delete** | **CLOSED** (P3.6, re-verified P6.2) — now a handle-anchored `classifyEntry` walk from the pinned root. Better than the "accepted" this row recorded |
+| 7 | `Watches()`'s `os.ReadDir`, `os.Readlink`, `os.Stat` and `hasHTML` | The entire watch enumeration was a path walk | **CLOSED** (P3.6, re-verified P6.2) — `readDirFD` + `classifyEntry` + `readlinkAt` + `dirHasHTMLFD` from the pinned root, with the depth bound and the `objectID`-keyed visited set R16 asks for |
+| 8 | `entryIsDir`'s first line — `if e.IsDir() { return true }` before any link test | The `RR1.unknown_tag_isdir` trap | **CLOSED** (Pre-1, re-verified P6.2) — `entryIsDir` no longer exists in any form; `classifyEntry` decides from `statAt`'s tag-aware no-follow classification and never consults `os.DirEntry.IsDir()` |
 
-Rows 5–8 are the ones revision 1 omitted. Rows 1 and 4 are resolved rather than
-accepted. Rows 2, 3, 6 are accepted with reasons. Row 7 is the largest remaining
-piece of work and is the one most likely to be under-scoped, for the same reason
-§6.8 item 4 is.
+Rows 5–8 are the ones revision 1 omitted, and all four are now closed. Rows 1
+and 4 are resolved rather than accepted. **Rows 2 and 3 are the only two of the
+original eight still accepted-with-reasons.**
+
+#### Rows A–G — the advisory and display-layer sites (added after P6.2's FD-4)
+
+P3.13 F-8 found these; P6.2 re-verified each against the shipped code. **None
+gates a containment decision**, which is why they were survivable omissions —
+but the previous framing promised they would be listed, so here they are.
+
+| # | Site | What it is | Why it is not a containment decision |
+|---|---|---|---|
+| A | `hasHTML(dir)` — `os.ReadDir` on a path string, called from `visibleSegments` | The *second* re-resolution in the function row 2 covers, and the one with the stronger consequence: it short-circuits the visibility check for the rest of the path | This was the mechanism of P3.13's **F-1**, now fixed (the short-circuit is gated on `dir != root`). Row 2 named only the `os.Stat` |
+| B | `Watch`'s `os.Stat(abs).IsDir()` | A genuine validate-then-use on the watch **target** | Benign: a link to a non-directory is refused later by `openAbsoluteDirNoFollow*`, `linkTargetIsDir` and `ResolveFolder`. Windows is stricter than Linux here — `canonicalizeWatchTarget` re-checks `isDir()` from a handle |
+| C | `Watch`'s `hasHTML(real)` | A path read of the target *after* the link is created | Advisory only — it chooses a stderr note |
+| D | `canonicalizeWatchTarget` + `alreadyInsideRoot` | `GetFinalPathNameByHandleW` / `EvalSymlinks` plus a string prefix | Named and argued in §4.3/§4.7/§7.1 but never carried into this table, which is where a trace review looks. The prefix half is advisory; the primary is `FILE_ID_INFO` identity |
+| E | `ignore.go`'s `loadIgnoreSet` — `os.Stat`, `os.ReadFile`, `EvalSymlinks` | An entire path-based subsystem, reachable through and below a watch boundary, with `include <path>` resolving inside a watched source | Visibility only, and a watched repo un-hiding its own files is by design. But `defaultIgnores` **is** a confidentiality control (`*.pem`, `.netrc`, `.ssh/`), so this surface deserves naming — see P6.2 register item 13 |
+| F | `internal/web`'s `previewBytes` `os.Stat` and `folderUnwatch`'s `os.Lstat` | Row 3 named `pageCard` only | Preview-weight accounting and which button a card offers. Fail-closed: the wrong button reaches `store.Unwatch`, which refuses |
+| G | `internal/watch`'s `desiredDirs` — `entry.IsDir()`, a follow-through `os.Stat`, `canonicalDir`, `openWatchDir` | The A11 shape, unfixed in a second package (P3.13 **F-3**, still open) | Serves no content and reads no file; the consequence is which directories receive fsnotify registrations. §6.11/R14/R15 cover the package but never this table |
+
+`Publish`'s `mkdirClaim`→`openDirAt` and `symlinkAt`'s `mkdirClaim`→`ntOpenAt`
+re-use a **name** against a pinned parent. Those are not path re-resolutions and
+are not counted, but a reader auditing §2.1 consequence 4 literally will trip
+over them, so they are named here.
 
 ### 6.10 Reserved device names
 
@@ -2011,7 +2103,7 @@ unauthenticated, single user). Every item is **accepted**, **mitigated**, or
 |---|---|---|---|
 | **RW1** | Recursive delete through a reparse point (RR1) | Critical | **Mitigated** — §4.5's operation-as-classification (revision 1 specified the weaker classify-then-open here). Measured: `A6.delete.*` at depth 0 and 2 in three flavours, `A6.swap_midwalk`, `P14.delete_descend`, `P14.unlink_junction`, `P14.delete_attr_trap`, `RR1.removeall` — with `A6.negative_control` proving the assertion has teeth. **Release gate:** `MATRIX.Delete.target_replaced` (YES in run 9) must pass before any Windows binary ships. **Caveat (F12):** `main` has no branch protection rule, so "required check" is a no-op at the repository level — the gate is a note until an operator adds one. Owner: operator, tracked in EXECUTION.md. |
 | **RW2** | Unbounded reparse traversal on browse (RR2) | Critical | **Mitigated** — the strict open at every component (`A5.strict_walk`, `A3.nested_strict.*`) + the single-boundary allowlist. Revision 1 credited `OBJ_DONT_REPARSE`; see §2.1. |
-| **RW3** | The surviving path re-resolutions (RR3) | High | **Enumerated and partly closed** — §6.9's table, now complete. Rows 1 and 4 are closed; rows 2, 3, 6 accepted with reasons; rows 5, 7, 8 are work owned by P3.6 and Pre-1. P3.13 must find zero *unlisted* ones. |
+| **RW3** | The surviving path re-resolutions (RR3) | High | **Enumerated; containment-relevant set closed.** *(Corrected after P6.2's FD-4.)* This row's exit condition — *"P3.13 must find zero unlisted ones"* — **was not met**: P3.13 found seven unlisted sites and recorded them as its F-8, and §6.9 was not revised for three phases. Both halves are now settled: rows 1, 4, 5, 6, 7 and 8 are **closed** (five of them better than their revision-2 disposition), rows 2 and 3 remain accepted with reasons, and the seven omissions are added as §6.9 rows A–G. The "complete list" framing is retired with an argued replacement — see §6.9's correction block — because a hand-maintained enumeration of every re-resolution decays silently between reviews, which is precisely how this row's exit condition came to be recorded as satisfiable and left unsatisfied. |
 | **RW4** | Case-folding bypass of the `.annotations` guard and credential ignores (RR5) | High | **Mitigated** — §7.4, both halves: `nameEquals` (the `.annotations` guard) and `matchName` (`defaultIgnores`, including the credential-ignore lines). Confirmed live by `M11`. **Interim correction:** this row read "Mitigated" from the point `nameEquals` shipped, but that was false until `matchName` landed in `e4b84a2` — only the `.annotations` guard half was case-folded before that commit, so `defaultIgnores`' credential entries (`.env`, `.netrc`, `*.pem`, `.ssh/`) stayed case-sensitive and bypassable on Windows for the intervening period. Both halves are in place as of `e4b84a2`, so "Mitigated" is accurate again now. |
 | **RW5** | No directory lock; `Delete` racing `SaveNotes` (RR6) | Medium-High | **Mitigated in the normal case; residual measured before beta.** §6.7's root-level pinned lock file. **Revision 1's parity claim — "Linux has the same shape of gap" — is withdrawn as false:** Linux flocks the store-root *inode*, so losing the rendezvous needs write access to the root's parent; this design's rendezvous is a *child* of the anchor, because Windows cannot lock a directory handle at all (`M14.dir_readhandle`, `M14.dir_writehandle`). **Residual:** the lock file deleted-and-recreated between two *processes'* opens splits mutual exclusion silently — enabled by R15's own mandatory `FILE_SHARE_DELETE`, and **[UNMEASURED]** (the cited `M7.namefollows` / `R13.rename` measure *rename* survival, not delete-and-recreate). Owners: **P3.12** (racing test + swap test), **P6.1** (stress). Pre-specified retreat if reachable: a named kernel object rendezvous (§6.7). |
 | **RW6** | Junctions accepted at the watch boundary and indistinguishable from an attacker's | Medium | **Accepted** — §6.6. Parity with the existing Linux treatment of store-root symlinks. If P1.7/P1.8 rejects this, `watch` becomes Developer-Mode-only; that is a product decision for the human gate, not a security one. |
@@ -2021,18 +2113,43 @@ unauthenticated, single user). Every item is **accepted**, **mitigated**, or
 | **RW10** | Antivirus transient-error distribution unmeasured | Medium | **Deferred, owner P6.1** — `M13.av`. The retry bound in §8.4 is a documented choice, not a measurement, and is labelled as such in code. |
 | **RW11** | ADS aliasing via `:` in lookup segments (RR8) | Medium | **Mitigated** — §7.5. Measured reachable (`M12.C_stream`). |
 | **RW12** | `ReadDirectoryChangesW` overflow unmeasured | Medium | **Deferred, owner P4.2** — `M15.overflow`. Map the Windows overflow error explicitly; route to reconcile-and-continue, never fatal. |
-| **RW13** | Cloud placeholder tags: mass rehydration, `ERROR_CLOUD_FILE_*` (RR10) | **Medium** (raised from Low-Medium) | **Deferred, owners P4.6 and P4.2** — `M2.cloud` NOT MEASURED. Follow-up: skip `FILE_ATTRIBUTE_RECALL_ON_*` in the size walk. Revision 1 worried only about rehydration cost; the same objects also reach the fatal reconcile path (RW23), and Windows 11 puts Documents and Desktop in OneDrive by default. Documented exclusion + manual pre-beta check. |
+| **RW13** | Cloud placeholder tags: mass rehydration, `ERROR_CLOUD_FILE_*` (RR10) | **Medium** (raised from Low-Medium) | **Accepted for the beta; the follow-up is OWED, not owned.** *(Corrected after P6.2's FD-1.)* `M2.cloud` NOT MEASURED — no OneDrive on a runner — and `skipWalkError`'s whole `ERROR_CLOUD_FILE_*` branch is therefore unexecuted code. The promised follow-up, *skip `FILE_ATTRIBUTE_RECALL_ON_*` in `sizeWalkAt`*, **was never implemented**: this row named P4.6 and P4.2 as owners, both phases closed without it, and `grep -rn RECALL_ON internal/` returns zero hits. What a user hits: watching a OneDrive-backed folder — which on default Windows 11 includes Documents and Desktop — makes every folder-page render rehydrate the tree. Accepted for the beta because it is cost and latency, not disclosure or loss. **Gate: the P6.8 human gate assigns an owner, or the beta release notes state the OneDrive caveat explicitly.** Tracked as owed follow-up 1 of 3 in §9.1. |
 | **RW14** | Self-watch via a spelling the advisory prefix check misses (RR12) | Low | **Accepted** — §7.1. Bounded by the identity-keyed cycle guard. |
-| **RW15** | An unknown-tag entry in the store root is invisible in listings and un-removable through the UI | Low | **Deferred, owner P4.6** — an inert "unsupported entry" tile with a Delete action. New risk, introduced by the refuse-by-default allowlist. |
+| **RW15** | An unknown-tag entry in the store root is invisible in listings and un-removable through the UI | Low | **Accepted for the beta; the mitigation is OWED, not owned.** *(Corrected after P6.2's FD-1.)* The promised inert "unsupported entry" tile with a Delete action **was never built** — this row named P4.6, that phase closed without it, and `grep -rn 'unsupported entry' internal/web/` returns zero hits. The current behaviour is instead *pinned as intended* by `TestUnknownTagEntryIsInvisibleAndInert`, and §4.5's corrected bullet (P6.2's FD-2) explains why refusing is the right default on the highest-severity operation. So the risk is real and stable rather than latent: an entry a filter driver planted in the store root is invisible to `List`/`Watches` and cannot be removed with `scratchpad delete`; the user removes it in Explorer. Accepted at Low because it requires a third-party filter driver to arise at all and costs the user one manual deletion. **Gate: the P6.8 human gate assigns an owner, or `docs/windows.md` documents the Explorer workaround.** Tracked as owed follow-up 2 of 3 in §9.1. |
 | **RW16** | A genuinely non-elevated session was not measured | Low | **Deferred, owner P5.5** — GitHub runners are elevated; the privilege-removal child is a faithful simulation of the *privilege* dimension but not of every ACL difference. One manual confirmation of the §6.6 table on an ordinary account. |
 | **RW17** | `List` can be redirected by A2 into listing a tree outside the store | Low | **Accepted, argued** — before §6.8 item 4 lands. Bogus cards' content requests go through handle-anchored `ResolvePath` and 404, so there is no disclosure; only sizes and mtimes leak. Closed entirely once `List` is handle-anchored. |
 | **RW18** | The `loadArtifact`/`annotate` refactor changes **Linux** behaviour | Medium | **Mitigated by test** — §6.8 item 2. Must land with a Linux regression test asserting `IsLink` is false for a published artifact. |
-| **RW19** | `Delete` widened to remove an empty non-artifact directory | Low | **Accepted, with the UI half in scope** — §6.6 rule 3. Cross-platform behaviour change; `rmdirAt` cannot destroy content or follow a link. Needs a Linux regression test **and** the folder-card delete affordance (`list.tmpl` renders one only inside `{{with .Unwatch}}`), without which rule 3's message names an action the user cannot perform. Owner **P4.6** for the UI half. |
+| **RW19** | `Delete` widened to remove an empty non-artifact directory | Low | **Accepted; the UI half is OWED, not owned.** *(Corrected after P6.2's FD-1.)* The store half shipped and is tested (`TestDeleteRemovesEmptyNonArtifactDirectory`, `TestTwoStepCrashResidueRecoversViaDelete`); `rmdirAt` cannot destroy content or follow a link. The **folder-card delete affordance was never built** — this row named P4.6, that phase closed without it, and `list.tmpl` still renders the button only inside `{{with .Unwatch}}`. Partly compensated after the fact: `Watch`'s collision message now names the CLI (`scratchpad delete <name>`) rather than the web UI, so rule 3's remediation is at least performable. **Still inaccurate:** `Publish`'s own collision message continues to say *"until the user deletes the old artifact **in the web UI**"*, which for an empty residue folder names an action the web UI does not offer. **Gate: the P6.8 human gate assigns an owner, or that one message string is corrected to name the CLI as `Watch`'s already does.** Tracked as owed follow-up 3 of 3 in §9.1. |
 | **RW20** | `Delete` has no partial-failure story; `removeTreeAt` aborts mid-tree | Low | **Accepted** — pre-existing on Linux (`annotationfs_linux.go:183-186`); `M13.delete_blocked` is the error that will trigger it on Windows more often. |
 | **RW21** | A4 — shared or redirected store path | N/A | **Out of scope by declaration.** Documented: the store root must be a directory only the user can write. |
 | **RW22** | `A11.ancestor_swapped` — an ancestor of the watch target is a reparse point, so the browse walk lands in an attacker tree | High as a proof defect, Medium as live exposure | **Mitigated in revision 2** — §4.3's handle-by-handle walk from the volume root. Was a measured **NO** in run 9 and unmentioned in revision 1; recorded in `spike-findings.md` §10.1 as *"containment BROKE"*. It is **not a race** (ancestors were never validated, so the condition was persistent), it is reachable by **A1** through a `git checkout` that swaps a directory for a link in a watched repo, its payoff is read disclosure over the unauthenticated endpoint (network-readable under `LAN=1`), and it is bounded to reads because every mutation walk is handle-relative. Residuals: the drive letter's device-map binding (**[UNMEASURED]**, P3.4/P6.1) and the compatibility cost of refusing targets whose path crosses a legitimate mount point (P4.3/P6.6, with a pre-specified retreat). |
 | **RW23** | An unreadable entry makes `reconcile` fatal — **at startup as well** | Medium-High | **Deferred, owner P4.2** — §6.11. Not an attack: an `APPEXECLINK` (`M2.appexeclink`, observed live), a OneDrive placeholder (`M2.cloud`, NOT MEASURED) or a ProjFS entry returns Win32 1920, which is not `IsNotExist`, so `desiredDirs` errors, `newWatcher` fails, and `main.go:29` calls `log.Fatalf`. That is a **persistent failure to start**, not the transient restart RR9 was rated on. R16's third clause is the fix and had no owner in revision 1. |
 | **RW24** | The watcher's own handles lack `FILE_SHARE_DELETE` | Low-Medium | **Deferred, owner P4.1** — `desiredDirs` uses `os.Open`, and `P13.go_share_mode` measured that Go's `syscall.Open` hard-codes `FILE_SHARE_READ\|FILE_SHARE_WRITE` only. Consequence: the watcher can veto the user's own delete and our own atomic replaces, burning a whole retry bound against ourselves. R15 violation outside the store primitives. |
+
+### 9.1 Owed follow-ups — three items this document said were owned, and were not
+
+Added after P6.2's **FD-1**. RW13, RW15 and RW19 each carried a disposition of
+the form *"Deferred, owner P4.6"*. P4.6 completed and is recorded as complete in
+`EXECUTION.md`; none of the three shipped. P6.2 grep-verified all three at zero
+hits.
+
+**A disposition that names a closed phase as its owner is not a deferral — it is
+an orphan wearing a deferral's clothes**, and it is the exact failure shape this
+ADR has already had to correct twice (RW4's false "Mitigated", §6.6 rule 1's
+false closure). The rows above are corrected; this section exists so the three
+are findable as a set rather than only inside a 24-row table.
+
+| # | Owed | Row | If nobody takes it |
+|---|---|---|---|
+| 1 | Skip `FILE_ATTRIBUTE_RECALL_ON_*` in `sizeWalkAt` so a watched OneDrive tree is not rehydrated on every folder render | RW13 | Beta release notes state the OneDrive caveat |
+| 2 | An inert "unsupported entry" tile with a Delete action, so an unknown-tag entry in the store root is removable through the tool | RW15 | `docs/windows.md` documents the Explorer workaround |
+| 3 | A delete affordance on a plain folder card **or** correcting `Publish`'s collision message to name the CLI, as `Watch`'s already does | RW19 | The message keeps naming an action the web UI does not offer |
+
+None is a containment defect and none blocks the beta on security grounds. Each
+is a *stated* mitigation that does not exist, which is a documentation-integrity
+problem first and a product problem second. **The gate is P6.8:** either assign
+an owner, or accept the fallback in the last column and say so in the release
+notes. What must not happen is a fourth revision still claiming P4.6 owns them.
 
 ### What the spike could not measure — the complete list
 

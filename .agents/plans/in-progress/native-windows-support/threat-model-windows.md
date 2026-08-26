@@ -1120,6 +1120,16 @@ tests structurally identical, which is the point.
 Severity is impact × reachability for the beta's stated posture (loopback
 default, unauthenticated, single user).
 
+> **Post-implementation status (added by P6.2/P6.3).** This table is the
+> Phase 1 assessment and is left as written; the authoritative *current*
+> disposition of every risk is the ranked register in
+> [reviews/P6.2-threat-model-audit.md](reviews/P6.2-threat-model-audit.md) §6,
+> which reconciles it against the shipped code. One row is added below —
+> **RR14** — because §4.7(b) named `Visible` as defeated by an 8.3 alias and
+> the ranked table never carried a row for it, so the risk was real,
+> documented in prose, and dispositioned nowhere. That gap was found by P6.3
+> F1 rather than by this document, three phases later.
+
 | # | Risk | Severity | Acceptable for beta? |
 |---|---|---|---|
 | RR1 | **Recursive delete through a reparse point.** If `removeTreeAt`'s Windows twin classifies by directory attribute instead of reparse tag, `Delete` destroys an arbitrary tree outside the store. Reachable by A1 (junction in a watched source), A2, and A3 (viewer JS calling `DELETE /a/...`). Irreversible data loss. | **Critical** | **No.** Blocks the beta. Must have a passing deterministic test (Delete/target replaced) before any Windows binary ships. |
@@ -1135,6 +1145,7 @@ default, unauthenticated, single user).
 | RR11 | **Reserved device names and trailing dots reachable through lookup paths** (§4.11, §4.12). Odd responses, no escape. | **Low** | **Yes**, if R11 lands; otherwise document. |
 | RR12 | **8.3 alias defeats `Watch`'s "already inside the scratchpad" guard** (§4.7), allowing a self-watching store. | **Low** | **Yes** — the consequence is a confusing recursive listing, bounded by the cycle guard, not an escape. |
 | RR13 | **A4 (shared/redirected store path).** Explicitly out of scope. | **N/A** | **Yes**, by scope. Document that the store root must be a directory only the user can write. |
+| **RR14** | **8.3 alias defeats `Visible`'s `.annotations` reserved-name guard and every `defaultIgnores`/`.scratchpadignore` rule** for a requester-supplied path segment (§4.7(b), which named `Visible` but got no RR row of its own). Distinct from RR12: same aliasing mechanism, different consumer, and unlike RR12 this one is **not** bounded by the cycle guard. Exposure is the `.annotations` tree plus markdown and artifact **content** inside any ignore-hidden directory. | **Medium** (Medium-High under `LAN=1`) | **Added post-hoc and CLOSED, not accepted.** Raised as P6.3 F1; the 8.3 alias was measured to resolve through the store's own `RootDirectory`-relative open; fixed by `canonicalLookupName`. See P6.2 §10. |
 
 ## 7. Requirements on the backend
 
