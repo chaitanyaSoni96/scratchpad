@@ -136,14 +136,67 @@ func canonicalDir(path string) (string, error) {
 	return filepath.Clean(final), nil
 }
 
-// finalPathDOS is GetFinalPathNameByHandleW(VOLUME_NAME_DOS), trimmed of its
-// \\?\ prefix — the same shape, and for the same reason (x/sys/windows
-// v0.41.0 does not name the VOLUME_NAME_DOS flag), as internal/store's
-// win32_windows.go function of the same name, duplicated here rather than
-// exported: it is a ~15-line wrapper directly over an already-exported
-// x/sys/windows call, not shared mechanism (the same judgment call this
-// file already makes for dirIdentity/fileIDInfo above and identity's doc
-// comment explains at length).
+// finalPathDOS is GetFinalPathNameByHandleW(VOLUME_NAME_DOS) — the same
+// shape, and for the same reason (x/sys/windows v0.41.0 does not name the
+// VOLUME_NAME_DOS flag), as internal/store's win32_windows.go function of
+// the same name.
+//
+// P6.3 finding F2 (Low): the first version of this function trimmed only
+// the `\\?\` prefix, which is correct for the common `\\?\C:\...` shape but
+// silently WRONG for the other shape VOLUME_NAME_DOS can return —
+// `\\?\UNC\server\share\...`, which is what GetFinalPathNameByHandleW
+// returns not only for a path typed as `\\server\share\...` but also for an
+// ordinary MAPPED DRIVE LETTER whose target is a network share (a
+// documented Win32 quirk, not something openRootedFS's raw-string
+// validateAbsoluteWindowsPath(root) check can see — that check only
+// inspects the SCRATCHPAD_ROOT string as typed, e.g. "Z:\scratchpad", which
+// is syntactically a perfectly ordinary drive-letter path). A bare
+// TrimPrefix(s, `\\?\`) turns that into "UNC\server\share\...": missing its
+// leading `\\`, neither a valid drive-letter path nor a valid UNC path.
+// That string flowed straight into canonicalDir's return value and then
+// into w.backend.Add (watch.go) with no validation in between, and
+// reconcile treats any Add failure as fatal to the whole watcher — so a
+// store root (or, independently, a watched external tree — though
+// store.Watch's own canonicalizeWatchTarget already refuses those before
+// they reach this package) on a mapped network drive would go from working
+// to a hard boot failure the instant this package's canonicalDir ran on it.
+// filepath.EvalSymlinks (this function's pre-fix predecessor, and Linux's
+// canonicalDir today) never rewrites a drive letter to its UNC form at all,
+// so this was purely a regression introduced by moving to a handle-based
+// primitive, not a pre-existing gap.
+//
+// The fix reconstructs the well-formed UNC path (`\\server\share\...`) for
+// that shape, matching the general pattern internal/store/link_windows.go's
+// stripNTPrefix already uses for the *different* `\??\`/`\??\UNC\` NT-form
+// prefix reparse points carry — not reusable here verbatim, since
+// GetFinalPathNameByHandleW returns the DOS `\\?\` form, not the NT `\??\`
+// one, but the same idea. It deliberately does NOT reject the UNC case the
+// way internal/store's canonicalizeWatchTarget does via
+// validateAbsoluteWindowsPath: that rejection is a containment/policy
+// decision (Watch() refuses to let a user PICK a UNC watch target), and
+// this function's caller, canonicalDir, is a read-only dedup/identity
+// primitive with no containment role (its own doc comment above) — refusing
+// here would be a new policy decision made in the wrong layer, not a fix
+// for the bug this section is about. A syntactically valid but
+// network-backed path is `w.backend.Add`'s problem to accept or reject on
+// its own merits (as it already is for a directory symlink or junction
+// pointing at a network drive), the same as it always was.
+//
+// Kept as a duplicate of internal/store's function rather than exported and
+// shared: the two copies were byte-identical when this package was first
+// split from watch.go (P-5), so duplication was a defensible judgment call
+// at the time (this file's dirIdentity/fileIDInfo doc comment makes the
+// same call, for the same reason — a small, self-contained wrapper over an
+// already-exported x/sys/windows call). That the copies have now diverged
+// in a way that cost availability is a real cost of the choice, not a
+// reason to reverse it on its own: internal/store's canonicalizeWatchTarget
+// intentionally does MORE than this function should (the containment
+// rejection above), so a shared export would need to be the strip-only
+// half, not the whole function — a small enough carve-out that whether it's
+// worth doing depends on internal/store not already being mid-edit by
+// another task (P6.3 F1, ignore.go). Left as a duplicate for now; flagged
+// in EXECUTION.md for the operator to sequence if a third divergence makes
+// the case again.
 func finalPathDOS(h windows.Handle) (string, error) {
 	const volumeNameDOS = 0x0
 	buf := make([]uint16, windows.MAX_LONG_PATH)
@@ -157,7 +210,25 @@ func finalPathDOS(h windows.Handle) (string, error) {
 			return "", err
 		}
 	}
-	return strings.TrimPrefix(windows.UTF16ToString(buf), `\\?\`), nil
+	return stripFinalPathDOSPrefix(windows.UTF16ToString(buf)), nil
+}
+
+// stripFinalPathDOSPrefix turns GetFinalPathNameByHandleW(VOLUME_NAME_DOS)'s
+// output into an ordinary Win32 path, handling both shapes it returns:
+// `\\?\C:\...` (drive letter, local or mapped) and `\\?\UNC\server\share\...`
+// (UNC). Split out from finalPathDOS as a pure string function so it can be
+// unit-tested with literal strings, independent of a real handle/volume —
+// see identity_windows_test.go, and note this codebase's own measurement
+// record for why that independence matters here specifically:
+// spike-findings.md's M1 lists "SMB / UNC: no share available in CI", so a
+// live end-to-end reproduction of the trigger this fixes is not obtainable
+// in this project's CI at all, on any branch.
+func stripFinalPathDOSPrefix(s string) string {
+	const uncPrefix = `\\?\UNC\`
+	if strings.HasPrefix(s, uncPrefix) {
+		return `\\` + s[len(uncPrefix):]
+	}
+	return strings.TrimPrefix(s, `\\?\`)
 }
 
 // openWatchDir opens dir for desiredDirs' walk with the full share mode
