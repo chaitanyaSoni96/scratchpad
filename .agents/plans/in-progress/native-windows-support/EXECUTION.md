@@ -1756,30 +1756,155 @@ reasoning for concurrent claim, the reason-checked existing tests' pre-fix
 error messages) fired as designed, confirming the corresponding positive
 assertion is not vacuous.
 
-### P5.1/P5.2 — installer checkpoint (verification still owed)
+### P5.1/P5.2/P5.5 — installer verified on real Windows runners
 
-`scripts/install.ps1` is committed as a checkpoint: the agent writing it hit an
-account session limit before it could add the CI workflow that runs the
-installer on a real `windows-2025` runner. **The script has therefore never
-been executed.** There is no PowerShell on the development host, so nothing
-about it is verified beyond review.
+`scripts/install.ps1` is no longer unexecuted: the `windows-installer` matrix
+job in `.github/workflows/ci.yml` runs `scripts/verify-install.ps1` on
+`windows-2025` under **both engines** — `pwsh` (PowerShell 7) and `powershell`
+(Windows PowerShell 5.1.26100) — with identical assertions. The harness runs
+under pwsh; `-Engine` selects what executes install.ps1, so 5.1 is verified as
+a first-class target, not approximated.
 
-Structure is complete — `all`, `cli`, `skill`, `drop-mcp`, `install`, `startup`,
-`start`, `stop`, `status`, `remove-startup`, `uninstall`, with `Show-Usage` and
-exit 2 on an unknown verb. `Set-StrictMode -Version Latest`, user PATH edited
-through the registry format-preserving, and `Invoke-WithRetry` for the exe-lock
-race after stopping the task.
+**Evidence runs** (each iteration turned a real behaviour into evidence):
 
-Uninstall reads correctly against the review-checklist rule that install and
-uninstall never delete the data root: it removes only what it created, walks up
-to a parent directory only when `BinDir` is the default it made itself, and
-never guesses at the parent of a user-supplied `-BinDir`.
+- `32963949232`/`32963949269` — first execution ever. All of sections 0–15
+  below green on both engines (85 assertions each); the only failures were
+  the five non-admin ones, all sharing one harness (not installer) cause.
+- `32965663917` — proved re-exporting profile variables cannot fix the
+  non-admin child: `Start-Process -Credential` hands the child the parent's
+  environment block and the known-folder machinery resolves through it, so
+  `%LOCALAPPDATA%` stayed the admin's (and Windows correctly denied the
+  write). The fix is the seam the installer already exposes: explicit
+  `-BinDir` + explicit `SCRATCHPAD_ROOT`.
+- `32970247103` (commit `a956d9b`) — 89/91 per engine. The two failures were
+  again the harness, and productive: `Register-ScheduledTask` is denied to a
+  hosted runner's secondary account, and the installer answered with exactly
+  the documented actionable error (below). Harness commits `4159933` and
+  `de172f1` restructure the non-admin startup sub-case accordingly, pinned to
+  the observed `Error: Access is denied.` line so any *other* registration
+  failure still fails the job.
+- The confirming run for `de172f1` was not yet dispatched when this record
+  was written: GitHub Actions had a platform incident (opened
+  2026-08-26T15:11Z) and created no run objects for the branch's afternoon
+  pushes. Every string the new denial-branch assertions match was verified
+  present in the `32970247103` log on both engines (exit 1, `Error: Access
+  is denied.`, `could not register the scheduled task`, `foreground
+  execution is fully supported`, `Nothing else was changed`), so the change
+  is landed-but-unconfirmed, not speculative. **Update this line with the
+  green run id once Actions dispatches it.**
 
-**Owed before P5.1/P5.2 can be called done:** the runner workflow proving each
-operation is idempotent when run twice, that uninstall leaves a pre-created
-`%USERPROFILE%\.scratchpad` with a marker file intact, Scheduled Task
-register/query/remove, an install path containing a space and a non-ASCII
-character (P5.5), and whether Windows PowerShell 5.1 works or only PowerShell 7.
+**Operation matrix — verified on both engines in `32970247103`, every
+operation run twice to prove idempotence:**
+
+| Operation | Verified behaviour |
+|---|---|
+| unknown verb | exit 2 + usage on stderr |
+| `cli` | exit 0; exe in `%LOCALAPPDATA%\scratchpad\bin`; PATH hint printed; user PATH untouched without `-AddToPath` |
+| `cli -AddToPath` | exactly one user-PATH entry after two runs; second run reports already-present |
+| `skill` | SKILL.md in `~\.claude\skills\scratchpad` and `~\.pi\agent\skills\scratchpad` |
+| `drop-mcp` | exit 0 twice (runner has no claude CLI / opencode / goose configs, so only the absent-config paths ran — see unverified list) |
+| `all` | exit 0 twice |
+| `install` | task registered, live HTTP 200 from `http://127.0.0.1:8737`; **second run while the server was live passed — the `Invoke-WithRetry` exe-lock retry works in anger** |
+| `status` | exit 0 in all three states (Running / stopped / not registered) with the documented messages |
+| `stop` | exit 0 twice; HTTP goes down |
+| `start` | exit 0 twice (second start under `MultipleInstances IgnoreNew` is a clean no-op); HTTP comes back |
+| `remove-startup` | task unregistered, HTTP down; second run exits 0 with "nothing to remove" |
+| `start` (unregistered) | clean exit 1 with "not registered; run: install.ps1 startup" |
+| `uninstall` | **run while the server was live**: task gone, both exes gone, empty default dirs pruned, user-PATH entry gone, skill copies gone; second run exits 0 |
+
+**Data-root survival (review-checklist rule), proven twice per engine:** a
+marker file pre-created in `%USERPROFILE%\.scratchpad` before any install was
+intact and byte-identical after a full `install` + `uninstall` and after a
+second `uninstall`; a second marker in an overridden `SCRATCHPAD_ROOT` (path
+with a space and a non-ASCII character) likewise survived `uninstall`, whose
+output names the overridden root as the untouched data root.
+
+**P5.5 results:**
+
+- *Space + non-ASCII paths*: `all`/`startup`/`status`/`uninstall` all pass
+  when run from a repo copy at `...\scratch pad é` into
+  `-BinDir "...\target bin ü\bin"`; the scheduled task runs the spacey exe
+  and serves HTTP; uninstall removes the exe but never walks above a
+  user-supplied `-BinDir`.
+- *Overridden `SCRATCHPAD_ROOT`*: with a shell-only override, `startup`
+  prints the NOTE that the task will not see it plus the exact
+  `SetEnvironmentVariable` fix; after persisting the user-level variable and
+  re-running `startup`, no NOTE, and the task-run server **created the
+  overridden root** — the Scheduled Task really does pick up persisted user
+  environment, which was the design assumption behind the NOTE.
+- *Non-administrator user* (secondary local account `spverify`, member of
+  Users only, driven via `Start-Process -Credential`): `cli` (twice),
+  `status`, `remove-startup` and `uninstall` with a granted `-BinDir` and an
+  explicit `SCRATCHPAD_ROOT` all exit 0; the overridden root survives.
+  `startup` hit `Access is denied` from `Register-ScheduledTask` — a hosted-
+  runner limitation for a never-logged-on secondary account — and produced
+  **exactly the documented actionable error**: "could not register the
+  scheduled task" + the Group Policy explanation + "Nothing else was
+  changed" + the foreground-execution fallback, clean exit 1, no stack
+  trace. That is the `docs/windows.md` troubleshooting promise observed
+  live.
+
+**PowerShell 5.1 verdict: works.** Every assertion behaves identically under
+5.1 and 7 on every iteration; each failure along the way had the same root
+cause on both engines, and all were in the harness, none in the installer.
+install.ps1 is pure ASCII, so 5.1's BOM-less-UTF-8-as-ANSI reading cannot
+corrupt it. `docs/windows.md` now states both engines are supported — a claim
+CI enforces on every push.
+
+**Bugs found and fixed:**
+
+1. *(installer; found in review, validated by the runner)* `uninstall`
+   removed the just-stopped `scratchpad-web.exe` with a bare `Remove-Item`,
+   while `Install-Binary` already acknowledged that a just-stopped task can
+   hold the exe lock briefly. On a user's machine, `uninstall` after `stop`
+   could die mid-way with "being used by another process", leaving binaries
+   and the PATH entry behind with the task already unregistered. Fixed in
+   `3136cd0`: the removal goes through `Invoke-WithRetry`; the harness
+   uninstalls while the server is live to keep the race exercised.
+
+No other installer defect surfaced. The two remaining CI iterations fixed
+harness bugs, recorded above so nobody re-fights them (the
+`Start-Process -Credential` environment-block inheritance, and the
+SCRATCHPAD_ROOT NOTE being unreachable behind a registration denial because
+it prints only after successful registration — NOTE coverage lives in the
+admin-user section, which asserts both the shell-only NOTE and its absence
+once persisted).
+
+**Documented exclusions — what CI does NOT prove, and why:**
+
+- **Per-user Scheduled Task registration by a genuinely standard user is not
+  verified anywhere.** Hosted runners deny `Register-ScheduledTask` to the
+  harness's secondary non-admin account (`Error: Access is denied.` under a
+  `CreateProcessWithLogonW` session), so the automated harness takes the
+  documented-denial branch — it proves the error contract, not the
+  registration. Registration/start/stop/remove *are* fully proven for the
+  runner's primary user, but that user is an administrator; the installer
+  calls no elevation-gated API, which is an argument, not evidence.
+- `startup`'s **start-now for a user with no interactive session** cannot
+  succeed (interactive-token task); the non-admin exit code is recorded,
+  never asserted.
+- **Skill install into the non-admin's own profile**: `%USERPROFILE%` cannot
+  be honestly materialised for a secondary account on a hosted runner; the
+  mechanism (plain file copy) is identical to what the primary-user section
+  proves.
+- `-Lan` is never passed in CI (it would bind 0.0.0.0 on a shared runner),
+  so its warning text and `0.0.0.0:8737` task argument are review-verified
+  only. Loopback-by-default *is* CI-verified: every HTTP probe hits
+  `127.0.0.1:8737` served by the task's default arguments.
+- `drop-mcp` with a claude CLI present, or with opencode/goose configs
+  containing a `scratchpad` entry, is review-verified only (the runner has
+  none of the three); the absent-config paths are CI-verified.
+
+**Pre-beta manual check owed (real Windows machine):** sign in interactively
+as a **standard, non-administrator** user (a primary session, not a
+`Start-Process -Credential` one), run `install.ps1 install` from an unzipped
+release, and confirm: the scheduled task registers without an elevation
+prompt, `status` reports Running, `http://localhost:8737` serves, the task
+starts again after sign-out/sign-in, and `uninstall` removes the task,
+binaries and PATH entry while `%USERPROFILE%\.scratchpad` (marker file)
+survives. Pass = all of the above with no elevation prompt and no data-root
+change. This closes the one installer path CI structurally cannot reach; the
+beta release notes carry the same caveat.
 
 ## Phase 4 — Windows Watch Links and Degraded Mode (P4.3/P4.4)
 
@@ -2512,3 +2637,169 @@ No conflicts were hit against `internal/store`'s concurrently-edited files
 `internal/store` edits (the six re-gated tests, plus the two new P-6 test
 files) landed cleanly because they touched different lines/files than the
 concurrent M1/M2/M3 work.
+
+## P4.7 — Semantic parity remediation (P-5)
+
+Fixes P-5 (`internal/watch` canonicalises the two watch-link flavours
+differently), the one finding P4.7's own remediation task (the section
+above) explicitly left for its owner. See
+`reviews/P4.7-semantic-parity.md`'s P-5 entry and the paragraph the prior
+task added recording what real Windows CI (`185b37d`, run `32969235815`)
+measured beyond P-5's original text.
+
+**What the gap actually was.** `internal/watch/watch.go`'s `canonicalDir`
+used `filepath.EvalSymlinks` for the dedup/identity key `desiredDirs`' walk
+and `reconcile`'s watch-list comparison both use. `EvalSymlinks` resolves
+`ModeSymlink` reparse points but not junctions — the flavour `store.Watch`
+creates for every Developer-Mode-off user, i.e. the default on an ordinary
+Windows machine. `185b37d`'s measurement is the load-bearing fact: it is not
+that a junction is merely left unresolved (P-5's own framing, reasoned from
+Go's source, not measured) — `canonicalDir` actively *fails* with "the
+system cannot find the path specified" for any path that continues past a
+junction component, even though `CreateFile` (what `openWatchDir` already
+uses to read the same directory) follows the identical path transparently.
+`desiredDirs`' walk reaches that failure for every entry nested below a
+junction watch link, and the non-`required` branch's `skipEntry` treats it
+as "this entry disappeared" and silently drops it — logged, not fatal, per
+`skipWalkError`'s designed carve-out (CLAUDE.md's watcher paragraph). Net
+effect: a junction-backed watch tree's own directory was registered, but
+**nothing nested inside it ever was** — the SSE hub never learns about a
+change there, so live refresh silently stops working one level into every
+watch a Developer-Mode-off user creates.
+
+**M5.junction vs P-5 — which was stale.** `spike-findings.md`'s M5
+(`filepath.EvalSymlinks` case, Run 4, empirically measured) already states
+this precisely: "with a junction as an intermediate component it returns
+`ERROR_PATH_NOT_FOUND`." `storefs_windows.go`'s `canonicalizeWatchTarget`
+doc comment cites the same M5.junction finding as the reason `Watch`
+already needed a handle-based canonicalisation for its own single call
+site, well before this task. P-5's text, by contrast, reasoned from Go's
+`walkSymlinks` source that a junction (reporting `ModeDir|ModeIrregular`,
+not `ModeSymlink`) would be walked *past* transparently, concluding the
+only consequence was a differently-keyed dedup entry — "the user-visible
+cost is small." That reasoning does not hold: `walkSymlinks` still fails
+when the directory it `Lstat`s next does not exist *as a plain path*
+one level below an unresolved reparse component, which is exactly
+`ERROR_PATH_NOT_FOUND`. **M5.junction was the correct, load-bearing claim
+throughout; P-5 was the stale one** — its own review text even flags itself
+as "reasoned not measured" and invites correction from real CI, which
+`185b37d` then supplied.
+
+**The fix.** `canonicalDir` is now split per-platform, joining
+`dirIdentity`/`identity`/`openWatchDir`/`skipWalkError` in
+`identity_unix.go` / `identity_windows.go` (moved out of `watch.go`, which
+now only carries the shared doc comment explaining why). Linux keeps the
+unchanged `filepath.EvalSymlinks` implementation — there is no junction
+concept to get wrong there. Windows gets a handle-based implementation that
+mirrors `internal/store/storefs_windows.go`'s `canonicalizeWatchTarget`:
+open the path FOLLOWING reparse points (plain `FILE_FLAG_BACKUP_SEMANTICS`,
+no `FILE_FLAG_OPEN_REPARSE_POINT` — the same kind of open `openWatchDir`
+already performs a moment later in the same walk step) and read
+`GetFinalPathNameByHandleW(VOLUME_NAME_DOS)` from that handle, which
+`M6.resolution` measured returns the long-name canonical form. This is a
+deliberately separate, un-exported copy of the mechanism rather than a call
+into `internal/store`: `canonicalizeWatchTarget` is a containment primitive
+scoped to `Watch`'s single call site under `SCRATCHPAD_ROOT` (its result is
+a durable link target, re-validated with `validateAbsoluteWindowsPath` and
+walked handle-by-handle before any later use), while `canonicalDir` runs on
+every directory `desiredDirs`' walk visits — including watched trees
+entirely outside `SCRATCHPAD_ROOT` — purely for read-only dedup/identity
+keying. `internal/store` did not need any additional exports: `finalPathDOS`
+is a ~15-line wrapper directly over `windows.GetFinalPathNameByHandle`
+(already exported by `x/sys/windows`), so `identity_windows.go` declares its
+own copy for the same reason it already declares its own `fileIDInfo`
+rather than asking `internal/store` to export a helper for one struct read.
+
+**Tests.** `TestDesiredDirsFollowsJunctionWatchLink`
+(`internal/watch/junction_windows_test.go`) previously asserted the broken
+behaviour deliberately, per `185b37d`'s comment pointing here; it now
+asserts the fixed one — a directory nested below a junction watch link is
+registered in `desiredDirs`' map, the same as one nested below a directory
+symlink (`TestDesiredDirsFollowsWatchLinkButNotNestedDirectorySymlink`,
+`watch_test.go`). New `TestNestedChangeUnderJunctionReachesHub` goes one
+step further, since "registered" is the mechanism and "live refresh works"
+is the property a user actually observes: it exercises the real fsnotify
+backend end to end (`New`, not `newWatcher`+`fakeBackend`), writes a file
+inside a directory nested below a junction, and asserts the change reaches
+a `Hub` subscriber within the package's real debounce/max-latency windows.
+Both symlink-flavour twins were left unchanged.
+
+**Related gap checked, not found.** The task that raised P-5 asked whether
+`WatchLinkFor`, `Watches` and the web layer have the same bug. They do not:
+both are `internal/store/store.go` functions built on handle-relative,
+per-segment opens (`classifyEntry`, `openRealDirAt`, `dupFD`) that stop
+descending the instant a segment classifies as a link — the same
+containment-safe primitive family `ADR`'s Windows backend uses everywhere
+else, and never a raw `filepath.EvalSymlinks`/path-string call that could
+fail past a junction. `internal/watch`'s `canonicalDir` was the one
+outlier, added later (P4.1/P4.2) as a plain path-based helper rather than
+being built on those primitives from the start. One structurally similar,
+but out-of-scope and lower-severity, spot noticed in passing:
+`internal/store/ignore.go`'s `loadIgnoreSet` also calls
+`filepath.EvalSymlinks` (as an `include`-cycle dedup key) and would have the
+same "fails past a junction" problem, but degrades gracefully — on error it
+falls back to the unresolved path as the key, bounded by the existing
+`maxIncludeDepth`, rather than dropping anything. Not fixed here: it is a
+different function, a different (survivable) failure mode, and not part of
+P-5.
+
+**Verification status — please read before trusting the Windows claims.**
+GitHub Actions had a platform-wide outage while this fix was pushed
+(incident opened 2026-08-26T15:11:58Z, "investigating" as of 16:50Z); `gh
+api .../actions/runs?head_sha=<sha>` returned `total_count: 0` for every sha
+this task pushed (`afc3a66` and whatever commit follows this doc entry) —
+GitHub was not dispatching runs on this repo at all, not merely queueing
+them. Concretely, split by what is actually verified:
+
+- **Real Windows CI (measured, not this task's run):** the failure mode
+  this fix addresses — `185b37d`'s CI run `32969235815` — and the fact that
+  `Watch`'s own `canonicalizeWatchTarget` needed the identical handle-based
+  treatment for the identical M5.junction reason, already shipped and green
+  on this branch before this task started.
+- **Verified locally by this task (Linux only):** `make test`; `go test
+  ./... -count=1`; `go test ./internal/watch -race -count=3`; `go test
+  ./internal/watch -count=20`; `go test ./... -v -count=1 | grep -c '^---
+  SKIP'` unchanged at 0. All pass. None of these exercise a Windows
+  junction — the platform they'd need to run on cannot produce one.
+- **Verified locally by this task (cross-compilation and static checks
+  only, not executed):** `GOOS=windows GOARCH=amd64 go build ./...`,
+  `GOOS=windows GOARCH=arm64 go build ./...`, `GOOS=windows GOARCH=amd64 go
+  vet ./...`, and `GOOS=windows GOARCH=amd64 go test -c` for
+  `internal/watch` (compiles the new test file, including
+  `TestNestedChangeUnderJunctionReachesHub`, without running it). All clean.
+- **Not yet verified at all:** that `canonicalDir`'s Windows implementation
+  actually resolves a real junction correctly at runtime, that
+  `TestDesiredDirsFollowsJunctionWatchLink` and
+  `TestNestedChangeUnderJunctionReachesHub` pass on a real
+  `windows-2025`/`windows-11-arm` runner, and that the pre-existing junction
+  and symlink tests in this package still pass unchanged next to this
+  change. This is exactly the platform-specific, junction-specific claim
+  that cannot be checked by reading source or by cross-compiling — it needs
+  the Actions outage to clear and a real run against `afc3a66` (or whatever
+  commit is HEAD once this doc lands) to be either confirmed or corrected
+  the same way `185b37d` corrected P-5's own first attempt.
+
+Whoever next has Windows CI access on this branch should treat this section
+as unfinished until a run against this commit is read end to end and its
+result (pass or the specific measured failure) is recorded here.
+
+### Verification
+
+```
+make test                                          # ok, all packages
+go test ./... -count=1                              # ok, all packages
+go test ./internal/watch -race -count=3              # ok
+go test ./internal/watch -count=20                   # ok
+GOOS=windows GOARCH=amd64 go build ./...             # clean
+GOOS=windows GOARCH=arm64 go build ./...             # clean
+GOOS=windows GOARCH=amd64 go vet ./...               # clean
+GOOS=windows GOARCH=amd64 go test -c ./internal/watch # compiles, not run
+go test ./... -v -count=1 | grep -c '^--- SKIP'      # 0, unchanged on Linux
+```
+
+Real Windows CI (`windows-2025` / `windows-11-arm`): **not yet obtained**
+— see "Verification status" above. This entry must be updated with the run
+URL and result once GitHub Actions recovers.
+
+One commit so far: `fix(watch): resolve junctions through canonicalDir on
+Windows (P-5)` (`afc3a66`).
