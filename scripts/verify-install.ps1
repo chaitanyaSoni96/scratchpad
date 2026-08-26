@@ -464,9 +464,21 @@ if ($naReady) {
         $r3 = Invoke-AsNonAdmin @('startup', '-BinDir', $naBin)
         Write-Host "   (startup as non-admin exited $($r3.ExitCode); start-now is not assertable without an interactive session)"
         if ($null -ne (Get-Task)) {
+            # A constant on purpose: this branch IS the assertion (reaching
+            # it means registration happened); the literal keeps the pass
+            # count and the assertion name stable across environments.
             Assert $true 'non-admin: startup registered the scheduled task without elevation'
             Assert ($r3.Output -match 'only in this shell') 'non-admin: shell-only SCRATCHPAD_ROOT triggers the NOTE' $r3.Output
         } else {
+            # The denial branch is pinned to the ONE failure this runner is
+            # known to produce -- the surfaced exception line observed in run
+            # 32970247103 on both engines: "  Error: Access is denied.".
+            # (Safe to match exactly: the job runs only on GitHub's en-US
+            # runner images, so the message is not locale-variable here.)
+            # Any OTHER registration failure -- a real regression -- fails
+            # this assertion and the job, instead of slipping through the
+            # installer's generic could-not-register catch block.
+            Assert ($r3.Output -match 'Error: Access is denied\.') 'non-admin: denial is the known runner limitation (access denied), not some other failure' $r3.Output
             Assert ($r3.ExitCode -eq 1) 'non-admin: registration denial exits 1 (clean throw, not a crash)' $r3.Output
             Assert ($r3.Output -match 'could not register the scheduled task') 'non-admin: registration denial prints the documented actionable error' $r3.Output
             Assert ($r3.Output -match 'foreground execution is fully supported') 'non-admin: registration denial points at the foreground alternative' $r3.Output
