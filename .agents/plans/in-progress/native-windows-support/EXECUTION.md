@@ -2699,7 +2699,15 @@ as "this entry disappeared" and silently drops it — logged, not fatal, per
 effect: a junction-backed watch tree's own directory was registered, but
 **nothing nested inside it ever was** — the SSE hub never learns about a
 change there, so live refresh silently stops working one level into every
-watch a Developer-Mode-off user creates.
+watch a Developer-Mode-off user creates. Stated plainly, because it is
+easy to read past as one line in a divergence table: a junction is the
+*only* watch-link flavour a Developer-Mode-off user can create at all (a
+directory symbolic link needs a privilege or Developer Mode on) — so this
+bug meant live refresh was dead below every watch link, for the entire
+default-configuration Windows population, until this fix. `reviews/P6.3-independent-code-review.md`'s
+independent read of this same commit reached the identical severity
+conclusion without coordinating with this task, for whatever that
+cross-check is worth.
 
 **M5.junction vs P-5 — which was stale.** `spike-findings.md`'s M5
 (`filepath.EvalSymlinks` case, Run 4, empirically measured) already states
@@ -2883,3 +2891,80 @@ commits were already pushed and had commits from other agents built on top,
 so this was left as a recorded attribution note rather than rewritten
 history: rewriting shared, already-built-upon history is a materially
 bigger risk than one commit whose diff is broader than its message.
+
+### P6.3 F2 — the duplicated `finalPathDOS` mishandled a mapped-drive/UNC result (Low, regression in `afc3a66`)
+
+`reviews/P6.3-independent-code-review.md`'s independent review of this
+task's own `afc3a66` caught something this task's own verification missed:
+`identity_windows.go`'s `finalPathDOS`, trimming only the `\\?\` prefix,
+produced the malformed string `UNC\server\share\...` (missing its leading
+`\\`) whenever `GetFinalPathNameByHandleW(VOLUME_NAME_DOS)` returned its
+other documented shape instead of the common drive-letter one — which it
+does not only for a path typed as `\\server\share\...` directly, but for an
+ordinary **mapped network drive letter** too (a documented Win32 quirk).
+`openRootedFS`'s `validateAbsoluteWindowsPath(root)` check cannot catch
+this in advance: it inspects the raw `SCRATCHPAD_ROOT` string as typed
+(e.g. `Z:\scratchpad`), which is syntactically an ordinary drive-letter
+path — the UNC quirk only surfaces once a handle-based call resolves it.
+That malformed string fed straight into `canonicalDir`'s return value and
+then into `w.backend.Add` with nothing in between to catch it, and
+`reconcile` treats an `Add` failure as fatal to the whole watcher. Before
+`afc3a66`, `filepath.EvalSymlinks` never rewrote a drive letter to its UNC
+form at all, so a `SCRATCHPAD_ROOT` on a mapped drive worked; after it,
+the same configuration would boot-loop. A genuine regression, confirmed by
+re-reading `openRootedFS` (`storefs_windows.go`) directly: its only
+non-fatal, mutation-gated NTFS-name warning is unrelated and would not
+have fired for an SMB share reporting `NTFS` as its filesystem name, and
+`internal/watch`'s walk does not go through `internal/store`'s root
+validation at all — it operates on raw filesystem paths independently.
+
+**Fix** (`1ccfc88`): `finalPathDOS` now reconstructs the well-formed UNC
+path (`\\server\share\...`) for that shape, the same idea
+`internal/store/link_windows.go`'s `stripNTPrefix` already applies to the
+*different* `\??\` NT-form prefix reparse points carry (not directly
+reusable — `GetFinalPathNameByHandleW` returns the DOS `\\?\` form, not the
+NT one). Deliberately does **not** add `internal/store`'s
+`canonicalizeWatchTarget`-side rejection
+(`validateAbsoluteWindowsPath`): that is a containment/policy decision —
+`Watch()` refusing to let a user *pick* a UNC watch target — and
+`canonicalDir` is a read-only dedup/identity primitive with no containment
+role (its own doc comment says so). Refusing here would be a new policy
+call made in the wrong layer, not a fix for the bug the review actually
+found; the review's own suggested fix offered this as one of two options
+("handle the `\\?\UNC\` form... **Or** export the store's pair"), and this
+task's judgment is that reconstruction alone is both sufficient (the two
+documented `VOLUME_NAME_DOS` output shapes are now both handled correctly,
+so there is no third malformed shape left to guard against) and strictly
+better for the mapped-drive user than failing closed would be — it makes
+the watch actually work, rather than degrading it to a skipped, unwatched
+subtree.
+
+**Duplication-vs-export judgment, revisited.** This task wrote the
+duplication-rather-than-export doc comment in `afc3a66` on the premise that
+the two copies were byte-identical; F2 is exactly the cost of that premise
+turning out false once one copy needed more than the other. Re-examined
+now, per the operator's direction: the honest export candidate is not the
+whole `finalPathDOS`/`canonicalizeWatchTarget`, since `internal/store`'s
+version intentionally does more (the containment rejection above) — it
+would be the strip-only half. That is a small, defensible carve-out, but
+this task left it as a duplicate rather than making the cut itself: the
+operator's own constraint on this task was to stay out of `internal/store`
+because a concurrent task (P6.3 F1) is mid-edit there, so an export
+decision is a sequencing call for the operator, not something to force
+through a shared file two tasks are already touching. Flagged, not acted
+on.
+
+**Verification.** `TestStripFinalPathDOSPrefix`
+(`internal/watch/identity_windows_test.go`) is a pure string test against
+literal `\\?\C:\...` and `\\?\UNC\server\share\...` inputs — deliberately
+independent of any real handle, volume or network share, because
+`spike-findings.md`'s M1 records "SMB / UNC: no share available in CI":
+there is no way to reproduce the actual mapped-drive trigger end to end on
+any runner this project has, on any branch, so a pure unit test of the
+string transformation is the level at which this fix can actually be
+exercised. `make test`; `go test ./... -count=1`; `go test ./internal/watch
+-race -count=3`; `go test ./internal/watch -count=20`; `GOOS=windows
+GOARCH=amd64 go build ./...`/`go vet ./...`/`go test -c ./internal/watch`;
+`GOOS=windows GOARCH=arm64 go build ./...`; Linux skip count unchanged at
+0 — all pass/clean. Real Windows CI for this commit: not yet obtained (see
+"Verification status" above; the same GitHub Actions backlog applies).
