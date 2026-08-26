@@ -1755,3 +1755,28 @@ remove-then-rename decomposition for atomic write, the check-then-create
 reasoning for concurrent claim, the reason-checked existing tests' pre-fix
 error messages) fired as designed, confirming the corresponding positive
 assertion is not vacuous.
+
+### P5.1/P5.2 — installer checkpoint (verification still owed)
+
+`scripts/install.ps1` is committed as a checkpoint: the agent writing it hit an
+account session limit before it could add the CI workflow that runs the
+installer on a real `windows-2025` runner. **The script has therefore never
+been executed.** There is no PowerShell on the development host, so nothing
+about it is verified beyond review.
+
+Structure is complete — `all`, `cli`, `skill`, `drop-mcp`, `install`, `startup`,
+`start`, `stop`, `status`, `remove-startup`, `uninstall`, with `Show-Usage` and
+exit 2 on an unknown verb. `Set-StrictMode -Version Latest`, user PATH edited
+through the registry format-preserving, and `Invoke-WithRetry` for the exe-lock
+race after stopping the task.
+
+Uninstall reads correctly against the review-checklist rule that install and
+uninstall never delete the data root: it removes only what it created, walks up
+to a parent directory only when `BinDir` is the default it made itself, and
+never guesses at the parent of a user-supplied `-BinDir`.
+
+**Owed before P5.1/P5.2 can be called done:** the runner workflow proving each
+operation is idempotent when run twice, that uninstall leaves a pre-created
+`%USERPROFILE%\.scratchpad` with a marker file intact, Scheduled Task
+register/query/remove, an install path containing a space and a non-ASCII
+character (P5.5), and whether Windows PowerShell 5.1 works or only PowerShell 7.
