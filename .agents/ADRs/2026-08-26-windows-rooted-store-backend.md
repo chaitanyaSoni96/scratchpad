@@ -59,7 +59,7 @@ place rather than left silent.
 Revision 2 closed P1.7. These are amendments made *after* it, each raised by a
 later review against the shipped code and each edited in place at the row or
 section named. They are listed here because a reader who trusts a disposition
-without re-deriving it is the failure mode this project has now hit three times.
+without re-deriving it is the failure mode this project has now hit repeatedly.
 
 | Raised by | What was wrong | Corrected at |
 |---|---|---|
@@ -67,13 +67,43 @@ without re-deriving it is the failure mode this project has now hit three times.
 | P3.13 F-8 → **P6.2 FD-4** | §6.9 claimed to be "the complete list" and instructed reviewers to treat any omission as a document defect. P3.13 found seven omissions; four other rows were meanwhile *better* than their disposition. The framing itself was the defect | §6.9 header, rows 5–8, new rows A–G; RW3 |
 | **P6.2 FD-1** | RW13, RW15 and RW19 were dispositioned "Deferred, owner **P4.6**". P4.6 closed without delivering any of the three | RW13, RW15, RW19 rows; new §9.1 |
 | **P6.3 F1** | §7.4 closed the *case* half of the name-comparison problem and left the *spelling* half open: an NTFS 8.3 alias defeated `Visible`'s reserved-name deny and every ignore rule. Now measured live and fixed | §7.4 (see P6.2 §10 for the adjudication, the measurement and the rejected alternatives) |
+| **P6.2 FD-3** | §4.1 and the §4.4/§4.5/§4.8 flows prescribed `verifyRoot()` "before every mutation", and §4.9's R13 row read "yes". `verifyRoot` never had a caller — and wiring it up would have been *wrong*, since the only case it could fire on is the F-b case §4.1 itself calls correct. `statLinkTarget` and `StatEntryAt` likewise never gained callers. All three deleted in `b4ae05b` | §3.2 table + prose, §4.1, the three flows, §4.9 R13, §6.8 item 5, §6.9 row 4, §8.2, §10.2, §11 reading note |
+| **P6.2 §11** | §11.1's migration inventory carried a gate — *"this table must be green before `internal/winspike` is removed"* — with owners P3.11/P3.12 and P3.13 verifying. It was never evaluated, and it omits two of the three matrix cells AC5 is still short | §11.1 is left as written; the delta, the plan and the five unmigratable properties are P6.2 §11 and new **§11.2** |
 
 Revision 1's lesson was *"an unmeasured assumption presented as a fact is the
-worst thing this document could contain."* Revision 2's, from the four rows
-above, is narrower and sharper: **a disposition is a claim about code, and it
-decays.** Three of the four corrections here are not wrong measurements — they
-are statements that were true when written and were not re-checked when the code
-moved underneath them.
+worst thing this document could contain."* Revision 2's is narrower and sharper:
+**a disposition is a claim about code, and it decays.** Most of the corrections
+above are not wrong measurements — they are statements that were true when
+written, or that were never true, and were not re-checked when the code moved
+underneath them.
+
+### The pattern, stated once so it can be designed against
+
+Three of these are the same failure, and it is worth naming rather than fixing
+one instance at a time:
+
+- **FD-1** — RW13/RW15/RW19: *"Deferred, owner P4.6."* P4.6 closed; nothing
+  shipped.
+- **FD-4 / RW3** — *"P3.13 must find zero unlisted ones."* P3.13 found seven and
+  §6.9 was not revised.
+- **§11.1** — *"this table must be green before `internal/winspike` is removed",*
+  owners P3.11/P3.12, verified by P3.13. Never evaluated; the package is still
+  the only home for three release-blocking matrix cells in Phase 6.
+
+In each case the document names a **gate**, names an **owner**, and records **no
+evaluation** — and in each case the absence of a recorded failure was read, by
+every later reader including two independent reviewers, as a pass. **A gate with
+an owner and no recorded evaluation reads as satisfied.** That is not a
+reviewer's mistake; it is the document's default, and it is the same defect
+whether the gate is a checklist row, an exit condition, or a migration table.
+
+The countermeasure is mechanical, not cultural: **a gate must name the artefact
+that records its evaluation** — a test id, a CI job, a commit — so that "not
+done" is *visible* rather than merely *unstated*. Where this document could not
+supply that, it now says so in the row (see §9.1's "if nobody takes it" column,
+which is the same idea applied to owners). FD-3 is the adjacent case: a
+*mechanism* named with no implementation, where the absence of a call site is
+just as invisible as the absence of an evaluation.
 
 ## Status
 
@@ -282,7 +312,6 @@ type rootedFS struct {
 
 func openRootedFS(create bool) (*rootedFS, error)
 func (r *rootedFS) close() error
-func (r *rootedFS) verifyRoot() error   // R13: re-read FILE_ID_INFO, compare with r.id
 func (r *rootedFS) openRealDir(segs []string, create, rejectArtifacts bool) (int, error)
 func (r *rootedFS) openBrowsableDir(segs []string) (int, error)
 
@@ -306,8 +335,15 @@ func openPathFile(segs []string) (*os.File, error)
 func pruneAt(r *rootedFS, segs []string)
 func readDirFD(fd int) ([]os.DirEntry, error)              // M16: dup + os.NewFile + ReadDir
 func statAt(parent int, name string) (entryMeta, error)    // NEW — the fstatat twin
-func statLinkTarget(parent int, name string) (isDir, ok bool) // NEW — see below; NOT path-based
 ```
+
+> **CORRECTION (P6.2 FD-3).** This table listed two more functions,
+> `(*rootedFS).verifyRoot` and `statLinkTarget`. Both were implemented, neither
+> ever acquired a caller, and both were deleted in `b4ae05b`. `verifyRoot`'s
+> job is done by `checkRootIdentity` at pin time — see §4.1's correction, which
+> also explains why calling it mid-operation would have been actively wrong.
+> `statLinkTarget`'s job is done by `classifyEntry` (shared code, `store.go`)
+> over `statAt`. The table above is the shipped surface.
 
 **`openRealDirAt` / `openRealFileAt` replace revision 1's `openDirAt` /
 `openFileAt`.** Revision 1 specified them as
@@ -335,7 +371,10 @@ buried inside the primitive. `errors.As` on it is how `openBrowsableDir`
 recognises a candidate watch boundary.
 
 **`statLinkTarget` is handle-relative and no-follow, not a path-based one-hop
-follow.** Revision 1 described it two ways in the same document — §3.2 said
+follow.** *(Retained as the record of a resolved ambiguity; the function itself
+never gained a caller and was deleted — see the correction above. What shipped
+in its place, `classifyEntry`, resolves the ambiguity the same way and is
+described in §6.8.)* Revision 1 described it two ways in the same document — §3.2 said
 *"bounded one-hop follow for listings"* and Pre-1 said *"convert `entryIsDir`
 … to a **no-follow** classification via `statLinkTarget`"* — and the difference
 decides whether `entryIsDir` can be redirected through a junction. It is
@@ -615,10 +654,49 @@ symlink, a junction **or a volume mount point** is refused on the *tag*, not on
 `fs.ModeSymlink` (which misses junctions entirely, §3.4 of the threat model).
 `FILE_ID_INFO` is recorded (`P12.root`, `P12.root_file`).
 
-`verifyRoot()` re-reads `FILE_ID_INFO` and compares before every mutation
-(R13). It distinguishes a rename — identity unchanged, not an error
-(`R13.rename`) — from a replacement — different identity, hard error
-(`R13.replace`, REQUIRED).
+**The pre-mutation identity re-read (R13) is `checkRootIdentity`, and it runs
+at pin time, not before every mutation.**
+
+> **CORRECTION (P6.2 FD-3).** Revision 2 said here that *"`verifyRoot()`
+> re-reads `FILE_ID_INFO` and compares before every mutation (R13)"*, and §4.4,
+> §4.5 and §4.8 listed `verifyRoot()` as a step in their flows. **That was
+> never true of the shipped code.** `verifyRoot` was implemented, was never
+> called from anywhere, and was deleted in `b4ae05b` along with two other
+> callerless functions. §4.9's R13 row nonetheless read "yes". This is the
+> third disposition on this branch that described a mechanism with no
+> implementation.
+>
+> **And wiring it up would have been wrong, not merely redundant** — which is
+> the part worth keeping. Because the root is re-opened by name once per
+> operation (§10.2), a `verifyRoot()` called later in that same operation can
+> only ever compare against a value recorded microseconds earlier. The single
+> condition it could fire on is a root replaced *mid-operation* — and §4.1
+> decides, three paragraphs below, that this case is **correct behaviour**:
+> "an operation that began against a live root, holding a descriptor to it,
+> completes against that object. That is F-b, not a defect." So the mechanism
+> this section prescribed would have failed operations this section calls
+> correct. A check that can only produce false positives is worse than no
+> check, for the same reason §4.1 already gives for refusing to extend it to
+> removal detection: *"a check that cannot fire is worse than no check because
+> it invites reliance."* Both halves of that argument were in the document; the
+> prescription contradicting them was too.
+
+What actually delivers R13 is `checkRootIdentity`, called from inside
+`openRootedFS` **at the moment the root handle is pinned**, before the caller
+receives it:
+
+- It records `FILE_ID_INFO` in a process-level map keyed on the resolved root
+  string, and compares on every subsequent open of that same string.
+- It distinguishes a **rename** — identity unchanged, not an error
+  (`R13.rename`) — from a **replacement** — different identity, hard error
+  (`R13.replace`, REQUIRED).
+- Because it fires at pin time rather than mid-operation, it catches the case
+  R13 was actually written for: the same root string resolving to a *different
+  object* between two operations, i.e. "silently operating on the wrong store".
+  That is precisely the case a per-operation `verifyRoot()` could not see.
+
+The rest of this section derives that design; it simply now describes the
+mechanism that shipped rather than one that did not.
 
 **Weakness, stated:** R13 is a *diagnostic*, not a control. Because the name is
 never re-resolved, a replaced root cannot redirect us anyway. It also cannot
@@ -626,12 +704,15 @@ detect replacement of an intermediate project directory — that case is covered
 structurally by the handle chain (F-b), not by identity.
 
 **And revision 1 overstated even the diagnostic (F9).** §10.2 overrides R12 from
-a process-lifetime pin to a per-operation pin. Under a per-operation pin,
-`verifyRoot()` compares the root's identity against a value recorded
-*microseconds earlier in the same operation* — a case F-b already makes
-harmless. It cannot see a replacement **between** operations, which is precisely
-the case R13 was written for ("silently operating on the wrong store"). So
-`verifyRoot()` alone cannot do the one thing revision 1 credited it with.
+a process-lifetime pin to a per-operation pin. Under a per-operation pin, a
+mid-operation re-read of the root's identity — the `verifyRoot()` design, since
+deleted — could only compare against a value recorded *microseconds earlier in
+the same operation*, a case F-b already makes harmless. It could not see a
+replacement **between** operations, which is precisely the case R13 was written
+for ("silently operating on the wrong store"). So that design alone could never
+do the one thing revision 1 credited it with. This is the reasoning that
+produced the cache below, and in hindsight it is also the reasoning that should
+have stopped `verifyRoot` being specified as a flow step at all.
 
 **Decision: add a process-level last-seen root identity, keyed on the resolved
 root string.** `openRootedFS` consults a package-level
@@ -656,7 +737,7 @@ alive for the open handle, so the store keeps working against a directory no
 longer reachable by name.
 
 **Decision: this is acceptable within an operation and must be detected across
-operations, and `verifyRoot()` must not pretend to detect it.**
+operations, and no mid-operation re-read may pretend to detect it.**
 
 - *Within* an operation it is the correct behaviour and the exact analogue of
   Linux: an operation that began against a live root, holding a descriptor to
@@ -668,9 +749,11 @@ operations, and `verifyRoot()` must not pretend to detect it.**
   each operation (§10.2), and a removed root fails that open with
   `STATUS_OBJECT_NAME_NOT_FOUND` → `fs.ErrNotExist`. A removed-and-recreated
   root is caught by the identity cache above.
-- `verifyRoot()` is therefore **not** extended to attempt removal detection: it
-  cannot (`A4.root_removed` measured `Verify() → nil`), and a check that cannot
-  fire is worse than no check because it invites reliance.
+- A mid-operation re-read is therefore **not** used for removal detection: it
+  cannot work (`A4.root_removed` measured `Verify() → nil`), and a check that
+  cannot fire is worse than no check because it invites reliance. Taken to its
+  conclusion — as P6.2 FD-3 did — that argument removes the re-read entirely,
+  which is what shipped.
 
 **Filesystem gate (R18):** `GetVolumeInformationByHandle` on the root handle
 gives the filesystem name. Per threat model §9.8 the gate is the **first
@@ -860,7 +943,9 @@ with the Linux regression test).
 
 ### 4.4 `Publish` — R6, R13
 
-Ancestors via `openRealDir(create=true, rejectArtifacts=true)`. `verifyRoot()`.
+Ancestors via `openRealDir(create=true, rejectArtifacts=true)`. The root's
+identity was already checked by `checkRootIdentity` when `openRootedFS` pinned
+it (§4.1); nothing re-reads it here.
 `runStoreOpHook("publish-claim")` — already after the parent is pinned. Then
 `mkdirClaim(parent, name)`: a single `FILE_CREATE`, atomic, races and existing
 names both surfacing as `errExists` (`P12.mkdir_excl`). Files are written with
@@ -879,7 +964,8 @@ and then reported distinguishably.
 ### 4.5 `Delete` — the highest-severity operation — R7, R8
 
 `lockRendezvous(exclusive)`, `openRealDir(create=false, rejectArtifacts=false)`,
-`verifyRoot()`, `runStoreOpHook("delete")`, then `isLinkAt(parent, name)`:
+`runStoreOpHook("delete")`, then `isLinkAt(parent, name)` — the root identity
+check having already run at pin time (§4.1):
 
 - **Tag on the allowlist** → `unlinkAt` only. Measured: removing a junction
   relative to a pinned parent leaves the target byte-intact
@@ -997,7 +1083,7 @@ arise, because there is no fallback to fall back to.
 
 ### 4.7 `Watch` — R2, R6
 
-`openRealDir(create=true, rejectArtifacts=true)`, `verifyRoot()`,
+`openRealDir(create=true, rejectArtifacts=true)`,
 `runStoreOpHook("watch-link")`, then `symlinkAt` (§6.6). The "already inside the
 scratchpad" guard is re-expressed (§7.1). The idempotence comparison becomes
 object identity, not string equality (§7.2).
@@ -1154,7 +1240,7 @@ on the temp's own handle is the only durability knob there is. It is exposed as
 | **R10** bounded retry on transient failures | **yes; bound measured, distribution not** | §8.4; `P13.bound` (10 attempts / 771 ms), `P13.bound_terminates`, `P13.retry.hold*`, `P13.retry_integrity.*` (REQUIRED). `M13.av` is NOT MEASURED and the *sizing* remains a documented choice |
 | **R11** lookup validation + case-insensitive guards | **yes** | §7.4, §7.5 |
 | **R12** root resolved once and pinned | **overridden** → once *per operation*, carried as `rootedFS.path`+handle | §7.3, §10.2 |
-| **R13** pre-mutation root identity re-verification | **yes, conditional on the process-level identity cache landing** | `R13.replace` (REQUIRED) gives the discrimination; §4.1 gives the cross-operation check the per-operation pin removed. Until P3.1 lands the cache this row is **partial** — `verifyRoot()` alone compares against a value recorded microseconds earlier |
+| **R13** pre-mutation root identity re-verification | **yes — by `checkRootIdentity` at pin time, not by a pre-mutation re-read** | *(Corrected, P6.2 FD-3: this row read "yes, conditional on the process-level identity cache landing" while also crediting `verifyRoot()`, which never had a caller and is now deleted.)* The cache landed and is the whole mechanism: `openRootedFS` records `FILE_ID_INFO` per resolved root string and refuses a changed identity. `R13.replace` (REQUIRED) gives the discrimination; `TestRootIdentityCacheDetectsCrossOperationReplacement` exercises the cross-operation case. R13's literal wording — "before any mutation" — is **not** satisfied and deliberately so: §4.1 shows a mid-operation re-read could only fire on the F-b case the ADR calls correct |
 | **R14** watcher identity from the registered handle | **partial** | §3.5 supplies `FILE_ID_INFO` identity, but `identity(*os.File)` reads a handle the **watcher** opened while `backend.Add(string)` registers a different, path-keyed handle. §11's P4.1 concedes the map stays path-keyed, forced by the fsnotify backend API. The falsifier (a path-string identity) is avoided; the property as written is not fully delivered |
 | **R15** `FILE_SHARE_DELETE` everywhere, all handles closed | **yes for store primitives; one known violation outside them** | §3.2 ownership rules. `internal/watch`'s `desiredDirs` uses `os.Open`, which `P13.go_share_mode` measured omits `FILE_SHARE_DELETE` — owner P4.1 (§6.11) |
 | **R16** depth bound + identity-keyed visited sets + **reconcile error triage** | **partial — the triage clause is the gap** | §6.8 delivers the depth bound and the identity-keyed visited set. The triage clause is specified in §6.11 and owned by **P4.2**; until it lands, an unreadable directory is a persistent failure to start (RW23) |
@@ -1675,7 +1761,11 @@ independently (`M16`, REQUIRED).
    605, 648) are resolved by *passing the handle*, never by making the string
    portable. `store.ResolveFolder` already returns a pinned `*os.File`. Three
    small exported helpers carry it: `store.ReadDirHandle(*os.File)`,
-   `store.EntryIsDirAt(*os.File, os.DirEntry)`, `store.StatEntryAt(*os.File, string)`.
+   `store.EntryIsDirAt(*os.File, os.DirEntry)`, and `store.StatEntryAt(*os.File,
+   string)`. *(P6.2 FD-3: `StatEntryAt` was added for this refactor and the
+   refactor never used it — the two remaining call sites take size and mtime
+   from the card-building path instead. It was deleted with no caller in
+   `b4ae05b`; the other two helpers are in use.)*
    Then `docCount` (296) and `hasRenderable` (648) drop their `dir` string
    entirely — they already hold `dirFile`; `siblings` (605) replaces
    `os.ReadDir(dirPath)` with `ReadDirHandle`; `buildCards`/`folderExtras` (555)
@@ -1718,7 +1808,7 @@ criterion unmeetable.
 | 1 | `openBrowsableDir`'s crossing of the watch boundary (§4.3) | **Was** an absolute reopen of the reparse target — the `A11.ancestor_swapped` hole. **Is** a handle-by-handle walk from the volume root; the string is consumed one component at a time under the strict primitive | **Closed**, not merely enumerated. Read path only. RW22 |
 | 2 | `visibleSegments`' `os.Stat` per segment (`store.go:140`) | Advisory by its own comment; the authoritative walk is handle-relative | Accepted. On Windows `os.Stat` follows reparse points, so a junction reports `IsDir()==true`; the only consequence is which ignore rules are evaluated. Low |
 | 3 | `pageCard`'s `os.Stat(filepath.Join(a.Dir, f))` for preview weight | Reads a size and an mtime; feeds `maxPreviewBytes`, a DoS guard | Accepted. Not a containment control |
-| 4 | `statLinkTarget` | Revision 1 described it two ways; §3.2 resolves it as handle-relative and no-follow | **Not a re-resolution.** Listed because revision 1's §3.2 wording made it one |
+| 4 | `statLinkTarget` | Revision 1 described it two ways; §3.2 resolves it as handle-relative and no-follow | **Not a re-resolution, and no longer extant** — deleted callerless in `b4ae05b` (P6.2 FD-3). Listed because revision 1's §3.2 wording made it one |
 | 5 | `annotate`'s `os.Lstat(a.Dir)` and `filepath.EvalSymlinks(a.Dir)` | Path-based classification of an artifact directory | **CLOSED** (P3.6, re-verified P6.2). `annotate` now takes `(parentFD, name)` and classifies via `isLinkAt`; no `os.Lstat`/`EvalSymlinks` remains. Regression test `TestIsLinkFalseForPlainArtifact` |
 | 6 | `WatchLinkFor(rel)`'s *n*-`os.Lstat` walk | Decides whether a card offers **Unwatch** or **Delete** | **CLOSED** (P3.6, re-verified P6.2) — now a handle-anchored `classifyEntry` walk from the pinned root. Better than the "accepted" this row recorded |
 | 7 | `Watches()`'s `os.ReadDir`, `os.Readlink`, `os.Stat` and `hasHTML` | The entire watch enumeration was a path walk | **CLOSED** (P3.6, re-verified P6.2) — `readDirFD` + `classifyEntry` + `readlinkAt` + `dirHasHTMLFD` from the pinned root, with the depth bound and the `objectID`-keyed visited set R16 asks for |
@@ -2001,7 +2091,10 @@ sharpen it:
   (`M7`).
 
 Where a post-check *is* sound, it is kept: on read paths, "the object moved"
-can safely become "not found", which is what `verifyRoot()` does.
+can safely become "not found" — which is what the root re-open per operation
+achieves (`STATUS_OBJECT_NAME_NOT_FOUND` → `fs.ErrNotExist`), together with
+`checkRootIdentity` for the removed-and-recreated case. *(Corrected, P6.2 FD-3:
+this sentence credited `verifyRoot()`, which never ran.)*
 
 ### 8.3 Refusing ReFS outright
 
@@ -2255,10 +2348,11 @@ already unredirectable there.
 
 **The consequence for R13 that revision 1 did not state.** Revision 1 justified
 the override partly on "R13's identity check covers replacement across
-operations". Under a per-operation pin it does not: `verifyRoot()` compares
-against a value recorded microseconds earlier in the *same* operation, which
-F-b already makes harmless, and it cannot see a replacement *between*
-operations — the case R13 was written for. §4.1 restores that property with a
+operations". Under a per-operation pin it does not: a mid-operation re-read
+(the `verifyRoot()` design, specified in revision 2, never called, deleted in
+`b4ae05b`) compares against a value recorded microseconds earlier in the *same*
+operation, which F-b already makes harmless, and it cannot see a replacement
+*between* operations — the case R13 was written for. §4.1 restores that property with a
 process-level last-seen identity keyed on the resolved root **string** (different
 string → new entry, so `t.Setenv` keeps working; same string, different identity
 → the loud error). §4.1 also decides `A4.root_removed`, which revision 1 left
@@ -2321,6 +2415,13 @@ content must arrive through the link.
 ---
 
 ## 11. Consequences for Phase 3
+
+> **Reading note (added P6.2).** This section is the record of what each phase
+> was *asked* to build, and is left as written. It therefore still names
+> deliverables that were built and later removed — `verifyRoot` and
+> `statLinkTarget` in P3.1's row, `statLinkTarget` again in the Pre-1 quote —
+> all three deleted callerless in `b4ae05b`. Treat §11 as history, §3.2 as the
+> shipped surface.
 
 Ordered. The first three are **preconditions** — each is a trap that springs the
 moment a stub becomes real, and each must land *before* the task it precedes.
@@ -2415,6 +2516,158 @@ is removed.** Owners: **P3.11** and **P3.12**; **P3.13** verifies.
 | `P13.go_share_mode` | Why documents and watcher handles must not come from `os.Open` | **P3.5**, **P4.1** |
 | `A1.ancestor_replaced.*`, `A2.dest_replaced*`, `A4.root_replaced.*`, `A4.root_reparse_refused.*`, `A7.two_step_*`, `A8.concurrent_claim` | The hook-driven race suite | **P3.12** |
 | `MATRIX.Delete.target_replaced` | RW1's release gate | **P3.12**, gated per RW1 |
+
+---
+
+### 11.2 Measurements that cannot become tests — preserved verbatim
+
+**This section is the precondition for deleting `internal/winspike`.**
+
+P6.2 §11 inventoried what the spike package still uniquely asserts. Most of it
+migrates to tests against the shipped code. Five properties cannot, because they
+are facts about **Windows and Go**, not properties of `internal/store` — there is
+no product API to call, and a test that probed them from inside `internal/store`
+would be a Win32 conformance suite in a package whose tests are about the store's
+behaviour. Two of them would additionally give the *wrong* answer on a machine
+configured differently from the runner, which is the very variable they measure.
+
+They change **category, not location**: from executable assertion to recorded
+measurement. Each is quoted below with its run, because each is the *reason* a
+design decision was made — delete the package without this section and the ADR
+retains the decisions while losing the evidence that produced them.
+
+Authoritative run unless stated otherwise: **run 9,
+[32908643117](https://github.com/chaitanyaSoni96/scratchpad/actions/runs/32908643117)**
+(commit `145583a`), jobs **97998072330** (`windows-2025`, amd64) and
+**97998072492** (`windows-11-arm`, arm64). Every design-deciding answer was
+identical on both architectures.
+
+---
+
+**1. `A5.obj_dont_reparse_inert_for_unknown_tags` — why the strict open exists.**
+Falsified `R3` as originally written; changed the design (§2.1, §5.1, P1.7 F1).
+First surfaced as a `SECURITY-FAIL` on `A5.unknown_tag_refused` in **run 7**
+([32906333884](https://github.com/chaitanyaSoni96/scratchpad/actions/runs/32906333884),
+commit `6f8b5c3`); corrected in run 8 and unchanged through run 9. Verbatim:
+
+> "for a NON-MICROSOFT tag the WITH-flag and WITHOUT-flag opens return the SAME
+> status… `OBJ_DONT_REPARSE` therefore does NOTHING for an unknown tag… On a
+> machine that HAS the driver — Windows Containers (WCI\*), VFS-for-Git
+> (PROJFS\*), a vendor filter — the same open would be SERVICED and the walk
+> would traverse. R3 stated as 'OBJ_DONT_REPARSE on every component' is
+> NECESSARY AND NOT SUFFICIENT."
+
+*Why it cannot be a product test:* the refusal observed on CI comes from
+`STATUS_IO_REPARSE_TAG_NOT_HANDLED` — "no filter driver claims this tag" — not
+from the flag. On a machine **with** such a driver the same probe inverts. A
+test asserting the CI answer would fail on a developer's Windows Containers box;
+a test asserting the other answer would fail on CI.
+*What it justifies:* `openStrictAt` reading `FILE_ATTRIBUTE_TAG_INFO` from the
+same handle, rather than trusting `OBJ_DONT_REPARSE`. Without this line a reader
+sees `noFollowAttrs` carrying `OBJ_DONT_REPARSE` and may reasonably conclude the
+flag is the control. **It is not. The tag read is.**
+
+---
+
+**2. `M1.intermediate` — why the flag is nonetheless kept.** The other half of
+the same argument. `RequireProperty`, run 9:
+
+> "OBJ_DONT_REPARSE must fail a path whose intermediate component is a reparse
+> point (R3)"
+
+with the observation recorded as *"OBJ_DONT_REPARSE, reparse point as an
+INTERMEDIATE component of `j\deep`"*.
+
+*Why it cannot be a product test:* it probes the raw unexported `ntOpenAt` with
+a **multi-component** name. `internal/store` cannot express that — `ntOpenAt`
+enforces a single component at runtime, which is itself a containment property.
+The product deliberately cannot reach the state this measures.
+*What it justifies:* keeping `OBJ_DONT_REPARSE` in `noFollowAttrs` as
+*necessary and not sufficient* — it is free and still short-circuits a
+Microsoft-tagged intermediate before a handle exists.
+
+---
+
+**3. `P14.junction_not_dir` — why `IsLinkEntry` over-approximates.**
+`RequireProperty`, run 9:
+
+> "a junction must not report `fs.ModeDir`, otherwise a Go-mode-based recursive
+> delete descends into the target (RR1)"
+
+*Why it cannot be a product test:* it asserts a property of **Go's**
+`os.Lstat`/`types_windows.go`, not of ours. It would silently become a test of
+the toolchain, and it is exactly the kind of reasoning-from-Go's-source that
+`P-5` falsified on this branch when the runner disagreed with the reading.
+*What it justifies:* R5, `classifyEntry`'s refusal to consult
+`os.DirEntry.IsDir()`, and `IsLinkInfo`/`IsLinkEntry`'s
+`ModeSymlink|ModeIrregular` over-approximation being **measured** rather than
+guessed.
+
+---
+
+**4. `RR1.removeall` — why RW1 is scoped to hand-rolled walks.**
+`RequireProperty`, run 9:
+
+> "removing a junction must never destroy its target tree"
+
+recorded alongside: *"Go's RemoveAll is handle-based since 1.21 and removes the
+link without descending; a hand-rolled recursive delete that tests
+`FILE_ATTRIBUTE_DIRECTORY` instead WOULD descend (`P14.delete_attr_trap`)."*
+
+*Why it cannot be a product test:* the store never calls `os.RemoveAll`. The
+measurement's value is the **contrast** — the standard library gets this right,
+so the hazard is specific to a hand-rolled walk, and ours is the hand-rolled one.
+*What it justifies:* RW1's severity and scope, and `removeTreeAt`'s
+operation-as-classification shape. Its product-side counterpart —
+`removeTreeAtByAttributeUnsafeForTest`, the negative control proving the naive
+shape destroys the target — **did** migrate, and is the more important half.
+
+---
+
+**5. `M9` and `M10.posix_nt` — why those two APIs and not the documented ones.**
+
+`M9`, run 2
+([32902343901](https://github.com/chaitanyaSoni96/scratchpad/actions/runs/32902343901)),
+reconfirmed run 4: `SetFileInformationByHandle` with a non-NULL
+`FILE_RENAME_INFO.RootDirectory` returns `ERROR_INVALID_PARAMETER` (87) in all
+three class/flag combinations, while `NtSetInformationFile` with the identical
+buffer **succeeds**. The control is what makes it an answer rather than a bug
+report: the same buffer succeeds through the Win32 wrapper when `RootDirectory`
+is **NULL** (`M9.win32_control_nullroot`, YES), so the layout is right and the
+wrapper is specifically refusing a non-NULL `RootDirectory`.
+
+`M10.posix_nt`, `RequireProperty`, run 9:
+
+> "POSIX-semantics delete must remove the name from the namespace immediately,
+> otherwise Publish's create-only contract reports ERROR_ACCESS_DENIED (delete
+> pending) instead of \"already exists\" (§4.14)"
+
+*Why they cannot be product tests:* both are capability probes of alternatives
+the product **does not call**. The store only ever invokes the variant that
+works; there is no code path through `internal/store` that exercises the Win32
+wrapper with a non-NULL `RootDirectory`, or the legacy disposition class, so a
+product test could only assert the happy path — which the atomic-write and
+create-only tests already do.
+*What they justify:* `renameAtNT` using `NtSetInformationFile` rather than the
+documented Win32 API (§3.6, §4.8), and `deleteByHandlePosix` using
+`FileDispositionInformationEx` rather than the legacy class — the latter being
+what stops `TestPublishCreateOnly`'s delete-then-republish from flaking.
+
+---
+
+**One property must be migrated inverted, not copied.**
+`A5.unknown_tag_removed` asserts that the **prototype's** `RemoveTreeAt`
+*removes* an unknown-tag entry. The shipped `Delete` **refuses** it at top-level
+dispatch (§4.5's corrected bullet). A mechanical migration would assert the
+opposite of shipped behaviour. It is already covered, correctly inverted, by
+`TestUnknownTagEntryIsInvisibleAndInert`. This is the one row in the corpus
+where copying the prototype's assertion would introduce a bug.
+
+**Deletion checklist.** `internal/winspike` may be removed once: (a) P6.2 §11.4
+items 1–3 have landed and the gating Windows job is green with them; (b) this
+section is present, as it now is; (c) `.github/workflows/winspike.yml` is
+removed in the same change, since it is a separate check that will otherwise go
+red on a missing package. (b) is satisfied by this revision.
 
 ---
 
