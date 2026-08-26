@@ -444,13 +444,35 @@ if ($naReady) {
         $r2 = Invoke-AsNonAdmin @('cli', '-BinDir', $naBin)
         Assert ($r2.ExitCode -eq 0) 'non-admin: cli is idempotent (second run exits 0)' $r2.Output
 
-        # Registration is asserted on its own; the start-now at the end of
-        # `startup` cannot succeed without an interactive session, so its
-        # exit code is recorded above the registration assertion, not used.
+        # The startup sub-case branches, because run 32970247103 proved a
+        # GitHub-hosted runner denies per-user task registration to a
+        # secondary account running in a CreateProcessWithLogonW session
+        # ("Access is denied" from Register-ScheduledTask) -- a runner
+        # limitation, not an installer defect. On a machine where a plain
+        # user CAN register per-user tasks, the first branch asserts it
+        # happened; where registration is denied, the second branch asserts
+        # what docs/windows.md promises for exactly this situation: the
+        # documented actionable error and the foreground fallback, cleanly
+        # (exit 1), never a raw stack trace -- and that nothing else broke
+        # (the status/remove-startup/uninstall assertions below run in both
+        # branches). The SCRATCHPAD_ROOT NOTE is only printed after a
+        # successful registration, so its non-admin assertion lives in the
+        # registered branch; the NOTE logic itself is fully asserted in
+        # section 15 as the real user. Registration-as-standard-user remains
+        # a documented exclusion in EXECUTION.md with a manual pre-beta
+        # check owed on a real machine.
         $r3 = Invoke-AsNonAdmin @('startup', '-BinDir', $naBin)
         Write-Host "   (startup as non-admin exited $($r3.ExitCode); start-now is not assertable without an interactive session)"
-        Assert ($null -ne (Get-Task)) 'non-admin: startup registered the scheduled task without elevation'
-        Assert ($r3.Output -match 'only in this shell') 'non-admin: shell-only SCRATCHPAD_ROOT triggers the NOTE' $r3.Output
+        if ($null -ne (Get-Task)) {
+            Assert $true 'non-admin: startup registered the scheduled task without elevation'
+            Assert ($r3.Output -match 'only in this shell') 'non-admin: shell-only SCRATCHPAD_ROOT triggers the NOTE' $r3.Output
+        } else {
+            Assert ($r3.ExitCode -eq 1) 'non-admin: registration denial exits 1 (clean throw, not a crash)' $r3.Output
+            Assert ($r3.Output -match 'could not register the scheduled task') 'non-admin: registration denial prints the documented actionable error' $r3.Output
+            Assert ($r3.Output -match 'foreground execution is fully supported') 'non-admin: registration denial points at the foreground alternative' $r3.Output
+            Assert ($r3.Output -match 'Nothing else was changed') 'non-admin: registration denial states nothing else was changed' $r3.Output
+            Write-Host '   (documented exclusion: this runner denies per-user task registration to the secondary account; real-machine registration as a standard user is owed to a manual pre-beta check -- see EXECUTION.md)'
+        }
         $r4 = Invoke-AsNonAdmin @('status', '-BinDir', $naBin)
         Assert ($r4.ExitCode -eq 0) 'non-admin: status exits 0' $r4.Output
         $r5 = Invoke-AsNonAdmin @('remove-startup')
