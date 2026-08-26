@@ -8,6 +8,7 @@ package store
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -1152,7 +1153,7 @@ func Unwatch(project, name string) error {
 	runStoreOpHook("unwatch")
 	isLink, statErr := isLinkAt(parent, name)
 	if statErr != nil {
-		return fmt.Errorf("%s not found", rel)
+		return reachFailure(rel, statErr)
 	}
 	if !isLink {
 		if link := WatchLinkFor(rel); link != "" {
@@ -1168,6 +1169,38 @@ func Unwatch(project, name string) error {
 	// any notes left over from the unwatched folder must go with it or a
 	// same-named artifact published later would inherit them.
 	return removeNotesFor(annotationGuard, (Artifact{Project: project, Name: name}).RelPath())
+}
+
+// reachFailure explains why Delete or Unwatch could not reach an entry,
+// instead of collapsing every cause into "not found" (P3.14 L7, P6.3 F8).
+//
+// On Linux the collapse was nearly always honest: openDirAt/fstatat failing on
+// a name under a real, readable parent overwhelmingly means the name is gone.
+// The Windows backend widened the error space under the same line
+// considerably — a strict open now refuses roughly thirty reparse tags
+// (reparseRefusal, which names the tag), a scanner or Explorer preview holds
+// STATUS_SHARING_VIOLATION, an unserviced ProjFS or cloud placeholder answers
+// ERROR_CANT_ACCESS_FILE, and an ACL answers fs.ErrPermission. Every one of
+// those told the user "not found" about something the folder page was still
+// rendering in front of them, and winError carries the NTSTATUS for exactly
+// this purpose while nothing surfaced it.
+//
+// This stays untagged and portable rather than becoming a platform pair: the
+// two cases worth naming are recognisable through errors.Is on both backends,
+// and everything else is served by simply not swallowing the error —
+// winError.Error() already renders the NTSTATUS and reparseRefusal.Error()
+// already names the tag, so %w is the whole fix for the long tail.
+func reachFailure(rel string, err error) error {
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		// The one case the old message was right about, kept verbatim so the
+		// common path reads exactly as before.
+		return fmt.Errorf("%s not found", rel)
+	case errors.Is(err, fs.ErrPermission):
+		return fmt.Errorf("cannot reach %s: permission denied — check the permissions on it and on every directory above it: %w", rel, err)
+	default:
+		return fmt.Errorf("cannot reach %s: %w", rel, err)
+	}
 }
 
 // Delete removes an artifact and prunes any project directories left empty
@@ -1196,9 +1229,19 @@ func Delete(project, name string) error {
 		return openErr
 	}
 	defer rfs.close()
+	rel := (Artifact{Project: project, Name: name}).RelPath()
 	parent, openErr := rfs.openRealDir(segs, false, false)
 	if openErr != nil {
-		return fmt.Errorf("%s is inside a watched folder — its files live at the source; unwatch the link instead", (Artifact{Project: project, Name: name}).RelPath())
+		// openRealDir refuses any link or reparse point at any ancestor, and
+		// "you are inside a watched folder" is by far the likeliest reason —
+		// but it is not the only one, and asserting it unconditionally told a
+		// user with an unreadable project directory something false. Confirm
+		// it the way Unwatch already does, by finding the link, and fall
+		// through to the real error otherwise (P6.3 F8).
+		if link := WatchLinkFor(rel); link != "" {
+			return fmt.Errorf("%s is inside watched folder %q — its files live at the source; unwatch that instead", rel, link)
+		}
+		return reachFailure(rel, openErr)
 	}
 	defer closeFD(parent)
 	runStoreOpHook("delete")
@@ -1224,15 +1267,20 @@ func Delete(project, name string) error {
 				// offered by Unwatch (agent-reachable) — only Delete
 				// (user-only) gains this recovery power, preserving the
 				// create-only-for-agents asymmetry the verb split exists for.
-				if rmErr := rmdirAt(parent, name); rmErr == nil {
+				rmErr := rmdirAt(parent, name)
+				if rmErr == nil {
 					pruneAt(rfs, segs)
-					return removeNotesFor(annotationGuard, (Artifact{Project: project, Name: name}).RelPath())
+					return removeNotesFor(annotationGuard, rel)
 				}
-				err = fmt.Errorf("could not verify %q is an artifact", name)
+				// Carry rmdirAt's own reason: errNotEmpty here means an
+				// ordinary project folder with content but no .html, which is
+				// a completely different situation from "not found" and the
+				// one a user is most likely to hit.
+				err = fmt.Errorf("it is a directory that is neither an artifact nor empty: %w", rmErr)
 			}
 		}
 		if err != nil {
-			return fmt.Errorf("artifact %s not found", (Artifact{Project: project, Name: name}).RelPath())
+			return reachFailure(rel, err)
 		}
 		if err := removeTreeAt(parent, name); err != nil {
 			return err
@@ -1242,5 +1290,5 @@ func Delete(project, name string) error {
 	// Names are reusable once the user deletes here (Publish/Watch are
 	// create-only), so a re-published/re-watched artifact of the same name
 	// must start with a clean slate rather than inheriting the old one's notes.
-	return removeNotesFor(annotationGuard, (Artifact{Project: project, Name: name}).RelPath())
+	return removeNotesFor(annotationGuard, rel)
 }

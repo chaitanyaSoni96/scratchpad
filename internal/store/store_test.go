@@ -452,6 +452,47 @@ func TestDeleteRemovesFileShapedLink(t *testing.T) {
 	}
 }
 
+// TestDeleteExplainsWhyItCannotReachAnEntry is P3.14 L7 / P6.3 F8: Delete used
+// to answer "artifact X not found" for every failure of the reach, including
+// causes that are nothing like absence. The Windows backend widened that error
+// space to reparse refusals on ~30 tags, sharing violations, unserviced cloud
+// placeholders and ACL denials, all of which reported "not found" about
+// something the folder page was still rendering.
+//
+// The portable half is assertable on both backends, so this is untagged: a
+// real directory that is neither an artifact nor empty must say so, and
+// genuine absence must still say "not found" in as many words.
+func TestDeleteExplainsWhyItCannotReachAnEntry(t *testing.T) {
+	root := testRoot(t)
+
+	if err := os.MkdirAll(filepath.Join(root, "junk"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "junk", "notes.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	err := Delete("", "junk")
+	if err == nil {
+		t.Fatal("deleting a non-artifact, non-empty directory should fail")
+	}
+	if strings.Contains(err.Error(), "not found") {
+		t.Errorf("Delete collapsed a present-but-unremovable directory into \"not found\": %v", err)
+	}
+	if !strings.Contains(err.Error(), "neither an artifact nor empty") {
+		t.Errorf("Delete did not explain the real reason: %v", err)
+	}
+	// It must not have destroyed anything on the way to that error.
+	if _, statErr := os.Stat(filepath.Join(root, "junk", "notes.txt")); statErr != nil {
+		t.Errorf("a refused Delete removed content: %v", statErr)
+	}
+
+	// The one case the old message was right about still reads the same.
+	err = Delete("", "nosuchthing")
+	if err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Errorf("Delete of a genuinely absent name = %v, want \"not found\"", err)
+	}
+}
+
 func TestListAndResolvePath(t *testing.T) {
 	root := testRoot(t)
 
