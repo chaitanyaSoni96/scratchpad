@@ -21,9 +21,10 @@ import (
 // This file is P3.7-P3.10: the Windows annotation backend, ported from
 // internal/winspike/atomicwrite.go (the write path and removeTreeAt) and
 // mechanically equivalent to annotationfs_linux.go everywhere the two
-// platforms can agree (ADR §3.4, §4.5, §4.8, §6.7). Where this file disagrees
-// with the winspike prototype, the prototype and its CI measurements win —
-// port, do not reinvent.
+// platforms can agree (ADR §3.4, §4.5, §4.8, §6.7). internal/winspike is
+// deleted; the citations to it here are provenance, and win32_windows.go's
+// header says where its evidence went and what replaced "the prototype
+// wins" as the tie-breaker.
 //
 // annotationFS anchors every sidecar operation to an open .annotations
 // handle, exactly as the Linux twin anchors to an open .annotations inode.

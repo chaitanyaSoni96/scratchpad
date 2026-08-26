@@ -3165,3 +3165,68 @@ control self-skips with an explicit marker rather than passing vacuously.
 no skips. They are gated on `testutil.RequireWatchLinks`, which emits the same
 `SKIP(symlink-capability)` marker that job asserts as zero — so they cannot
 silently retire if a runner image loses the capability.
+
+### `internal/winspike` deleted — both gates evaluated first
+
+The package documented as *"deleted at the end of Phase 1"* survived to Phase 6
+because its deletion gate (ADR §11.1: *"this table must be green before
+`internal/winspike` is removed"*) was never evaluated by anyone. That is the
+failure this note exists to not repeat: the gate was walked, item by item, and
+the result recorded, before anything was removed.
+
+**Coverage gate — closed.** P6.2 §11.4 items 1–3 (the three AC5 matrix cells)
+landed in `d5ccfc5`/`227bcf9`, green on the gating Windows job with no skips,
+and falsified against deliberately broken implementations (record above).
+Items 4–6 landed with them. Nothing turned out unmigratable, so §11.5's
+can't-migrate list stays at five.
+
+**Documentation gate — closed by the ADR lane, and verified here.** ADR §11.2
+quotes the five unmigratable measurements. Because after deletion the ADR is
+the only record that ships with the repo, each was checked against the source
+and against the live run logs while both still existed. All five hold:
+
+| # | Property | ADR quote vs. source | Recorded verdict, run 9 job 97998072330 |
+|---|---|---|---|
+| 1 | `A5.obj_dont_reparse_inert_for_unknown_tags` | verbatim (elided, see note below) | `YES` |
+| 2 | `M1.intermediate` | `RequireProperty` text verbatim | `YES`, measured `0xC000050B` |
+| 3 | `P14.junction_not_dir` | `RequireProperty` text verbatim | `YES`, `ModeDir=false` |
+| 4 | `RR1.removeall` | `RequireProperty` text verbatim; the "recorded alongside" prose is the `Report` text verbatim | `YES` |
+| 5 | `M9` + `M10.posix_nt` | M10 verbatim; M9 paraphrased | see below |
+
+M9 is the only paraphrase, and it is exact. The ADR claims
+`SetFileInformationByHandle` with a non-NULL `RootDirectory` returns
+`ERROR_INVALID_PARAMETER` (87) *"in all three class/flag combinations"* while
+`NtSetInformationFile` succeeds. Measured: `M9.win32_ex_rootdir`,
+`M9.win32_ex_rootdir_noposix` and `M9.win32_plain_rootdir` are all `NO` with
+`err=WIN32=87(0x57) The parameter is incorrect`; `M9.nt_ex_rootdir` and
+`M9.nt_plain_rootdir` are both `YES` with the destination replaced; and the
+control `M9.win32_control_nullroot` is `YES` in run 9 **and** in run 2
+(`32902343901`), which is what makes it an answer rather than a bug report.
+
+Every citation resolves: run 9 `32908643117` (commit `145583a`, success) with
+jobs `97998072330` (windows-2025, amd64) and `97998072492` (windows-11-arm,
+arm64) both present and matching the architectures claimed; run 7 `32906333884`
+(commit `6f8b5c3`) resolves and its conclusion is **failure**, exactly as §11.2
+says of the `SECURITY-FAIL` that produced the strict open; run 2 `32902343901`
+resolves.
+
+**One thinness, reported not fixed** (§11.2 is the ADR lane's). §11.2's quote of
+property 1 elides `"(STATUS_IO_REPARSE_TAG_NOT_HANDLED, 0xC0000279), whereas
+for the junction they differ (refused vs traverses)"`. The status name survives
+in the surrounding prose; the **junction contrast does not survive anywhere in
+§11.2**. That clause is the control arm — the evidence that the probe could
+have detected a difference and didn't, rather than being insensitive. It is
+recoverable from the cited run log today, and deleting the package does not
+touch that log, so nothing was lost by proceeding. But when the logs age out,
+§11.2 will assert inertness without the control that establishes it. One clause
+restored to the quote closes it permanently.
+
+**Also removed:** `.github/workflows/winspike.yml`, in the same commit, per
+§11.2's checklist item (c) — it ran `go test ./internal/winspike/...` in
+isolation and would have gone red against a missing package. Nothing else in
+`.github/` was touched. Nothing imported the package (verified by reverse
+dependency, not by grep alone); the ~30 remaining citations in
+`internal/store` and `internal/watch` comments are provenance, and
+`win32_windows.go`'s header now says where the evidence went and what replaced
+*"where this file disagrees with the prototype, the prototype wins"* as the
+tie-breaker, since that instruction no longer had a referent.

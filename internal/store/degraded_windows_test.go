@@ -35,7 +35,7 @@ import (
 // internal/winspike/privilege.go's HasPrivilege/RemovePrivilege (that
 // package is read-only reference material for this task, per its own
 // instructions — not imported, since internal/winspike is Phase 1 spike
-// scaffolding slated for deletion and internal/store must not depend on it).
+// scaffolding, since deleted, which internal/store never depended on).
 // ---------------------------------------------------------------------------
 
 const (
@@ -308,8 +308,8 @@ func assertWatchFlavour(t *testing.T, label, name string, wantTag uint32) {
 // internal/winspike/devmode_test.go's identically-named functions: the same
 // registry key, the same safety reasoning (elevated, ephemeral CI runner;
 // always restored). Duplicated rather than imported because internal/store
-// must not depend on internal/winspike (Phase 1 spike scaffolding, slated
-// for deletion).
+// never depended on internal/winspike (Phase 1 spike scaffolding, since
+// deleted).
 const (
 	appModelUnlockKey = `SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock`
 	devModeValue      = "AllowDevelopmentWithoutDevLicense"

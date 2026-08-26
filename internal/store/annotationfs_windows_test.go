@@ -18,7 +18,7 @@ import (
 
 // ---------------------------------------------------------------------------
 // P3.7-P3.10 permanent tests, migrating the required properties ADR §11.1
-// assigns to these tasks out of internal/winspike before it is deleted
+// assigns to these tasks out of internal/winspike before it was deleted
 // (P3.11/P3.12 own the rest of the inventory; see EXECUTION.md for the
 // scoped-down items this file does not attempt — an "unknown tag" watch
 // flavour needs raw reparse-buffer helpers this package does not expose).

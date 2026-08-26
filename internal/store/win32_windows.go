@@ -19,8 +19,33 @@
 // (containment decisions, what counts as an artifact, error strings users
 // see) lives in storefs_windows.go and link_windows.go, which are the ports
 // of internal/winspike/winfs.go and links.go into this package's shape
-// (ADR §3.2/§3.3). Where this file disagrees with the winspike prototype,
-// the prototype and its CI measurements win — port, do not reinvent.
+// (ADR §3.2/§3.3).
+//
+// WHERE THE PROTOTYPE WENT. internal/winspike was the Phase 1 measurement
+// instrument: no local Windows machine existed, so a GitHub runner was the
+// only way to learn what Win32 actually does. This file and its siblings were
+// ported from it, and their comments still cite it by path — read those as
+// provenance, not as a place you can go. The package and its workflow were
+// deleted once both of ADR §11.2's gates were met, and its evidence survives
+// in three places, none of which is the code:
+//
+//   - The five measurements that could NOT become tests, because they are
+//     facts about Windows and Go rather than properties of this store, are
+//     quoted verbatim in ADR §11.2 with their run and job ids — including
+//     the one that matters most for THIS file: OBJ_DONT_REPARSE is inert for
+//     a non-Microsoft reparse tag, which is why noFollowAttrs is necessary
+//     and not sufficient and why openStrictAt reads the tag from the handle.
+//   - Everything that could become a test did, against the shipped code
+//     rather than the prototype; P6.2 §11.3/§11.4 map each property to the
+//     test that now carries it, and internal/store/spikemigration*_test.go
+//     is where the last six landed.
+//   - The measurement logs themselves remain at the run ids §11.2 cites.
+//
+// So the old instruction "where this file disagrees with the prototype, the
+// prototype wins" no longer has a referent. Its successor: where this file
+// disagrees with ADR §11.2's quoted measurements, the measurements win — and
+// a disagreement that §11.2 does not cover needs a new measurement, not a
+// judgement call.
 package store
 
 import (
