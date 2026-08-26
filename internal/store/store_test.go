@@ -91,9 +91,13 @@ func TestPublishFilesAndRules(t *testing.T) {
 		t.Error("Size should be > 0")
 	}
 
-	// artifacts cannot nest inside artifacts
+	// artifacts cannot nest inside artifacts. Assert the reason (not just
+	// that it failed, P2.7 finding F3): the rejectArtifacts ancestor check
+	// must be what fired, not some unrelated cause.
 	if _, err := Publish("a/b/c/deep", "inner", map[string][]byte{"index.html": []byte("<p>")}); err == nil {
 		t.Error("publishing under an artifact should fail")
+	} else if !strings.Contains(err.Error(), "deep") || !strings.Contains(err.Error(), "artifact") {
+		t.Errorf("publishing under an artifact failed for the wrong reason: %v, want it to name %q as an artifact", err, "a/b/c/deep")
 	}
 
 	// delete prunes now-empty ancestors
@@ -158,6 +162,8 @@ func TestWatch(t *testing.T) {
 	}
 	if err := Delete("tree", "one"); err == nil {
 		t.Error("artifact inside watched tree must not be deletable")
+	} else if !strings.Contains(err.Error(), "watched folder") {
+		t.Errorf("delete inside watched tree failed for the wrong reason: %v, want it to name the watched folder", err)
 	}
 }
 
@@ -176,8 +182,8 @@ func TestWatchCreateOnly(t *testing.T) {
 	if _, err := Watch("", "taken", other); err == nil || !strings.Contains(err.Error(), "already exists") {
 		t.Fatalf("watch of a different target should fail with already-exists, got %v", err)
 	}
-	if _, err := Publish("", "taken", map[string][]byte{"index.html": []byte("<p>")}); err == nil {
-		t.Error("publish over a watch link should fail")
+	if _, err := Publish("", "taken", map[string][]byte{"index.html": []byte("<p>")}); err == nil || !strings.Contains(err.Error(), "already exists") {
+		t.Errorf("publish over a watch link = %v, want already-exists", err)
 	}
 	// ...and a real directory is never adopted as if it were the link
 	if _, err := Publish("", "solid", map[string][]byte{"index.html": []byte("<p>")}); err != nil {
@@ -224,6 +230,8 @@ func TestUnwatch(t *testing.T) {
 	}
 	if err := Unwatch("", "missing"); err == nil {
 		t.Error("unwatch of a missing entry should fail")
+	} else if !strings.Contains(err.Error(), "not found") {
+		t.Errorf("unwatch of a missing entry failed for the wrong reason: %v, want \"not found\"", err)
 	}
 	// an entry inside a watched tree points the user at the link itself
 	err = Unwatch("tree", "one")
@@ -356,13 +364,30 @@ func TestPublishAndNestedWatchRejectSymlinkProject(t *testing.T) {
 	if err := os.Symlink(external, filepath.Join(root, "project")); err != nil {
 		t.Fatal(err)
 	}
+	// P2.7 finding F3: this test used to assert only err == nil -> fail, which
+	// was trivially true on the pre-P3 Windows stub because openRootedFS
+	// itself refused with errWindowsUnimplemented before containment logic
+	// ever ran — a green assertion for entirely the wrong reason. Now that a
+	// real backend exists on both platforms, assert the REASON: the walk must
+	// fail specifically because "project" is a link/reparse point, not for
+	// some unrelated cause (a typo'd path, a permission error, ...).
 	files := map[string][]byte{"index.html": []byte("<p>unsafe</p>")}
-	if _, err := Publish("project/nested", "artifact", files); err == nil {
+	_, err := Publish("project/nested", "artifact", files)
+	if err == nil {
 		t.Fatal("Publish beneath symlink project succeeded")
 	}
+	if !strings.Contains(err.Error(), "project") ||
+		!(strings.Contains(err.Error(), "symlink") || strings.Contains(err.Error(), "link") || strings.Contains(err.Error(), "reparse")) {
+		t.Fatalf("Publish beneath symlink project failed for the wrong reason: %v (want an error naming %q as a symlink/link/reparse point)", err, "project")
+	}
 	target := t.TempDir()
-	if _, err := Watch("project/nested", "watch", target); err == nil {
+	_, err = Watch("project/nested", "watch", target)
+	if err == nil {
 		t.Fatal("Watch beneath symlink project succeeded")
+	}
+	if !strings.Contains(err.Error(), "project") ||
+		!(strings.Contains(err.Error(), "symlink") || strings.Contains(err.Error(), "link") || strings.Contains(err.Error(), "reparse")) {
+		t.Fatalf("Watch beneath symlink project failed for the wrong reason: %v (want an error naming %q as a symlink/link/reparse point)", err, "project")
 	}
 	if got, err := os.ReadFile(filepath.Join(external, "sentinel")); err != nil || string(got) != "unchanged" {
 		t.Fatalf("external sentinel changed: %q, %v", got, err)

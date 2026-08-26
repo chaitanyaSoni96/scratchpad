@@ -33,6 +33,11 @@ func openRootedFS(create bool) (*rootedFS, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Deterministic-race hook (ADR §11/R17, "root-open"): fires after the root
+	// handle is pinned but before the caller does anything else with it, so a
+	// test can substitute the root out from under an in-flight operation
+	// (A4.root_replaced.*-style attacks) without a timing loop.
+	runStoreOpHook("root-open")
 	return &rootedFS{root: os.NewFile(uintptr(fd), root)}, nil
 }
 
@@ -228,13 +233,30 @@ func (r *rootedFS) openRealDir(segs []string, create, rejectArtifacts bool) (int
 			}
 			next, openErr = openDirAt(fd, seg)
 		}
-		unix.Close(fd)
 		if openErr != nil {
-			if errors.Is(openErr, unix.ELOOP) {
-				return -1, fmt.Errorf("project ancestor %q is a symlink", strings.Join(segs[:i+1], "/"))
+			// A directory-target symlink at the final requested component can
+			// surface as either ELOOP or ENOTDIR depending on kernel/
+			// filesystem — verified on a real ext4/6.12 kernel:
+			// O_DIRECTORY|O_NOFOLLOW against a symlink returns ENOTDIR, not
+			// ELOOP (openBrowsableDir below already accounts for both, for
+			// the same reason). This branch used to check ELOOP only, so on
+			// that kernel the friendly "is a symlink" message was dead code
+			// and callers saw a bare "not a directory" with no mention of the
+			// symlink. But ENOTDIR is also exactly what a plain FILE at this
+			// name produces, so it must not be assumed to mean "symlink"
+			// without checking: classify the entry (still relative to the
+			// still-open fd, no re-resolution by path) before wording the
+			// message, and fall back to the raw error for a non-link cause.
+			if errors.Is(openErr, unix.ELOOP) || errors.Is(openErr, unix.ENOTDIR) {
+				if meta, statErr := statAt(fd, seg); statErr == nil && meta.IsLink {
+					unix.Close(fd)
+					return -1, fmt.Errorf("project ancestor %q is a symlink", strings.Join(segs[:i+1], "/"))
+				}
 			}
+			unix.Close(fd)
 			return -1, openErr
 		}
+		unix.Close(fd)
 		fd = next
 		if rejectArtifacts {
 			// Fail-open on a read error here (does not gate a security
@@ -356,6 +378,10 @@ func (r *rootedFS) openBrowsableDir(segs []string) (int, error) {
 			return -1, openErr
 		}
 		fd = next
+		// Deterministic-race hook ("browse-segment"): fires once per resolved
+		// path component, after this segment is pinned and before the next is
+		// opened, so a test can substitute an already-passed ancestor mid-walk.
+		runStoreOpHook("browse-segment")
 	}
 	return fd, nil
 }
@@ -475,6 +501,10 @@ func openPathFile(segs []string) (*os.File, error) {
 		return nil, err
 	}
 	defer unix.Close(parent)
+	// Deterministic-race hook ("doc-open"): fires after the parent directory
+	// is pinned and before the final document open, so a test can substitute
+	// the document itself in that window (A10.rename_race-style attacks).
+	runStoreOpHook("doc-open")
 	return openFileAt(parent, segs[len(segs)-1])
 }
 

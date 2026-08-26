@@ -175,6 +175,11 @@ func (a *annotationFS) writeFile(segs []string, data []byte) error {
 	if err != nil {
 		return err
 	}
+	// Deterministic-race hook ("notes-replace"): fires after the temp file is
+	// fully written and before the atomic rename over the destination, so a
+	// test can substitute the destination in that window (A2.dest_replaced.*
+	// -style attacks) without a timing loop.
+	runStoreOpHook("notes-replace")
 	if err = unix.Renameat(parent, tmp, parent, segs[len(segs)-1]); err != nil {
 		return err
 	}
@@ -270,6 +275,12 @@ func (a *annotationFS) removeSubtree(segs []string) error {
 		return err
 	}
 	defer unix.Close(parent)
+	// Deterministic-race hook ("notes-remove"): fires after the parent
+	// directory of the annotation subtree being removed is pinned and before
+	// any removal happens, so a test can race a concurrent SaveNotes against
+	// this Delete/Unwatch cleanup (the RW5/RW6 "Delete racing SaveNotes"
+	// scenario) without a timing loop.
+	runStoreOpHook("notes-remove")
 	if err := removeTreeAt(parent, segs[len(segs)-1]); err != nil && !errors.Is(err, unix.ENOENT) {
 		return err
 	}

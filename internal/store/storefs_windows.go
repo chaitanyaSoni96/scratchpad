@@ -160,6 +160,13 @@ func openRootedFS(create bool) (*rootedFS, error) {
 			fmt.Fprintf(os.Stderr, "warning: the scratchpad store root is on a %s volume, not NTFS — atomic rename and POSIX delete are unsupported there and mutations may fail loudly\n", fsName)
 		})
 	}
+	// Deterministic-race hook (ADR §11/R17, "root-open"): fires after the root
+	// handle is pinned but before the caller does anything else with it, so a
+	// test can substitute the root out from under an in-flight operation
+	// (A4.root_replaced.*-style attacks) without a timing loop. Mirrors the
+	// call site in storefs_linux.go's openRootedFS exactly, so a shared test
+	// can install the hook once and run on both platforms.
+	runStoreOpHook("root-open")
 	return &rootedFS{root: os.NewFile(uintptr(h), root), path: root, id: id, volume: fsName}, nil
 }
 
@@ -396,6 +403,11 @@ func (r *rootedFS) openBrowsableDir(segs []string) (int, error) {
 			return -1, openErr
 		}
 		fd = next
+		// Deterministic-race hook ("browse-segment"): fires once per resolved
+		// path component, after this segment is pinned and before the next is
+		// opened, so a test can substitute an already-passed ancestor mid-walk.
+		// Mirrors storefs_linux.go's openBrowsableDir call site exactly.
+		runStoreOpHook("browse-segment")
 	}
 	return fd, nil
 }
@@ -778,6 +790,11 @@ func openPathFile(segs []string) (*os.File, error) {
 		return nil, err
 	}
 	defer closeFD(parent)
+	// Deterministic-race hook ("doc-open"): fires after the parent directory
+	// is pinned and before the final document open, so a test can substitute
+	// the document itself in that window (A10.rename_race-style attacks).
+	// Mirrors storefs_linux.go's openPathFile call site exactly.
+	runStoreOpHook("doc-open")
 	return openFileAt(parent, segs[len(segs)-1])
 }
 

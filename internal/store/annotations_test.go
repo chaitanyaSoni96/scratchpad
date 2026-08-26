@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -131,10 +132,26 @@ func TestConcurrentSameRevisionExactlyOneWins(t *testing.T) {
 	}
 }
 
+// TestAnnotationSymlinkComponentsRejected is a P2.7 finding F3 fix: the
+// original version asserted only err == nil -> fail for all four calls, which
+// a completely broken backend (the pre-P3 Windows stub, or any future
+// regression that makes every store call fail) would also satisfy. The
+// generic OS error text this actually fails with ("not a directory" on the
+// author's Linux kernel: opening a directory-target symlink with O_NOFOLLOW|
+// O_DIRECTORY surfaces as ENOTDIR here, not ELOOP — the same ambiguity
+// storefs_linux_test.go's openAbsoluteDirNoFollow tests already accept either
+// side of) is not a reliable, portable string to assert on. Instead this adds
+// a POSITIVE CONTROL: an identically-shaped "control" document with no
+// symlink in its path must succeed at every one of the same four calls, so
+// the failure above is proven to be caused by the planted symlink and not by
+// some unrelated defect that fails everything. It also confirms the classic
+// escape payoff is absent: no notes file was created inside the external
+// target the symlink points at.
 func TestAnnotationSymlinkComponentsRejected(t *testing.T) {
 	testutil.RequireSymlinks(t)
 	root := testRoot(t)
 	doc := publishDoc(t, "", "art")
+	control := publishDoc(t, "", "control")
 	outside := t.TempDir()
 	annRoot := filepath.Join(root, AnnotationsDir)
 	if err := os.Mkdir(annRoot, 0o755); err != nil {
@@ -143,6 +160,17 @@ func TestAnnotationSymlinkComponentsRejected(t *testing.T) {
 	if err := os.Symlink(outside, filepath.Join(annRoot, "art")); err != nil {
 		t.Fatal(err)
 	}
+
+	// Positive control: the identically-shaped "control" doc, with a REAL
+	// directory (not a symlink) at the matching position, must work — proving
+	// the backend is not simply broken across the board.
+	if _, err := SaveNotes(control, NotesFile{Annotations: []Annotation{{ID: "c"}}}, 0); err != nil {
+		t.Fatalf("control: SaveNotes on a doc with no symlink in its path should succeed, got %v", err)
+	}
+	if f, err := LoadNotes(control); err != nil || len(f.Annotations) != 1 {
+		t.Fatalf("control: LoadNotes = %+v, %v, want the one annotation just saved", f, err)
+	}
+
 	if _, err := LoadNotes(doc); err == nil {
 		t.Fatal("LoadNotes accepted annotation symlink component")
 	}
@@ -154,6 +182,16 @@ func TestAnnotationSymlinkComponentsRejected(t *testing.T) {
 	}
 	if _, err := WalkNotes("art"); err == nil {
 		t.Fatal("WalkNotes accepted annotation symlink component")
+	}
+
+	// The payoff a real attack would want: nothing was ever written into the
+	// external tree the symlink points at.
+	leaked, err := os.ReadDir(outside)
+	if err != nil {
+		t.Fatalf("reading the external target: %v", err)
+	}
+	if len(leaked) != 0 {
+		t.Fatalf("SaveNotes wrote into the external symlink target: %v", leaked)
 	}
 }
 
@@ -204,11 +242,20 @@ func TestSaveNotesRevMismatch(t *testing.T) {
 	}
 }
 
+// TestSaveNotesRequiresDocExists is a P2.7 finding F3 fix: this test used to
+// assert only err == nil -> fail, which was trivially true on the pre-P3
+// Windows stub (every store call failed before DocExists ever ran) and would
+// have stayed vacuously green if the real DocExists check were accidentally
+// removed or short-circuited by something else failing first (e.g. a broken
+// annotation root). Assert the actual reason instead.
 func TestSaveNotesRequiresDocExists(t *testing.T) {
 	testRoot(t)
 	_, err := SaveNotes("ghost/index.html", NotesFile{Annotations: []Annotation{{ID: "n1"}}}, 0)
 	if err == nil {
 		t.Fatal("SaveNotes on a nonexistent doc should fail")
+	}
+	if !strings.Contains(err.Error(), "no such document") {
+		t.Fatalf("SaveNotes on a nonexistent doc failed for the wrong reason: %v, want it to name the doc as nonexistent (\"no such document\")", err)
 	}
 }
 

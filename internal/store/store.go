@@ -161,7 +161,14 @@ func validateSegment(s string) error {
 			return fmt.Errorf("invalid path segment %q", s)
 		}
 	}
-	return nil
+	// checkLookupSegmentPlatform (names_windows.go/names_linux.go) is the
+	// ADR §7.5/R11 platform-pair extension: on Windows it additionally
+	// refuses ':' (NTFS alternate-data-stream syntax — the one live case,
+	// M12.C_stream), a trailing dot/space, and a reserved DOS device name,
+	// none of which this function rejected before; it is a permanent no-op
+	// on Linux, where ':' is an ordinary, legal filename character a watched
+	// repository may legitimately use.
+	return checkLookupSegmentPlatform(s)
 }
 
 // visibleSegments reports whether a lookup path is traversable: every segment
