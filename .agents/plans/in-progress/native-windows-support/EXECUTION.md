@@ -635,3 +635,185 @@ independently" measurement holds — the native run's passing `TestWatch`/
   `GOOS=windows go vet ./...`; `go mod tidy -diff`) all clean at `4d87801`;
   Linux passing-test count is 105 (up from 96 at the start of this branch),
   0 skips.
+
+## Phase 3 — Store Backend Implementation (P3.7–P3.10)
+
+Implemented from the ADR revision 2, on top of P3.1–P3.6, in four commits:
+`43cf095` (the Windows annotation backend itself — `annotationfs_windows.go`
+rewritten in full, `annotationfs_linux.go`'s `lockRendezvous`/depth bound,
+`annotations.go`'s lock refactor, `ignore.go`/`storefs_{linux,windows}.go`'s
+`nameEquals`/`lockFileName`), `ece9391` (the P3.7–P3.10 permanent tests
+migrating ADR §11.1's required properties out of `internal/winspike`),
+`f6db3b1` (a real bug the first native run found: `annotations.go` used
+`os.IsNotExist`, not `errors.Is(_, fs.ErrNotExist)`).
+
+### What is implemented
+
+- **P3.7 annotation root.** `openAnnotationFS` pins the store root (reusing
+  `openRootedFS`, so the process-level root-identity cache and R18's warning
+  apply here too), then the new reserved rendezvous file
+  `<root>\.scratchpad-lock` (`openRendezvousLockFile`, `FILE_OPEN_IF`,
+  identity recorded in a lock-specific cache), then `.annotations`
+  (`mkdirClaim` + `openRealDirAt`, the strict open), in that order and before
+  any lock is taken — the §6.7 ordering rule. `flockFile`/`funlockFile`/
+  `openLockFileAt` (the per-document locks `lockDocument` uses) are real
+  `LockFileEx` implementations over an ordinary file, unlike the rendezvous:
+  LockFileEx refuses a directory handle outright (`ERROR_INVALID_PARAMETER`,
+  confirmed live in this run's own `internal/winspike` suite,
+  `M14.dir_readhandle`), so `lockRendezvous`/`unlockRendezvous` is the F5
+  rework — a byte-range lock on the new lock file, `LOCKFILE_FAIL_IMMEDIATELY`
+  plus a bounded retry (reusing the write path's measured bound; there is no
+  separate measurement for the lock, and the code says so). The second
+  reserved name is wired into `Visible` through a new `nameEquals` platform
+  pair (`==` on Linux, `strings.EqualFold` on Windows, per M11's case-folding
+  measurement). `annotations.go`'s `annotationLock`/`lockAnnotations`/
+  `lockDocument` were refactored to close through a closure rather than fixed
+  fields, since the two lock constructors close structurally different things
+  per platform.
+- **P3.8 atomic write.** `atomicWriteFileAt`, ported from
+  `internal/winspike/atomicwrite.go`'s `AtomicWriteFile`: a unique create-only
+  temp (`.notes-<hex>.tmp`), `NtSetInformationFile(FileRenameInformationEx,
+  REPLACE|POSIX)` with the class-65→10 fallback restricted to the
+  allowlisted "class unsupported" statuses (never a blanket retry), the
+  measured bound (10 attempts, 2ms→256ms, 2s ceiling), and cleanup through
+  the temp's own handle on every failure path (`deleteByHandlePosix`, never a
+  name-based unlink). `Flush` defaults to `false` (`P13.flush_cost`'s 5.7×
+  cost, matching Linux's own no-`fsync` behaviour).
+- **P3.9 safe recursive removal — the release gate.** `removeTreeAt` /
+  `removeTreeAtDepth` is open-then-classify-from-the-handle: the attempted
+  `openRealDirAt` (the STRICT primitive) is the classification, and its
+  failure (a `*reparseRefusal` or `errNotDir`) routes to `deleteEntryAt`
+  (no `FILE_DIRECTORY_FILE`/`FILE_NON_DIRECTORY_FILE` constraint, so it
+  covers a junction, either symlink flavour, an unknown-tag directory or a
+  plain file in one call) rather than a descent. `statAt`/`classifyEntry`
+  play no role in this function at all. Also closes the ADR-noted
+  carried-forward depth-bound gap on **both** platforms in the same change:
+  `removeTreeAtDepth` (Windows) and `annotationfs_linux.go`'s twin now both
+  bound recursion at `maxArtifactWalkDepth` (store.go), which the ADR's §4.5
+  named as pre-existing and unfixed on Linux too.
+- **P3.10 annotation walk.** `walk`/`walkAnnotationDir` mirrors the Linux
+  walk's shape over `readDirFD` + `classifyEntry`: directories entered
+  depth-first, `.json` files read and handed to `visit`, anything else
+  (an allow-listed link, an unrecognised tag) silently skipped exactly as
+  Linux's `switch` on `S_IFMT` skips anything that is not `S_IFDIR`/`S_IFREG`.
+  Malformed-JSON handling is unchanged, shared code (`WalkNotes`).
+
+### The bug the first native run found, and the fix
+
+Run `32931073624`/`32931073638` (commit `ece9391`) failed every test in
+`internal/store`'s `annotations_test.go` that reads through a fresh sidecar
+(`TestLoadSaveNotesLifecycle`, `TestConcurrentSameRevisionExactlyOneWins`,
+`TestSaveNotesRevMismatch`, `TestResolveAndReplyNote`,
+`TestConcurrentResolveAndReplyPreserveBoth`,
+`TestStaleSaveCannotRecreateAfterFinalDeletion`, `TestWalkNotesAndOpenCount`),
+plus every `internal/web` notes test that seeds through `SaveNotes`
+(`TestNotesWriteConflict`, `TestNotesWriteHappyPathBumpsRev`,
+`TestConcurrentNotesWritesExactlyOneSucceeds`,
+`TestConcurrentNotesPutAndDeleteCannotRecreateStaleNotes`,
+`TestNotesFormatNegotiation`, `TestNotesFolderShadowing`, `TestNotesDelete`,
+`TestNotesReportGzipped`, `TestNotesStatusFilter`), all with the same
+message: `open: file does not exist (NTSTATUS 0xC0000034)` surfacing as a
+hard error instead of "no notes yet".
+
+Root cause: `annotations.go`'s `loadNotesRaw`/`WalkNotes` used
+`os.IsNotExist(err)`, which predates Go's `errors.Is`/`Unwrap` convention.
+`os.IsNotExist` only recognises a fixed set of concrete shapes
+(`*PathError`/`*LinkError`/`*SyscallError`, or a type with its own `Is`
+method) — it never walks an arbitrary `Unwrap` chain. Windows's `*winError`
+(`win32_windows.go`) chains to `fs.ErrNotExist` through `Unwrap` exactly as
+ADR §3.7 specifies, and `errors.Is(err, fs.ErrNotExist)` correctly says
+`true`, but `os.IsNotExist` never follows that chain and said `false`. Linux
+never surfaced this because raw `unix.ENOENT` (`syscall.Errno`) implements
+its own `Is(error) bool` method, which `os.IsNotExist`'s internal check does
+recognise — so the same predicate happened to work by accident on one
+platform and not the other. Fixed by switching both call sites to
+`errors.Is(err, fs.ErrNotExist)` (commit `f6db3b1`): a strict fix, not a
+behaviour change, on Linux.
+
+### Disagreements with, and clarifications of, the ADR
+
+- **§3.4's `flockFile(f *os.File, exclusive bool) error` is kept for
+  per-document locks only, exactly as the ADR's own text says** ("NEW —
+  replaces `flockFile(ann.storeRoot, …)`" for the rendezvous;
+  `lockRendezvous`/`unlockRendezvous` are the new pair for that). This is not
+  a disagreement, but the earlier Phase-3-stub comment in
+  `annotationfs_windows.go` read as if `flockFile` itself needed to become
+  the rendezvous primitive; it is now a straightforward `LockFileEx` over an
+  ordinary file, unrelated to the redesign.
+- **The retry bound for `lockRendezvous`/`flockFile` reuses
+  `defaultReplacePolicy()`** (10 attempts, 2ms→256ms, 2s ceiling) rather than
+  a bound of its own. The ADR does not specify separate numbers for the lock,
+  and no run-9 measurement targets lock acquisition specifically (only the
+  annotation write's replace loop, `P13.bound`/`P13.retry.*`). Reusing the
+  measured replace-loop bound is the least arbitrary available choice; the
+  code says so explicitly rather than implying a second measurement exists.
+  If a future stress campaign (P6.1) finds the lock needs different numbers,
+  this is the line to change.
+- **§11.1's migration table assigns `A6.delete.unknowntag.depth{0,2}`
+  jointly to P3.9/P3.12; this pass ships only the junction and symlink
+  flavours** (`TestRemoveTreeAtLeavesJunctionTargetIntact`). Planting an
+  "unknown tag" reparse point needs raw `FSCTL_SET_REPARSE_POINT` buffer
+  construction with a non-Microsoft tag, which `internal/store` does not
+  expose (only `setSymlinkReparse`/`setMountPointReparse`, both tag-fixed).
+  `removeTreeAtDepth`'s containment argument does not depend on which tag is
+  present — a strict-open failure of *any* shape routes to `deleteEntryAt`
+  identically — but the unknown-tag case is not independently exercised by a
+  permanent test yet. Left for P3.12, which already owns the harder
+  hook-driven matrix.
+- **The `A6.swap_midwalk` determinism hook (`"annotation-tree-entry"`) is a
+  new call site through the existing shared `testStoreOpHook`/
+  `runStoreOpHook` mechanism (`store.go`), not one of P3.12's six named
+  hooks** (`root-open`, `browse-segment`, `doc-open`, `notes-replace`,
+  `notes-remove`, `watch-reconcile`). It was necessary to make P3.9's own
+  release-gate property deterministic rather than sleep-based, and it does
+  not collide with any of the six names P3.12 is scoped to add.
+- **The namespace-removal audit** (`writeAuditStart`/`writeAuditStop`/
+  `recordNamespaceRemoval` in `annotationfs_windows.go`) is new test-only
+  instrumentation migrating `P13.audit`/`P13.no_dest_removal`/
+  `P13.audit_control` permanently, mirroring `internal/winspike`'s
+  `AuditStart`/`AuditStop`. It hooks `deleteEntryAt` only (the one name-based
+  removal primitive a "remove-then-rename" degradation would call); the
+  write path's own temp cleanup goes through `deleteByHandlePosix` directly
+  and so never appears in the log during a correct replace. Off by default
+  (a single untaken boolean check on the production path).
+- **Not attempted, and named rather than silently dropped**: the six shared
+  race hooks and the hook-driven `A1`/`A2`/`A4`/`A7`/`A8` matrix (P3.12);
+  `WatchLinkCapable`/`SymlinkCapable` re-expression (P3.11); the full
+  migration-inventory sign-off (P3.11/P3.12 own it jointly, P3.13 verifies).
+
+### Verification run IDs
+
+- `32931073624`/`32931073638` (commit `ece9391`) — first native push of
+  P3.7–P3.10. Both native jobs failed as expected, but triage (grepping the
+  actual failure text, not assuming) showed every `internal/store` failure
+  and every annotation-related `internal/web` failure shared one root cause
+  (the `os.IsNotExist` bug above); `internal/watch`'s failures were all
+  `identity_windows.go`'s pre-existing stub (P4.1/P4.2); `internal/web`'s
+  remaining two (`TestListFragmentBrowsesWatchWithoutFollowingNestedLinks`,
+  `TestListFragmentAppliesFolderIgnoreRules`) trace to the `/proc/self/fd`
+  sites P4.6 owns. `internal/winspike`'s own suite passed with zero
+  `SECURITY-FAIL` in both jobs, and `MATRIX.Delete.target_replaced` (the
+  release gate) held `YES`.
+- `32931416952`/`32931416953` (commit `f6db3b1`, after the fix) —
+  `scratchpad/internal/store` reports **`ok`** on both native jobs
+  (`Windows amd64 native — degraded mode, no symlinks` and `Windows amd64
+  native — full suite, symlink-capable`), including every new P3.7–P3.10
+  test (`TestRemoveTreeAtSwapMidWalkAndNegativeControl` and its two
+  subtests, `TestRemoveTreeAtLeavesJunctionTargetIntact` at depth 0 and 2,
+  every `TestAtomicWrite*`, `TestAnnotationLockRendezvousSharedAndExclusive`,
+  `TestAnnotationLockIdentitySwapDetected`, `TestVisibleHidesLockFileName`)
+  and the entire pre-existing `annotations_test.go`/`store_test.go` suite.
+  **No annotation-related failure remains on either native job** — the only
+  remaining native failures are `internal/watch` (P4.1/P4.2's stub) and
+  `internal/web`'s two `/proc/self/fd`-dependent tests (P4.6), exactly the
+  set this task's brief named as out of scope. `internal/winspike` again
+  passed with zero `SECURITY-FAIL`; `MATRIX.Delete.target_replaced` again
+  held `YES`. Both native jobs are still `continue-on-error`
+  (`[allowed to fail until P3.11/P4]`/`[allowed to fail until P4.4]`), which
+  this task did not touch, per instruction. Windows arm64 native build and
+  both Windows cross-builds (amd64/arm64, `go vet` included) passed, as did
+  the Linux job. Local gates before each push
+  (`make test`; `go test ./... -count=1`; `go test ./internal/store -race
+  -count=3`; `GOOS=windows GOARCH={amd64,arm64} CGO_ENABLED=0 go build
+  ./...`; `GOOS=windows go vet ./...`; `go mod tidy -diff`) were clean at
+  every commit in this range; Linux skip count stayed at 0.
