@@ -211,20 +211,21 @@ func readDirFD(fd int) ([]os.DirEntry, error) {
 	return f.ReadDir(-1)
 }
 
+// removeTreeAt recursively removes the directory named by (parent, name),
+// handle-anchored and no-follow throughout (a symlink entry is unlinked, not
+// descended). P3.9 originally gave this the same maxArtifactWalkDepth bound
+// List/sizeWalkAt use for R16, as a hard error past the bound. P3.14's M2
+// finding reproduced why that was wrong: List and sizeWalkAt need the bound
+// because an unbounded walk over attacker-reachable structure risks a
+// symlink/reparse cycle, but removeTreeAt never follows a link either, so it
+// carries none of that risk — real directories cannot cycle. A depth bound
+// on removal therefore cannot protect anything; it can only leave an
+// artifact the store itself created permanently undeletable (no partial
+// destruction either: the recursion errored on the way down, before any
+// removal). removeTreeAt is deliberately unbounded: the store must never
+// create something it refuses to delete, and the only bound that mattered —
+// the filesystem's own — still applies.
 func removeTreeAt(parent int, name string) error {
-	return removeTreeAtDepth(parent, name, 0)
-}
-
-// removeTreeAtDepth is removeTreeAt with an explicit recursion depth, bounded
-// by maxArtifactWalkDepth (store.go) — the SAME limit sizeWalkAt and List's
-// descent use (R16). This is a carried-forward gap the store had on BOTH
-// platforms before P3.9 (ADR §4.5): R16 names removeTreeAt specifically, and
-// until this change neither backend enforced a bound here. Fixed in the same
-// change as the Windows twin (annotationfs_windows.go).
-func removeTreeAtDepth(parent int, name string, depth int) error {
-	if depth > maxArtifactWalkDepth {
-		return fmt.Errorf("scratchpad: %q exceeds the maximum artifact tree depth (%d)", name, maxArtifactWalkDepth)
-	}
 	fd, err := openDirAt(parent, name)
 	if errors.Is(err, unix.ENOENT) {
 		return nil
@@ -249,7 +250,7 @@ func removeTreeAtDepth(parent int, name string, depth int) error {
 				break
 			}
 			if st.Mode&unix.S_IFMT == unix.S_IFDIR {
-				if err := removeTreeAtDepth(fd, entry.Name(), depth+1); err != nil && !errors.Is(err, unix.ENOENT) {
+				if err := removeTreeAt(fd, entry.Name()); err != nil && !errors.Is(err, unix.ENOENT) {
 					readErr = err
 					break
 				}

@@ -690,21 +690,10 @@ func recordNamespaceRemoval(name string) {
 	writeAuditMu.Unlock()
 }
 
-// removeTreeAt is removeTreeAtByHandle at depth 0 — see that function for
-// the containment argument. The exported (package-level) two-argument shape
-// matches annotationfs_linux.go's removeTreeAt exactly, so both of
-// store.go's call sites (Publish's cleanup, Delete) need no platform
-// awareness at all.
-func removeTreeAt(parent int, name string) error {
-	return removeTreeAtDepth(parent, name, 0)
-}
-
-// removeTreeAtDepth is RemoveTreeAt (internal/winspike/atomicwrite.go)
-// ported, with one addition the prototype deliberately left as a named gap:
-// a depth bound (R16), the same maxArtifactWalkDepth (store.go) sizeWalkAt
-// and List's descent use — a carried-forward gap this store had on BOTH
-// platforms before P3.9 (ADR §4.5), fixed here and in
-// annotationfs_linux.go's twin in the same change.
+// removeTreeAt is RemoveTreeAt (internal/winspike/atomicwrite.go) ported. The
+// exported (package-level) two-argument shape matches annotationfs_linux.go's
+// removeTreeAt exactly, so both of store.go's call sites (Publish's cleanup,
+// Delete) need no platform awareness at all.
 //
 // THE OPERATION IS THE CLASSIFICATION (ADR §4.5, RR1's release gate, this
 // task's binding constraint 1). Revision 1 of the ADR specified the weaker
@@ -728,10 +717,20 @@ func removeTreeAt(parent int, name string) error {
 // this function at all — not even for reporting — because there is nothing
 // left to report that the open's own success or failure did not already
 // decide.
-func removeTreeAtDepth(parent int, name string, depth int) error {
-	if depth > maxArtifactWalkDepth {
-		return fmt.Errorf("scratchpad: %q exceeds the maximum artifact tree depth (%d)", name, maxArtifactWalkDepth)
-	}
+//
+// P3.9 originally gave this function the same maxArtifactWalkDepth bound
+// List/sizeWalkAt use for R16, as a hard error past the bound. P3.14's M2
+// finding reproduced why that was wrong: List and sizeWalkAt need the bound
+// because an unbounded walk over attacker-reachable structure risks a
+// symlink/reparse cycle, but removeTreeAt never follows a link either — the
+// strict open above refuses to descend through one — so it carries none of
+// that risk; a real directory tree cannot cycle. A depth bound on removal can
+// therefore only ever create artifacts the store refuses to delete, never
+// protect anything; there is no partial destruction either (the recursion
+// errored on the way down, before any removal). removeTreeAt is deliberately
+// unbounded: the store must never create something it refuses to delete, and
+// the only bound that mattered — the filesystem's own — still applies.
+func removeTreeAt(parent int, name string) error {
 	h, err := openRealDirAt(parent, name)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
@@ -757,12 +756,12 @@ func removeTreeAtDepth(parent int, name string, depth int) error {
 			// the recursive descent, so a test can swap this exact entry
 			// for a junction/symlink/unknown-tag directory at this exact
 			// moment. The safety property under test is that the
-			// FOLLOWING removeTreeAtDepth call re-opens with the STRICT
+			// FOLLOWING removeTreeAt call re-opens with the STRICT
 			// primitive regardless of what this loop observed a moment
 			// ago — nil outside tests, same shape as runStoreOpHook
 			// (store.go).
 			runStoreOpHook("annotation-tree-entry")
-			if err := removeTreeAtDepth(h, e.Name(), depth+1); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			if err := removeTreeAt(h, e.Name()); err != nil && !errors.Is(err, fs.ErrNotExist) {
 				readErr = err
 				break
 			}

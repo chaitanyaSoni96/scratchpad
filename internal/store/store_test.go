@@ -323,6 +323,44 @@ func TestDeleteRemovesEmptyNonArtifactDirectory(t *testing.T) {
 	}
 }
 
+// TestDeleteDeepArtifactTree is the P3.14 red-team M2 reproduction: nothing
+// ever bounded artifact *creation*, but removeTreeAt used to enforce
+// maxArtifactWalkDepth on *removal* as a hard error, so a deep publish (a
+// vendored SDK, a node_modules tree, a deep monorepo path — all legitimate)
+// could succeed and then become permanently undeletable, forever wedging the
+// name and leaving the artifact listed, with no partial destruction (the
+// recursion errored on the way down, before any removal). Fixed by making
+// removeTreeAt unbounded — see its doc comment on both platforms for why
+// that is safe (no-follow removal cannot cycle). The store must never
+// create something it refuses to delete.
+func TestDeleteDeepArtifactTree(t *testing.T) {
+	testRoot(t)
+	var b strings.Builder
+	for i := 0; i < maxArtifactWalkDepth+10; i++ {
+		b.WriteString("d/")
+	}
+	deepPath := b.String() + "leaf.txt"
+	files := map[string][]byte{
+		"index.html": []byte("<h1>deep</h1>"),
+		deepPath:     []byte("leaf"),
+	}
+	if _, err := Publish("", "deep", files); err != nil {
+		t.Fatalf("publish of a tree deeper than maxArtifactWalkDepth should succeed, got %v", err)
+	}
+	if err := Delete("", "deep"); err != nil {
+		t.Fatalf("Delete must be able to remove what Publish created, got %v", err)
+	}
+	arts, err := List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range arts {
+		if a.Name == "deep" {
+			t.Fatalf("deleted artifact %q is still listed", a.Name)
+		}
+	}
+}
+
 func TestListAndResolvePath(t *testing.T) {
 	root := testRoot(t)
 

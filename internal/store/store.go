@@ -351,11 +351,27 @@ func annotate(a *Artifact, parentFD int, name string) {
 	}
 }
 
-// maxArtifactWalkDepth bounds the handle-anchored walks below (R16): List's
-// descent into project trees and loadArtifactAt's own size/mtime walk inside
-// one artifact. Neither platform enforced a bound before this; it is a
-// carried-forward gap being closed here, not a regression (ADR §4.5's
-// "carried-forward gap" note, §11 P3.9 fixes the analogous removeTreeAt bound).
+// maxArtifactWalkDepth bounds the handle-anchored, best-effort walks below
+// (R16): List's descent into project trees and loadArtifactAt's own
+// size/mtime walk inside one artifact. Both walks degrade gracefully past the
+// bound — they just stop counting/discovering, they never error — because
+// nothing here needs to follow a link (Scope A tags on Windows and symlinks
+// on Linux are never descended for either purpose), so the only thing a
+// pathologically deep tree costs is a slightly stale size/mtime or a missed
+// deep artifact, not incorrect containment.
+//
+// P3.9 originally gave removeTreeAt (annotationfs_{linux,windows}.go) the
+// same bound, but as a HARD ERROR rather than a graceful stop. That was wrong:
+// removeTreeAt never follows a reparse point/symlink either, so it carries
+// none of the cycle risk this bound exists to guard against for List's project
+// descent, and unlike List/sizeWalkAt a removal that "gracefully" stops early
+// leaves content behind rather than merely under-reporting — the parent's own
+// rmdir then fails on the non-empty directory. A depth bound on removal can
+// therefore only ever create artifacts the store refuses to delete, never
+// protect anything; P3.14's M2 finding reproduced exactly that (publish a
+// tree past this depth, watch Delete fail forever with no partial removal).
+// removeTreeAt is deliberately unbounded as of that fix — see its doc comment
+// on both platforms.
 const maxArtifactWalkDepth = 64
 
 // sizeWalkAt sums file sizes and finds the newest mtime under the directory
