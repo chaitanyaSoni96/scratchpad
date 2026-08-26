@@ -375,7 +375,14 @@ func Visible(dir, name string, isDir bool) bool {
 	// on name alone (not isDir) so a path is refused even before anything is
 	// on disk to stat — e.g. VisiblePath on a not-yet-created sidecar. A
 	// .annotations directory nested deeper than the root is ordinary content.
-	if rel == "." && name == AnnotationsDir {
+	//
+	// lockFileName (the Windows annotation rendezvous, ADR §6.7) is reserved
+	// alongside it for the same reason, on both platforms — see
+	// lockFileName's doc comment (annotations.go). The comparison goes
+	// through the case-insensitive-on-Windows nameEquals pair (§7.4) rather
+	// than ==, because NTFS folds case and this is a deny rule, where
+	// over-breadth is safe.
+	if rel == "." && (nameEquals(name, AnnotationsDir) || nameEquals(name, lockFileName)) {
 		return false
 	}
 	var segs []string

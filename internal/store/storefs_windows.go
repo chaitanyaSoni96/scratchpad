@@ -15,16 +15,6 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// errWindowsUnimplemented is still returned by the annotation-tree stubs in
-// annotationfs_windows.go (openAnnotationFS, removeTreeAt, flockFile,
-// funlockFile, openLockFileAt, ...) — P3.7-P3.10 territory, explicitly out
-// of scope for this file. It is deliberately a distinct sentinel, never nil
-// and never an existing stdlib error, so a caller cannot mistake "not
-// implemented yet" for a real result. Nothing in storefs_windows.go or
-// link_windows.go returns it any more: every function they define is now a
-// real implementation.
-var errWindowsUnimplemented = errors.New("scratchpad: this Windows annotation mechanism is not implemented yet (plan phase 3.7-3.10)")
-
 // This file is the Windows port of storefs_linux.go, per the ADR's §3.2
 // backend API. It is a mechanical (not literal) port of
 // internal/winspike/winfs.go's Root/OpenRealDir/OpenBrowsableDir/strict-open
@@ -35,10 +25,11 @@ var errWindowsUnimplemented = errors.New("scratchpad: this Windows annotation me
 // prototype's earliest commits did not yet have (the strict open, §2.1; the
 // handle-by-handle browse-boundary walk, §4.3).
 //
-// errWindowsUnimplemented (storefs_windows.go's former sole content) is kept
-// only for the annotation-tree functions Phase 3.7-3.10 still owns
-// (annotationfs_windows.go, link-adjacent lock helpers) — nothing in this
-// file returns it any more.
+// P3.7-P3.10 (annotationfs_windows.go) landed the last stubs this package
+// had — openAnnotationFS, removeTreeAt, flockFile/funlockFile/
+// openLockFileAt and the atomic write path — so the errWindowsUnimplemented
+// sentinel this file used to define for them is gone; every function in
+// this package is now a real implementation.
 
 // objectID is FILE_ID_INFO on Windows: VolumeSerialNumber plus a 128-bit
 // FileId. Comparable, opaque to shared code, never rendered into a path
@@ -173,6 +164,16 @@ func openRootedFS(create bool) (*rootedFS, error) {
 }
 
 func (r *rootedFS) close() error { return r.root.Close() }
+
+// nameEquals is the platform pair Visible's reserved-name check (ignore.go)
+// uses to compare a candidate entry name against AnnotationsDir/lockFileName
+// (ADR §7.4). NTFS folds case (M11: `.annotations`/`.Annotations` fold
+// together), and this is a DENY rule, so the over-breadth of EqualFold vs.
+// NTFS's actual $UpCase table is safe — the cost is that a Windows user
+// cannot have a top-level directory whose name folds to one of the two
+// reserved names, which is correct behaviour anyway. Never used for
+// identity (identity is FILE_ID_INFO, everywhere, without exception).
+func nameEquals(a, b string) bool { return strings.EqualFold(a, b) }
 
 // verifyRoot re-reads FILE_ID_INFO on the pinned handle and compares it
 // against the identity recorded at pin time (R13). It distinguishes a

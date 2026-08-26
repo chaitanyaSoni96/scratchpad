@@ -38,6 +38,12 @@ func openRootedFS(create bool) (*rootedFS, error) {
 
 func (r *rootedFS) close() error { return r.root.Close() }
 
+// nameEquals is the platform pair Visible's reserved-name check (ignore.go)
+// uses to compare a candidate entry name against AnnotationsDir/lockFileName
+// (ADR §7.4). Linux is byte-exact, matching ext4/most Linux filesystems'
+// case-sensitive namespace.
+func nameEquals(a, b string) bool { return a == b }
+
 func dupFD(fd int) (int, error) { return unix.FcntlInt(uintptr(fd), unix.F_DUPFD_CLOEXEC, 0) }
 
 // closeFD closes fd, discarding the error like every existing call site

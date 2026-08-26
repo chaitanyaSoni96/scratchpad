@@ -57,8 +57,8 @@ func openDirAt(parent int, name string) (int, error) {
 }
 
 // flockFile takes (exclusive=true) or shares (exclusive=false) an advisory
-// lock on f's descriptor. Used both for the store-root rendezvous
-// (lockAnnotations) and, via openLockFileAt, per-document locks.
+// lock on f's descriptor. Used both for the store-root rendezvous, via
+// lockRendezvous below, and, via openLockFileAt, per-document locks.
 func flockFile(f *os.File, exclusive bool) error {
 	how := unix.LOCK_SH
 	if exclusive {
@@ -70,6 +70,23 @@ func flockFile(f *os.File, exclusive bool) error {
 // funlockFile releases a lock taken by flockFile.
 func funlockFile(f *os.File) error {
 	return unix.Flock(int(f.Fd()), unix.LOCK_UN)
+}
+
+// lockRendezvous flocks the pinned STORE ROOT descriptor itself — the very
+// object every operation in this process is anchored on. Losing the
+// rendezvous therefore requires replacing the store root, which needs write
+// access to the root's PARENT. This is the property the Windows twin
+// (annotationfs_windows.go) cannot fully reproduce: LockFileEx refuses a
+// directory handle outright, so its rendezvous must live on a CHILD of the
+// anchor instead, and losing it needs write access only inside the store.
+// See annotationfs_windows.go's header comment for the full comparison
+// (ADR §6.7, the F5 rework).
+func lockRendezvous(a *annotationFS, exclusive bool) error {
+	return flockFile(a.storeRoot, exclusive)
+}
+
+func unlockRendezvous(a *annotationFS) error {
+	return funlockFile(a.storeRoot)
 }
 
 // openLockFileAt creates or opens name (a per-document lock file) relative
@@ -190,6 +207,19 @@ func readDirFD(fd int) ([]os.DirEntry, error) {
 }
 
 func removeTreeAt(parent int, name string) error {
+	return removeTreeAtDepth(parent, name, 0)
+}
+
+// removeTreeAtDepth is removeTreeAt with an explicit recursion depth, bounded
+// by maxArtifactWalkDepth (store.go) — the SAME limit sizeWalkAt and List's
+// descent use (R16). This is a carried-forward gap the store had on BOTH
+// platforms before P3.9 (ADR §4.5): R16 names removeTreeAt specifically, and
+// until this change neither backend enforced a bound here. Fixed in the same
+// change as the Windows twin (annotationfs_windows.go).
+func removeTreeAtDepth(parent int, name string, depth int) error {
+	if depth > maxArtifactWalkDepth {
+		return fmt.Errorf("scratchpad: %q exceeds the maximum artifact tree depth (%d)", name, maxArtifactWalkDepth)
+	}
 	fd, err := openDirAt(parent, name)
 	if errors.Is(err, unix.ENOENT) {
 		return nil
@@ -214,7 +244,7 @@ func removeTreeAt(parent int, name string) error {
 				break
 			}
 			if st.Mode&unix.S_IFMT == unix.S_IFDIR {
-				if err := removeTreeAt(fd, entry.Name()); err != nil && !errors.Is(err, unix.ENOENT) {
+				if err := removeTreeAtDepth(fd, entry.Name(), depth+1); err != nil && !errors.Is(err, unix.ENOENT) {
 					readErr = err
 					break
 				}

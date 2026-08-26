@@ -20,6 +20,17 @@ import (
 // can never collide with a real artifact.
 const AnnotationsDir = ".annotations"
 
+// lockFileName is the Windows annotation rendezvous's reserved name (ADR
+// §6.7): a lock file one hop from the store root, because LockFileEx cannot
+// lock a directory handle at all (M14.dir_readhandle/dir_writehandle), so
+// the Linux flock-the-root-inode rendezvous (lockRendezvous,
+// annotationfs_linux.go) has no direct Windows equivalent. It is an
+// untagged, shared constant — like AnnotationsDir, reserved in Visible
+// (ignore.go) on both platforms — so a store built on Linux stays movable to
+// Windows even though Linux never creates the file (the same reasoning
+// checkPortableName already applies to created names, names.go).
+const lockFileName = ".scratchpad-lock"
+
 // Quote is a W3C-style text quote selector: the exact matched text plus
 // enough of its surroundings to disambiguate repeated occurrences.
 type Quote struct {
@@ -89,44 +100,50 @@ func annotationsRoot() (string, error) {
 	return filepath.Join(root, AnnotationsDir), nil
 }
 
+// annotationLock is the handle to a held lock, closed with Close regardless
+// of which of lockAnnotations/lockDocument produced it. The two constructors
+// close very different things (an entire annotationFS plus the rendezvous
+// lock, versus one per-document lock file), so Close is a closure rather
+// than a fixed set of fields — see lockRendezvous/unlockRendezvous
+// (annotationfs_linux.go, annotationfs_windows.go) for why the rendezvous
+// object itself is platform-specific even though this policy is not (ADR
+// §3.4/§6.7).
 type annotationLock struct {
-	f   *os.File
-	ann *annotationFS
+	ann     *annotationFS // non-nil only for lockAnnotations' rendezvous lock; callers chain .ann into openDir/readFile/writeFile
+	closeFn func() error
 }
 
 func (l *annotationLock) Close() error {
-	if l == nil || l.f == nil {
+	if l == nil || l.closeFn == nil {
 		return nil
 	}
-	err := funlockFile(l.f)
-	var closeErr error
-	if l.ann != nil {
-		closeErr = l.ann.close()
-	} else {
-		closeErr = l.f.Close()
-	}
-	if err != nil {
-		return err
-	}
-	return closeErr
+	return l.closeFn()
 }
 
 // lockAnnotations coordinates every annotation operation with artifact
 // cleanup. Normal operations take a shared lock; Delete and Unwatch hold the
 // exclusive form across removing both content and its annotation history.
+// The object being locked is platform-specific (lockRendezvous's doc
+// comment on each platform explains why); the policy here — shared vs.
+// exclusive, and that losing the rendezvous must never leak the opened
+// annotationFS — is not.
 func lockAnnotations(exclusive bool) (*annotationLock, error) {
 	ann, err := openAnnotationFS()
 	if err != nil {
 		return nil, err
 	}
-	// The store-root inode is stable even if a hostile process renames and
-	// replaces .annotations, so all operations still rendezvous on one flock.
-	f := ann.storeRoot
-	if err := flockFile(f, exclusive); err != nil {
+	if err := lockRendezvous(ann, exclusive); err != nil {
 		ann.close()
 		return nil, err
 	}
-	return &annotationLock{f: f, ann: ann}, nil
+	return &annotationLock{ann: ann, closeFn: func() error {
+		err := unlockRendezvous(ann)
+		closeErr := ann.close()
+		if err != nil {
+			return err
+		}
+		return closeErr
+	}}, nil
 }
 
 func lockDocument(ann *annotationFS, doc string) (*annotationLock, error) {
@@ -149,7 +166,14 @@ func lockDocument(ann *annotationFS, doc string) (*annotationLock, error) {
 		f.Close()
 		return nil, err
 	}
-	return &annotationLock{f: f}, nil
+	return &annotationLock{closeFn: func() error {
+		err := funlockFile(f)
+		closeErr := f.Close()
+		if err != nil {
+			return err
+		}
+		return closeErr
+	}}, nil
 }
 
 // hasDocExt reports whether name's extension marks it as an annotatable
