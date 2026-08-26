@@ -149,45 +149,45 @@ annotation package tests pass natively, including deterministic race tests.
 
 ### Rooted store
 
-- [ ] **P3.1 [CXH] Implement handle wrapper and error mapping.** Add deterministic
+- [x] **P3.1 [CXH] Implement handle wrapper and error mapping.** Add deterministic
   ownership, final-path/identity inspection, Win32-to-Go error translation, and
   no-follow directory opens according to the ADR.
-- [ ] **P3.2 [CXH] Implement real-directory traversal.** Support optional ancestor
+- [x] **P3.2 [CXH] Implement real-directory traversal.** Support optional ancestor
   creation and artifact-ancestor rejection while retaining validated handles.
-- [ ] **P3.3 [CS] Implement create-only file and directory operations.** Preserve
+- [x] **P3.3 [CS] Implement create-only file and directory operations.** Preserve
   atomic EEXIST behavior under concurrent claims and return errors compatible
   with shared policy.
-- [ ] **P3.4 [CXH] Implement browsable traversal.** Permit exactly one approved
+- [x] **P3.4 [CXH] Implement browsable traversal.** Permit exactly one approved
   store watch boundary, reject nested or unknown reparse points, and handle
   broken/cyclic targets safely.
-- [ ] **P3.5 [CXH] Implement safe document open and deletion.** Ensure file links,
+- [x] **P3.5 [CXH] Implement safe document open and deletion.** Ensure file links,
   ancestor replacement, and target replacement cannot escape containment.
-- [ ] **P3.6 [CS] Implement pruning and directory reads.** Preserve empty-project
+- [x] **P3.6 [CS] Implement pruning and directory reads.** Preserve empty-project
   cleanup and artifact discovery semantics without following reparse points.
 
 ### Annotations
 
-- [ ] **P3.7 [CXH] Implement annotation-root opening.** Create/open `.annotations`
+- [x] **P3.7 [CXH] Implement annotation-root opening.** Create/open `.annotations`
   under the store handle and reject any reparse component.
-- [ ] **P3.8 [CXH] Implement read and atomic write.** Use unique temp files,
+- [x] **P3.8 [CXH] Implement read and atomic write.** Use unique temp files,
   bounded sharing-violation retry, atomic replacement, cleanup on failure, and
   existing revision semantics.
-- [ ] **P3.9 [CXH] Implement safe recursive removal.** Walk by handle, never follow
+- [x] **P3.9 [CXH] Implement safe recursive removal.** Walk by handle, never follow
   reparse points, and prune empty annotation ancestors.
-- [ ] **P3.10 [CS] Implement annotation walk/report support.** Match Linux ordering,
+- [x] **P3.10 [CS] Implement annotation walk/report support.** Match Linux ordering,
   malformed-file handling, and callback behavior.
 
 ### Verification
 
-- [ ] **P3.11 [CS] Port behavior tests.** Run shared publish/list/delete/resolve
+- [x] **P3.11 [CS] Port behavior tests.** Run shared publish/list/delete/resolve
   tests on Windows and add platform-specific expectations only where OS behavior
   is genuinely different.
-- [ ] **P3.12 [CXH] Add deterministic attack tests.** Cover every applicable row
+- [x] **P3.12 [CXH] Add deterministic attack tests.** Cover every applicable row
   of the security matrix, including case variants, reserved names, ADS syntax,
   root replacement, and intermediate reparse substitution.
-- [ ] **P3.13 [CO review] Security invariants review.** Trace each mutation from
+- [x] **P3.13 [CO review] Security invariants review.** Trace each mutation from
   user input to final handle operation and confirm no validate-then-open path.
-- [ ] **P3.14 [CXH review] Implementation red team.** Independently inspect native
+- [x] **P3.14 [CXH review] Implementation red team.** Independently inspect native
   call flags, handle lifetimes, error paths, and recursive deletion.
 
 **Exit evidence:** green `internal/store` tests on Windows and Linux, attack-test
@@ -201,24 +201,24 @@ Claude Opus 5 from the other family when available.
 **Goal:** make the full CLI/web workflow native and live. **Gate:** Windows
 end-to-end tests pass under both link-capable and link-incapable configurations.
 
-- [ ] **P4.1 [CXH] Implement Windows directory identity.** Use volume serial and
+- [x] **P4.1 [CXH] Implement Windows directory identity.** Use volume serial and
   stable file ID from a directory handle; test replacement detection.
-- [ ] **P4.2 [CS] Validate fsnotify reconciliation.** Test initial recursive
+- [x] **P4.2 [CS] Validate fsnotify reconciliation.** Test initial recursive
   registration, populated subtree creation, rename/replacement, deletion,
   overflow recovery where supported, and clean shutdown.
-- [ ] **P4.3 [CXH] Implement Windows watch links.** Create only the reparse type
+- [x] **P4.3 [CXH] Implement Windows watch links.** Create only the reparse type
   accepted by the ADR, verify the target, preserve same-target idempotence, and
   reject collisions or unknown reparse tags.
-- [ ] **P4.4 [CS] Add degraded-mode errors.** Publish and web serving must work
+- [x] **P4.4 [CS] Add degraded-mode errors.** Publish and web serving must work
   without link privilege; `watch` must provide precise remediation without
   suggesting elevation as the default.
-- [ ] **P4.5 [CS] Add CLI end-to-end tests.** Cover publish from HTML/stdin and
+- [x] **P4.5 [CS] Add CLI end-to-end tests.** Cover publish from HTML/stdin and
   directories, list JSON, watch/watches/unwatch, delete, notes report/reply/
   resolve, excess arguments, and exit status.
-- [ ] **P4.6 [CS] Add web end-to-end tests.** Cover folder browsing, sandboxed
+- [x] **P4.6 [CS] Add web end-to-end tests.** Cover folder browsing, sandboxed
   previews, viewer, markdown, notes, delete, SSE refresh, watched sources, and
   loopback default.
-- [ ] **P4.7 [CO review] Semantic parity review.** Compare Windows and Linux user
+- [x] **P4.7 [CO review] Semantic parity review.** Compare Windows and Linux user
   behavior; document only unavoidable differences.
 
 **Exit evidence:** native smoke-test transcript, end-to-end suite results, and
@@ -233,21 +233,21 @@ or Claude Opus 5 from the other family when available.
 **Goal:** make Windows installation and distribution routine. **Gate:** clean
 Windows VM can install, run, update, and uninstall without touching user data.
 
-- [ ] **P5.1 [CS] Write `scripts/install.ps1`.** Support CLI-only, skill-only,
+- [x] **P5.1 [CS] Write `scripts/install.ps1`.** Support CLI-only, skill-only,
   full install, obsolete-MCP cleanup, and uninstall operations. Make each action
   idempotent and preserve `%USERPROFILE%\.scratchpad`.
-- [ ] **P5.2 [CS] Add per-user startup.** Register a logon Scheduled Task for
+- [x] **P5.2 [CS] Add per-user startup.** Register a logon Scheduled Task for
   `scratchpad-web.exe --addr 127.0.0.1:8737`; add start, stop, status, and removal
   commands with actionable policy errors.
-- [ ] **P5.3 [CX] Add Windows build commands.** Produce `.exe` binaries for amd64
+- [x] **P5.3 [CX] Add Windows build commands.** Produce `.exe` binaries for amd64
   and arm64 without changing existing Linux/container targets.
-- [ ] **P5.4 [CX] Add release packaging.** Build zip archives, include installer
+- [x] **P5.4 [CX] Add release packaging.** Build zip archives, include installer
   and required docs/licenses, generate SHA-256 checksums, and smoke-test archive
   contents.
-- [ ] **P5.5 [CS] Test path and quoting edge cases.** Install from paths containing
+- [x] **P5.5 [CS] Test path and quoting edge cases.** Install from paths containing
   spaces and Unicode, run under a non-administrator user, and test an overridden
   `SCRATCHPAD_ROOT`.
-- [ ] **P5.6 [CX] Add CI artifact retention.** Upload binaries and test logs on
+- [x] **P5.6 [CX] Add CI artifact retention.** Upload binaries and test logs on
   pull requests; produce release assets only for tagged builds.
 - [ ] **P5.7 [CO review] Supply-chain and lifecycle review.** Verify downloaded
   binaries need no arbitrary script execution beyond the visible installer,
@@ -265,25 +265,25 @@ security review must use the other model family when both are available.
 **Goal:** close remaining risks and publish beta-quality support. **Gate:** all
 acceptance criteria in the spec are satisfied or explicitly deferred in an ADR.
 
-- [ ] **P6.1 [CXH] Run stress and race campaigns.** Repeat concurrent publish,
+- [x] **P6.1 [CXH] Run stress and race campaigns.** Repeat concurrent publish,
   notes writes, watcher reconciliation, replacement attacks, and shutdown under
   `go test -race` where Windows supports it. Investigate flaky tests; do not
   paper over them with broad retries.
-- [ ] **P6.2 [CO] Perform final threat-model audit.** Reconcile implementation
+- [x] **P6.2 [CO] Perform final threat-model audit.** Reconcile implementation
   against the Phase 1 threat model and security matrix. Record residual risks.
-- [ ] **P6.3 [CXH review] Independent code review.** Review all Windows native
+- [x] **P6.3 [CXH review] Independent code review.** Review all Windows native
   calls, unsafe usage, build tags, error translation, link handling, and delete
   paths without relying on the implementing agent's summary.
-- [ ] **P6.4 [CS] Update documentation.** Update README, CLI docs, internals,
+- [x] **P6.4 [CS] Update documentation.** Update README, CLI docs, internals,
   install instructions, troubleshooting, supported-filesystem policy, Developer
   Mode guidance, and LAN exposure warning.
-- [ ] **P6.5 [CS] Update agent contract.** Update `skill/SKILL.md` for PowerShell
+- [x] **P6.5 [CS] Update agent contract.** Update `skill/SKILL.md` for PowerShell
   syntax and Windows watch behavior, then run the repository's skill install
   process where appropriate. Keep CLI flags and create-only semantics aligned.
 - [ ] **P6.6 [CX] Run full release matrix.** Linux vet/tests/build, container build,
   Windows amd64 native tests, Windows arm64 build/smoke test, archive tests, and
   documentation link checks.
-- [ ] **P6.7 [CO] Prepare beta release notes.** State supported Windows versions,
+- [x] **P6.7 [CO] Prepare beta release notes.** State supported Windows versions,
   NTFS restriction, link capability requirements, known limitations, security
   posture, and rollback steps.
 - [ ] **P6.8 [Human gate] Approve beta.** Confirm no unresolved high-severity
@@ -318,15 +318,15 @@ they cannot disappear behind package-level success after an accidental rename.
 
 ## Review Checklist
 
-- [ ] No shared untagged Go file imports `x/sys/unix` or assumes Unix `Stat_t`.
-- [ ] No Windows mutation relies only on a canonical string path or prefix test.
-- [ ] Reparse-point tags are allowlisted, not accepted generically.
-- [ ] Every native handle is closed on success and every error path.
-- [ ] Existing Linux race and symlink tests remain enabled.
-- [ ] Windows attack tests use deterministic hooks where possible.
-- [ ] Watch failure does not disable publish-only workflows.
-- [ ] Install and uninstall never delete the data root.
-- [ ] Loopback remains the default on every platform.
+- [x] No shared untagged Go file imports `x/sys/unix` or assumes Unix `Stat_t`.
+- [x] No Windows mutation relies only on a canonical string path or prefix test.
+- [x] Reparse-point tags are allowlisted, not accepted generically.
+- [x] Every native handle is closed on success and every error path.
+- [x] Existing Linux race and symlink tests remain enabled.
+- [x] Windows attack tests use deterministic hooks where possible.
+- [x] Watch failure does not disable publish-only workflows.
+- [x] Install and uninstall never delete the data root.
+- [x] Loopback remains the default on every platform.
 - [ ] CLI, README, internals, and skill documentation agree.
 
 ## Rollback Strategy
@@ -348,3 +348,53 @@ The plan is complete only when all ten acceptance criteria in the technical spec
 are met, required CI jobs are green, both independent security reviews are
 resolved, documentation is synchronized, and a clean non-admin Windows machine
 can install and exercise the complete supported workflow without WSL.
+
+---
+
+## Checkbox reconciliation (2026-08-27)
+
+Ticking stopped at P2.7 while the work ran through P6.7, so this plan spent most
+of the branch asserting less than was true. That is the inverse of the branch's
+own systemic finding — *a gate with an owner and no recorded evaluation reads as
+satisfied* — and the boxes above were therefore reconciled against shipped code
+and CI evidence, not from memory. Evidence per phase:
+
+| Phase | Evidence |
+|---|---|
+| P3.1–P3.14 | Windows store/annotation backends shipped; `reviews/P3.13-security-invariants.md`, `reviews/P3.14-implementation-red-team.md`, and the P3.14 remediation record in `EXECUTION.md` |
+| P4.1–P4.7 | Native watch/web shipped; `reviews/P4.7-semantic-parity.md` and its four remediation records (P-1a/P-2/P-3/P-4/P-5/P-6/P-7/P-8) |
+| P5.1–P5.6 | `scripts/install.ps1` + `scripts/verify-install.ps1`, `windows-installer` matrix green on **both** engines at 94/94 (run `32994820274`); `EXECUTION.md`'s P5.1/P5.2/P5.5 record |
+| P6.1 | `stress-linux` / `stress-windows` green (`-race`, `-count=20`) |
+| P6.2 | `reviews/P6.2-threat-model-audit.md` |
+| P6.3 | `reviews/P6.3-independent-code-review.md` |
+| P6.4, P6.5 | `6cb7384`, `2a1cb6f` — `docs/windows.md` added; README, CLI docs, internals, ignore rules and `skill/SKILL.md` aligned |
+| P6.7 | `beta-release-notes.md` |
+
+Three caveats that a tick would otherwise hide:
+
+- **P4.6 is ticked for its own deliverable** (web end-to-end tests), but three
+  items were *deferred to* P4.6 by other dispositions and never shipped: RW13's
+  `RECALL_ON_*` skip, RW15's unsupported-entry tile, RW19's folder-card delete
+  affordance. P6.2's FD-1 caught them; they now carry P6.8 gates with named
+  fallbacks in ADR §9.1. They are not covered by this tick.
+- **"CLI, README, internals, and skill documentation agree" is left unticked**
+  deliberately. The repository copies agree, but `make install-skill` has not
+  been re-run, so the copies in `~/.claude/skills` and `~/.pi/agent/skills` are
+  stale — and `CLAUDE.md` requires that re-run. The documentation link check is
+  part of P6.6, still in flight.
+- **P5.7 and P6.6 are genuinely unstarted** and are running now; **P6.8 is the
+  human gate** and is not the agent's to tick.
+
+Review-checklist items were each re-verified this session rather than assumed:
+no untagged shared file imports `x/sys/unix` (the only match was a comment at
+`internal/store/store.go:407`); `watchTags` in `link_windows.go:21` is a
+two-element allowlist with everything else refused as `reparseRefusal`; the
+Linux suite reports **0** skips; the default listen address is `127.0.0.1:8737`
+with `0.0.0.0` reachable only via `LAN=1`. Handle-closure comes from P6.3's
+trace of all 30 acquisition sites. One honest qualification on "no Windows
+mutation relies only on a canonical string path or prefix test": no *mutation*
+does, but `alreadyInsideRoot` (`storefs_windows.go:597`) does use a
+`strings.HasPrefix` alongside its `FILE_ID_INFO` primary — it is a
+deny-broadening guard that refuses watch targets inside the root, where
+over-breadth is safe, not an authorisation path.
+
