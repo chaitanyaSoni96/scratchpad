@@ -362,12 +362,36 @@ try {
 }
 
 # --- section 16 (P5.5): non-administrator user ------------------------------
+# A hosted runner cannot materialise a real profile for a secondary account:
+# CreateProcessWithLogonW hands the child the PARENT's environment block, and
+# the known-folder machinery resolves through that inherited environment, so
+# %USERPROFILE%-derived defaults point at the admin profile no matter what is
+# re-exported (proven by runs 32963949269 and 32965663917, where the
+# non-admin child was correctly denied writing the admin profile). The honest
+# seam is the one the installer already exposes: an explicit -BinDir on a
+# directory the account holds rights to, plus an explicit SCRATCHPAD_ROOT.
+#
+# What this section proves: no installer operation needs elevation -- binary
+# install, scheduled-task registration, status, task removal and uninstall
+# all succeed as a plain member of Users.
+# What it cannot prove on CI (documented exclusions, recorded in
+# EXECUTION.md and owed to a manual pre-beta check on a real machine):
+#   * skill install into the non-admin's own profile -- %USERPROFILE% cannot
+#     be honestly materialised here; the mechanism (plain file copy) is the
+#     same one section 4 exercises for the runner user.
+#   * start-now -- the task runs with an interactive token and the secondary
+#     account has no interactive session, so the start outcome is recorded,
+#     never asserted; registration and removal are asserted separately.
 Write-Host ""
 Write-Host "=== section 16: non-administrator user"
 $naUser = 'spverify'
 $naPass = 'Sp-Verify!2026-ci'
 $naRepo = 'C:\Users\Public\scratchpad-na'          # readable by every local user
-$naOutDir = 'C:\Users\Public\scratchpad-na-out'    # writable by every local user
+$naOutDir = 'C:\Users\Public\scratchpad-na-out'    # granted to the account below
+$naHome = 'C:\Users\Public\scratchpad-na-home'     # granted to the account below
+$naBin = Join-Path $naHome 'bin'
+$naRoot = Join-Path $naHome 'root'
+$naRootMarker = Join-Path $naRoot 'na-marker.txt'
 
 $naReady = $false
 try {
@@ -375,32 +399,17 @@ try {
     New-LocalUser -Name $naUser -Password $secure -PasswordNeverExpires -AccountNeverExpires | Out-Null
     Add-LocalGroupMember -Group 'Users' -Member $naUser
     Copy-MinimalRepo $naRepo
-    New-Item -ItemType Directory -Path $naOutDir -Force | Out-Null
-
-    # Start-Process -Credential hands the child the PARENT's environment
-    # block (a documented CreateProcessWithLogonW/.NET behaviour), so
-    # %USERPROFILE%/%LOCALAPPDATA%/%APPDATA% would still point at this admin
-    # profile and every install would correctly be denied. A real sign-in
-    # session derives those variables from the user's own logon token; this
-    # bootstrap does the same (GetFolderPath reads the token's profile, not
-    # the inherited environment) before handing control to install.ps1, so
-    # the installer under test sees exactly what it would see on a real
-    # machine and is itself unmodified.
-    $bootstrap = Join-Path $naRepo 'scripts\na-bootstrap.ps1'
-    @'
-param(
-    [Parameter(Mandatory)][string]$Installer,
-    [Parameter(ValueFromRemainingArguments = $true)][string[]]$Rest
-)
-$env:USERPROFILE  = [Environment]::GetFolderPath('UserProfile')
-$env:LOCALAPPDATA = [Environment]::GetFolderPath('LocalApplicationData')
-$env:APPDATA      = [Environment]::GetFolderPath('ApplicationData')
-& $Installer @Rest
-if ($null -eq $LASTEXITCODE) { exit 0 } else { exit $LASTEXITCODE }
-'@ | Set-Content -LiteralPath $bootstrap
+    New-Item -ItemType Directory -Path $naOutDir, $naHome -Force | Out-Null
+    # Grant before creating children so everything below inherits the ACE.
+    & icacls $naHome /grant "${naUser}:(OI)(CI)M" | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "icacls grant on $naHome failed with $LASTEXITCODE" }
+    & icacls $naOutDir /grant "${naUser}:(OI)(CI)M" | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "icacls grant on $naOutDir failed with $LASTEXITCODE" }
+    New-Item -ItemType Directory -Path $naRoot -Force | Out-Null
+    Set-Content -LiteralPath $naRootMarker -Value $MarkerText
     $naReady = $true
 } catch {
-    Assert $false 'non-admin environment setup (local user + public repo copy)' $_.Exception.Message
+    Assert $false 'non-admin environment setup (local user + granted directories)' $_.Exception.Message
 }
 
 function Invoke-AsNonAdmin {
@@ -411,8 +420,7 @@ function Invoke-AsNonAdmin {
     $outF = Join-Path $naOutDir "out-$stamp.txt"
     $errF = Join-Path $naOutDir "err-$stamp.txt"
     $argList = @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
-                 '-File', (Join-Path $naRepo 'scripts\na-bootstrap.ps1'),
-                 (Join-Path $naRepo 'scripts\install.ps1')) + $InstallerArgs
+                 '-File', (Join-Path $naRepo 'scripts\install.ps1')) + $InstallerArgs
     Write-Host ""
     Write-Host ">> [as $naUser] $Engine -File install.ps1 $($InstallerArgs -join ' ')"
     $p = Start-Process -FilePath $Engine -ArgumentList $argList -Credential $cred -LoadUserProfile `
@@ -426,30 +434,35 @@ function Invoke-AsNonAdmin {
 }
 
 if ($naReady) {
-    $naProfile = "C:\Users\$naUser"
-    $r1 = Invoke-AsNonAdmin @('all')
-    Assert ($r1.ExitCode -eq 0) 'non-admin: all exits 0' $r1.Output
-    Assert (Test-Path -LiteralPath (Join-Path $naProfile 'AppData\Local\scratchpad\bin\scratchpad.exe')) 'non-admin: exe in the non-admin profile'
-    Assert (Test-Path -LiteralPath (Join-Path $naProfile '.claude\skills\scratchpad\SKILL.md')) 'non-admin: skill in the non-admin profile'
-    $r2 = Invoke-AsNonAdmin @('all')
-    Assert ($r2.ExitCode -eq 0) 'non-admin: all is idempotent (second run exits 0)' $r2.Output
+    try {
+        # Inherited by the child process: the explicit data root for the run.
+        $env:SCRATCHPAD_ROOT = $naRoot
 
-    # Task registration needs no elevation. The start-at-the-end of `startup`
-    # is expected to behave differently here than on a real machine: the CI
-    # non-admin user has no interactive session, and the task runs with an
-    # interactive token, so the launched run cannot succeed. Registration and
-    # removal are the assertions; the start outcome is recorded, not asserted.
-    $r3 = Invoke-AsNonAdmin @('startup')
-    Write-Host "   (startup as non-admin exited $($r3.ExitCode); start-now cannot succeed without an interactive session)"
-    Assert ($null -ne (Get-Task)) 'non-admin: startup registered the scheduled task without elevation'
-    $r4 = Invoke-AsNonAdmin @('status')
-    Assert ($r4.ExitCode -eq 0) 'non-admin: status exits 0' $r4.Output
-    $r5 = Invoke-AsNonAdmin @('remove-startup')
-    Assert ($r5.ExitCode -eq 0) 'non-admin: remove-startup exits 0' $r5.Output
-    Assert ($null -eq (Get-Task)) 'non-admin: remove-startup unregistered the task'
-    $r6 = Invoke-AsNonAdmin @('uninstall')
-    Assert ($r6.ExitCode -eq 0) 'non-admin: uninstall exits 0' $r6.Output
-    Assert (-not (Test-Path -LiteralPath (Join-Path $naProfile 'AppData\Local\scratchpad'))) 'non-admin: uninstall removed the install dir'
+        $r1 = Invoke-AsNonAdmin @('cli', '-BinDir', $naBin)
+        Assert ($r1.ExitCode -eq 0) 'non-admin: cli exits 0 with a granted -BinDir' $r1.Output
+        Assert (Test-Path -LiteralPath (Join-Path $naBin 'scratchpad.exe')) 'non-admin: exe landed in the granted BinDir'
+        $r2 = Invoke-AsNonAdmin @('cli', '-BinDir', $naBin)
+        Assert ($r2.ExitCode -eq 0) 'non-admin: cli is idempotent (second run exits 0)' $r2.Output
+
+        # Registration is asserted on its own; the start-now at the end of
+        # `startup` cannot succeed without an interactive session, so its
+        # exit code is recorded above the registration assertion, not used.
+        $r3 = Invoke-AsNonAdmin @('startup', '-BinDir', $naBin)
+        Write-Host "   (startup as non-admin exited $($r3.ExitCode); start-now is not assertable without an interactive session)"
+        Assert ($null -ne (Get-Task)) 'non-admin: startup registered the scheduled task without elevation'
+        Assert ($r3.Output -match 'only in this shell') 'non-admin: shell-only SCRATCHPAD_ROOT triggers the NOTE' $r3.Output
+        $r4 = Invoke-AsNonAdmin @('status', '-BinDir', $naBin)
+        Assert ($r4.ExitCode -eq 0) 'non-admin: status exits 0' $r4.Output
+        $r5 = Invoke-AsNonAdmin @('remove-startup')
+        Assert ($r5.ExitCode -eq 0) 'non-admin: remove-startup exits 0' $r5.Output
+        Assert ($null -eq (Get-Task)) 'non-admin: remove-startup unregistered the task'
+        $r6 = Invoke-AsNonAdmin @('uninstall', '-BinDir', $naBin)
+        Assert ($r6.ExitCode -eq 0) 'non-admin: uninstall exits 0' $r6.Output
+        Assert (-not (Test-Path -LiteralPath (Join-Path $naBin 'scratchpad.exe'))) 'non-admin: uninstall removed the exe'
+        Assert (Test-Path -LiteralPath $naRootMarker) 'non-admin: overridden data root survived uninstall'
+    } finally {
+        Remove-Item Env:SCRATCHPAD_ROOT -ErrorAction SilentlyContinue
+    }
 }
 
 # ---------------------------------------------------------------------------

@@ -38,6 +38,10 @@ from the unzipped folder:
 Binaries go to `%LOCALAPPDATA%\scratchpad\bin`. Override with `-BinDir`.
 Every operation is idempotent — re-running is how you upgrade.
 
+The installer runs under both Windows PowerShell 5.1 (the `powershell` that
+ships with Windows) and PowerShell 7 (`pwsh`) — CI verifies every operation
+on both engines, so neither needs installing first.
+
 The installer adds that directory to your **user** PATH only if you pass
 `-AddToPath`; otherwise it prints the exact command to run yourself. It never
 edits the machine PATH.
