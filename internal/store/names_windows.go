@@ -4,6 +4,7 @@ package store
 
 import (
 	"fmt"
+	"path"
 	"strings"
 )
 
@@ -52,4 +53,29 @@ func checkLookupSegmentPlatform(s string) error {
 		return fmt.Errorf("invalid path segment %q: %q is a reserved Windows device name", s, base)
 	}
 	return nil
+}
+
+// matchName is the platform pair defaultIgnores/.scratchpadignore glob
+// matching (ignore.go's matchSegments) uses to compare one pattern segment
+// against one candidate name (ADR §7.4) — the second half of the pair
+// alongside nameEquals (storefs_windows.go), which does the same job for
+// the reserved-name check. §7.4 measured (M11) that NTFS's real $UpCase
+// folding merges ".ssh"/".SSH" and "key.pem"/"key.PEM", so a bare
+// case-sensitive path.Match leaves RR5's credential-ignore half live on
+// Windows: this folds both operands to lower case before matching, which is
+// the ADR's specified mechanism ("path.Match over lower-cased operands").
+//
+// strings.ToLower (like strings.EqualFold, which nameEquals uses) is a
+// Unicode simple-case-folding approximation of $UpCase, not the table
+// itself: M11 also measured that Go's folding disagrees with NTFS on the
+// Kelvin sign (U+212A) and ß/ẞ, in the OVER-BROAD direction — Go treats
+// pairs as equal that NTFS keeps distinct. Over-breadth is safe for a DENY
+// rule (defaultIgnores can only hide a name that would otherwise have been
+// shown, never fail to hide one NTFS itself folds) and is exactly why the
+// ADR chooses it here. It would be unsafe for an identity comparison, where
+// a false-equal is a containment bug — never reuse this fold, or
+// nameEquals's, for identity; identity is FILE_ID_INFO everywhere, without
+// exception.
+func matchName(pat, name string) (bool, error) {
+	return path.Match(strings.ToLower(pat), strings.ToLower(name))
 }

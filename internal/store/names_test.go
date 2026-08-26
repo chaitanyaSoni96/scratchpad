@@ -156,3 +156,107 @@ func TestValidateSegmentADSSyntax(t *testing.T) {
 		}
 	}
 }
+
+// TestMatchNameCaseVariants is F-2's platform-pair test: ADR §7.4 requires
+// defaultIgnores matching (ignore.go's matchSegments) to go through
+// matchName, case-sensitive path.Match on Linux and path.Match over
+// lower-cased operands on Windows — mirroring nameEquals immediately above
+// this file's package. Table-driven and run on BOTH platforms (never
+// skipped on Linux): each case asserts the platform-appropriate answer, so
+// this is the regression test for RR5's credential-ignore half
+// (threat-model §4.10(b) item 2, "Deterministic") and for the spec's
+// Security Test Matrix rows "Names / Unicode and case collisions" and
+// "Documents / case variation".
+func TestMatchNameCaseVariants(t *testing.T) {
+	// Same spelling but for a different volume's case convention: on Linux
+	// these must NOT match (ext4 is case-sensitive, and treating them as
+	// equal would be the wrong containment story there); on Windows they
+	// MUST match (NTFS folds case, so an ignore rule that doesn't fold is
+	// simply wrong on that volume — this is exactly RR5).
+	folded := []struct{ pat, name string }{
+		{".ssh", ".SSH"},
+		{"*.pem", "key.PEM"},
+		{"node_modules", "Node_Modules"},
+		{".git", ".GIT"},
+		{"*.env", "SECRET.ENV"},
+		{".netrc", ".NETRC"},
+	}
+	for _, c := range folded {
+		ok, err := matchName(c.pat, c.name)
+		if err != nil {
+			t.Fatalf("matchName(%q, %q) unexpected error: %v", c.pat, c.name, err)
+		}
+		switch runtime.GOOS {
+		case "windows":
+			if !ok {
+				t.Errorf("matchName(%q, %q) = false on Windows, want true (NTFS folds case; M11)", c.pat, c.name)
+			}
+		default:
+			if ok {
+				t.Errorf("matchName(%q, %q) = true on %s, want false (case-sensitive filesystem)", c.pat, c.name, runtime.GOOS)
+			}
+		}
+	}
+
+	// Exact-case matches must succeed identically on both platforms — the
+	// platform pair changes only how MUCH is matched, never breaks the
+	// baseline case.
+	exact := []struct{ pat, name string }{
+		{".ssh", ".ssh"},
+		{"*.pem", "key.pem"},
+		{"node_modules", "node_modules"},
+		{".git", ".git"},
+	}
+	for _, c := range exact {
+		ok, err := matchName(c.pat, c.name)
+		if err != nil || !ok {
+			t.Errorf("matchName(%q, %q) = (%v, %v), want (true, nil)", c.pat, c.name, ok, err)
+		}
+	}
+
+	// Genuinely different names must never match on either platform — case
+	// folding must never become substring or prefix matching.
+	unrelated := []struct{ pat, name string }{
+		{".ssh", "sshconfig"},
+		{"*.pem", "keypem.txt"},
+		{"node_modules", "node_modules_backup"},
+	}
+	for _, c := range unrelated {
+		if ok, _ := matchName(c.pat, c.name); ok {
+			t.Errorf("matchName(%q, %q) = true, want false on every platform", c.pat, c.name)
+		}
+	}
+}
+
+// TestVisibleDefaultIgnoresCaseVariants is the integration-level twin of
+// TestMatchNameCaseVariants, exercised the way a real lookup reaches
+// matchName: through Visible -> ignoreSetFor(defaults)/decide ->
+// matchSegments -> matchName. This is what actually closes RR5's exposure
+// (an unauthenticated server serving .SSH/key.PEM/Node_Modules on NTFS),
+// not just the unit-level primitive.
+func TestVisibleDefaultIgnoresCaseVariants(t *testing.T) {
+	root := testRoot(t)
+	resetIgnoreCache()
+	cases := []struct {
+		name  string
+		isDir bool
+	}{
+		{".SSH", true},
+		{"Node_Modules", true},
+		{"KEY.PEM", false},
+		{".ENV", false},
+		{".Git", true},
+	}
+	for _, c := range cases {
+		got := Visible(root, c.name, c.isDir)
+		if runtime.GOOS == "windows" {
+			if got {
+				t.Errorf("Visible(root, %q, %v) = true on Windows, want false (RR5: NTFS folds case, defaultIgnores must match the folded spelling)", c.name, c.isDir)
+			}
+			continue
+		}
+		if !got {
+			t.Errorf("Visible(root, %q, %v) = false on %s, want true (a differently-cased name is a different, unignored file on a case-sensitive filesystem)", c.name, c.isDir, runtime.GOOS)
+		}
+	}
+}

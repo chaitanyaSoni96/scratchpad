@@ -2,7 +2,6 @@ package store
 
 import (
 	"os"
-	"path"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -149,8 +148,14 @@ func (s *ignoreSet) decide(rel []string, isDir bool) (ignore, ok bool) {
 }
 
 // matchSegments matches a segmented pattern against a segmented path. Each
-// non-"**" segment is a path.Match glob against one path segment; "**" spans
-// any number of segments, including none.
+// non-"**" segment is a matchName glob against one path segment — the
+// platform pair (ADR §7.4: case-sensitive path.Match on Linux, path.Match
+// over lower-cased operands on Windows) defined in names_linux.go/
+// names_windows.go, so defaultIgnores and every .scratchpadignore rule fold
+// case the same way NTFS does on Windows without changing Linux behaviour
+// at all — Linux's half of the pair is byte-identical to the bare
+// path.Match this replaced. "**" spans any number of segments, including
+// none.
 func matchSegments(pat, segs []string) bool {
 	if len(pat) == 0 {
 		return len(segs) == 0
@@ -166,7 +171,7 @@ func matchSegments(pat, segs []string) bool {
 	if len(segs) == 0 {
 		return false
 	}
-	if ok, err := path.Match(pat[0], segs[0]); err != nil || !ok {
+	if ok, err := matchName(pat[0], segs[0]); err != nil || !ok {
 		return false
 	}
 	return matchSegments(pat[1:], segs[1:])
