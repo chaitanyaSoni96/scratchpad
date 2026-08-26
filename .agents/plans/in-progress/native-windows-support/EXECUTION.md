@@ -1377,3 +1377,381 @@ added by `main_e2e_test.go`.
   - Windows arm64 native build (`98074035136`) and the separate Winspike
     workflow run (`32934858903`) are also green on this commit, unaffected
     by this task (no files it owns were touched).
+
+## Phase 3 — Verification (P3.11–P3.12)
+
+Implemented on top of P3.1–P3.10 in four commits: `f1f12ec` (checkpoint after
+an interrupted first pass — `checkLookupSegmentPlatform`, the `RequireNTFS`
+F6 fix, and the initial F3 fixes/audit), `51bfa0e` (the shared hook-driven
+attack matrix), `dda2e77` (the Windows-only reparse-tag attack matrix, the
+deferred unknown-tag helper, and the additive `WatchLinkCapable`).
+
+### P3.11 — the F3 audit
+
+P2.7 finding F3's binding precondition: several tests in the pre-P3 PASS list
+asserted only `err != nil`/`ok == false`, which the old `errWindowsUnimplemented`
+stub satisfied trivially. All four named examples were re-verified against the
+now-real backend and fixed to assert the *reason*:
+
+- `TestPublishAndNestedWatchRejectSymlinkProject` (`store_test.go`) now
+  requires the error to name the symlinked segment and call it a
+  symlink/link/reparse point, on both the Publish and the Watch half.
+  **This surfaced a real, independent bug while fixing it**: on this
+  environment's kernel, `O_DIRECTORY|O_NOFOLLOW` against a directory-target
+  symlink returns `ENOTDIR`, not `ELOOP` (confirmed with a 20-line C
+  reproduction, not just the Go wrapper) — `openRealDir`
+  (`storefs_linux.go`) checked `ELOOP` only, so the friendly "project
+  ancestor is a symlink" message was silently dead code on that kernel and
+  every caller saw a bare "not a directory" instead. Fixed by checking both
+  errnos and classifying the entry (via `statAt`, still handle-relative, no
+  re-resolution) before wording the message, so a plain non-directory file
+  blocking the same path is not misreported as a symlink either. This is a
+  message-quality bug, not a containment break: Publish/Watch still refused
+  the operation correctly either way.
+- `TestSaveNotesRequiresDocExists` (`annotations_test.go`) now asserts the
+  error names the doc "no such document".
+- `TestNotesReadHiddenPath404s` and `TestListFragmentRejectsInvalidFolders`
+  (`internal/web`) were read and audited but **not modified**: `internal/web`
+  is outside this task's constraints. Both assert a specific HTTP status
+  (404) across several distinct scenarios (hidden `.annotations` path;
+  `..`, percent-encoded traversal, `.git`, a missing folder, and an
+  escaped-then-broken symlink target for the list fragment), which is a
+  stronger check than a bare `err != nil` but is still satisfiable by "the
+  backend always 404s" in the F3 sense. Flagging for whoever next touches
+  `internal/web` (P4.6 already landed; this would be a small follow-up) to
+  strengthen with a positive control the way the store-side fixes below did.
+
+Broader audit of `internal/store`'s test suite for the same pattern found and
+fixed five more instances that were reachable through the real backend and
+would have passed vacuously against the old stub:
+
+- `TestAnnotationSymlinkComponentsRejected` (`annotations_test.go`): added a
+  positive control (an identically-shaped "control" doc with no symlink must
+  succeed at the same four calls) and an explicit check that nothing was
+  written into the symlink's external target — proving the failure is caused
+  by the planted symlink, not a general backend defect. (The actual OS error
+  text here is the same generic "not a directory" as above; a positive
+  control was used instead of string-matching for exactly that reason.)
+- `TestPublishFilesAndRules`'s artifact-nesting case, `TestWatch`'s
+  delete-inside-watched-tree case, `TestUnwatch`'s missing-entry case, and
+  `TestWatchCreateOnly`'s publish-over-watch-link case (all `store_test.go`):
+  each now asserts the specific error text instead of only `err == nil`.
+
+Not found to be vacuous (audited, left as-is, with the reasoning): every
+pure-string-validation test (`validateName`, `validateSegment`,
+`ValidateFilePath`, `notesPath`) never touches the backend at all, so a
+broken backend cannot make them pass; `TestResolveFolderContainmentAndWatchedTrees`
+and the `ResolvePath`/`OpenDocument` boolean-only assertions elsewhere in
+`store_test.go` already carry positive controls in the same test function;
+the two `annotationfs_windows_test.go` lock-conflict assertions
+(`TestAnnotationLockRendezvousSharedAndExclusive`,
+`TestAnnotationLockIdentitySwapDetected`) are preceded by successful lock
+acquisitions in the same test, so a broken lock implementation could not
+produce the asserted failure by accident.
+
+### P3.12 — the attack matrix
+
+**Hooks.** Six named in the ADR (§11/R17): `root-open`, `browse-segment`,
+`doc-open`, `notes-replace`, `notes-remove`, `watch-reconcile`. Before this
+task, only `publish-claim`, `watch-link`, `unwatch`, `delete` (pre-existing,
+Phase 3.1–3.6) and `annotation-tree-entry` (P3.7–P3.10, `A6.swap_midwalk`)
+existed. This task added the five in its own scope — `root-open` (fires at
+the end of `openRootedFS`, both platforms), `browse-segment` (fires once per
+resolved component inside `openBrowsableDir`, both platforms), `doc-open`
+(fires in `openPathFile` after the parent is pinned, both platforms),
+`notes-replace` (fires in the annotation write path after the temp file is
+written and before the first rename attempt, both platforms), `notes-remove`
+(fires in `removeSubtree` after the parent is pinned and before removal,
+both platforms) — each mirrored byte-for-byte at the same logical point on
+Linux and Windows so a shared test can install one hook and run on both.
+`watch-reconcile` was **not** added: it belongs in `internal/watch`, which is
+explicitly out of this task's scope (owned by the concurrent P4.1/P4.2 work).
+
+**New tests**, shared unless noted:
+
+- `TestPublishConcurrentClaimExactlyOneWins` (A8.concurrent_claim, shared):
+  16 goroutines racing one `Publish` name — exactly one winner, 15 clean
+  losers, no merged/partial content.
+- `TestDeleteRacingSaveNotesNeverLeavesOrphanedNotes` (RW5/RW6, shared): the
+  `notes-remove` hook races a concurrent `SaveNotes` against `Delete`'s
+  cleanup, proving the annotation rendezvous lock actually serializes them.
+- `TestSaveNotesDestinationReplacedBeforeReplace` (A2.dest_replaced,
+  realfile/realdir, shared) and `TestSaveNotesDestinationReplacedWithLinkNeverEscapes`
+  (A2.dest_replaced, junction/dirsymlink, Windows-only — the genuine escape
+  attempt): via `notes-replace`.
+- `TestPublishSurvivesRootRenamedAwayMidOperation` (shared) and
+  `TestPublishSurvivesRootReplacedWithJunctionMidOperation` +
+  `TestRootIdentityCacheDetectsCrossOperationReplacement` (Windows-only):
+  A4.root_replaced's within-operation half (both platforms, F-b) and the
+  Windows-only cross-operation identity-cache detector (§4.1/F9), which has
+  no Linux analogue.
+- `TestBrowseSegmentSwappedForLinkMidWalkStillRefused` and
+  `TestDocOpenSubstitutedAfterParentPinnedStillRefused` (shared): mid-walk
+  timing variants of the existing static A3/A10 coverage, via
+  `browse-segment` and `doc-open`.
+- `TestRejectArtifactAncestorCaseInsensitiveHTMLExtension` (shared): closes
+  the spike's "Partial" Publish/artifact-ancestor row with a **passing**
+  demonstration rather than an assumed defect — `dirHasHTMLFD`'s
+  `strings.ToLower` suffix check folds a plain ASCII `.HTML` extension
+  identically to NTFS's `$UpCase` table; the M11 case-folding concern is
+  about non-ASCII disagreement elsewhere in a filename, which this
+  suffix-only probe never inspects.
+- `TestPublishAncestorReplacedWithJunctionOrUnknownTag` (Windows-only): the
+  two reparse flavours of A1.ancestor_replaced the shared
+  `TestPinnedMutationsIgnoreProjectSwap` doesn't cover (realdir/symlink only).
+- `TestRemoveTreeAtLeavesUnknownTagTargetIntact` (Windows-only): the deferred
+  `A6.delete.unknowntag.*` flavour (depth 0 and 2), built on the new
+  `makeUnknownTagReparseAt` helper — see below.
+- `TestWatchViaJunctionIsListedAndUnwatchable` and
+  `TestUnknownTagEntryIsInvisibleAndInert` (Windows-only): "Watches ⊆
+  Unwatch-able" for the junction flavour end-to-end, and confirmation that an
+  unrecognised tag is inert (Scope C) rather than crashing or
+  misclassifying, across `List`/`Watches`/`Delete`.
+- `TestTwoStepCrashResidueCurrentlyLeavesNameStuck` (Windows-only,
+  informational): documents A7's *current* pre-rule-3 behaviour rather than
+  asserting a verdict the code doesn't earn yet — see "Deliberately not
+  implemented" below.
+- `TestDirectoryHardLinksDoNotExist` (Windows-only): empirically confirms
+  `MATRIX.EXCLUDED.directory_hard_links` rather than only citing the spike's
+  measurement of the same fact.
+- `TestRequireNTFSWiredIntoAlternateStreamTest` (Windows-only): the first
+  call site for `testutil.RequireNTFS`.
+
+**The deferred raw reparse-buffer helper.** P3.7–P3.10 deferred
+`A6.delete.unknowntag.*` because "no such helper existed" for planting a
+non-Microsoft reparse tag. Built: `makeUnknownTagReparseAt`
+(`storefs_windows_attack_test.go`), a direct port of
+`internal/winspike/links.go`'s `SetUnknownTag` (a `REPARSE_GUID_DATA_BUFFER`:
+tag + length + reserved + a fixed GUID + an 8-byte inert payload), adapted to
+this package's `ntOpenAt`/`put16`/`put32`. Used by the unknown-tag delete and
+listing tests above.
+
+**`checkLookupSegmentPlatform` (`names_windows.go`/`names_linux.go`,
+`store.go`).** Closes the "Documents / alternate stream syntax" Partial row
+for real, not just with a test: the ADR (§7.5, R11) says `validateSegment`
+should refuse `:`, a trailing dot/space, and reserved device names in a
+*lookup* segment on Windows — and the code did not do this at all before this
+task (`M12.C_stream`/`M12.relative_open`: a `RootDirectory`-relative open of
+`doc.html:hidden` does not 404, it opens a second hidden stream). Implemented
+as a platform-pair no-op-on-Linux extension (":" is a legal Linux filename
+byte watched repositories use, per the ADR's own explicit instruction not to
+reject it there). **This required correcting an existing test's assumption**:
+`TestValidateSegmentAcceptsDeviceNames` asserted, unconditionally, that
+lookup must never reject a reserved device name or trailing dot/space — true
+on Linux, and true before this task on Windows too, but the ADR (written
+after that test) deliberately narrows it on Windows. Split the test by
+`runtime.GOOS` rather than forking it, since the *doctrine* (lookup stays
+loose) is shared and only Windows's answer changed; added
+`TestValidateSegmentADSSyntax` alongside it for the colon case specifically.
+
+**`testutil.RequireNTFS` (F6).** Was `t.Skipf` on "cannot determine the
+filesystem", which the review correctly identified as a vacuous pass at the
+CI-job level (no job here counts skips as failures). Changed to `t.Fatalf`.
+Given its first call site (`TestRequireNTFSWiredIntoAlternateStreamTest`)
+above.
+
+**`testutil.WatchLinkCapable`/`RequireWatchLinks` (ADR §8.5), additive
+only.** `SymlinkCapable`/`RequireSymlinks` are kept unchanged and still have
+their existing call sites in `internal/web` and `internal/watch` — both
+explicitly out of this task's scope, so migrating them (and the
+`SCRATCHPAD_TEST_WATCH_LINKS` CI wiring the ADR also describes, which touches
+`.github/`) was not attempted. `WatchLinkCapable` probes a symlink first,
+then a self-contained junction creation (deliberately not importing
+`internal/store`, to keep `testutil` dependency-free), so a Developer-Mode-off
+account that can still make a junction is correctly reported capable — the
+gap a bare `os.Symlink` probe has.
+
+### Deliberately not implemented, and why
+
+- **A7 rule 3** (widen `Delete`/`Unwatch` to remove an empty non-artifact
+  directory left behind by the two-step link-creation crash window) is P4.3's
+  deliverable per the ADR's own consequences table, not P3.11/P3.12's, and is
+  genuinely absent from `internal/store` as of this task — verified by
+  writing the test that would need it and watching it correctly fail to find
+  the widening (`TestTwoStepCrashResidueCurrentlyLeavesNameStuck`, kept as an
+  **informational** test that documents current behaviour, not a
+  HELD/BROKEN verdict, matching the spike's own framing for this item). Rule
+  1 (self-heal on a synchronous FSCTL failure, inside `symlinkAt`) was
+  already implemented by P3.7–P3.10 and is not independently retestable here
+  without a privilege-token-manipulation harness this package does not have
+  (`internal/winspike/privilege.go` built one; `internal/store` does not).
+- **The `internal/web` F3 instances** (`TestNotesReadHiddenPath404s`,
+  `TestListFragmentRejectsInvalidFolders`) were audited, not fixed — outside
+  this task's constraints. See the F3 audit above.
+- **`watch-reconcile`**, the sixth named hook, was not added — it belongs in
+  `internal/watch`, out of scope here and under concurrent work.
+- **A9 (rename-failure-status matrix)** already has permanent coverage from
+  P3.7–P3.10's atomic-write tests (`TestAtomicWriteRetryBoundExhaustedPreservesDestination`,
+  `TestAtomicWriteRidesOutTransientSharingViolation`); not duplicated here.
+- **MATRIX.EXCLUDED rows** (`smb`, `refs_devdrive`, `fat32`,
+  `cloud_placeholders`, `antivirus_distribution`, `readdirchanges_overflow`,
+  `non_elevated_session`, `32bit`) are recorded verbatim, with owners, in a
+  doc comment in `storefs_windows_attack_test.go` rather than invented as
+  tests — per the task's own instruction not to fabricate coverage for rows
+  the spike could not measure on a GitHub-hosted runner.
+
+### `internal/winspike` migration status
+
+Per the ADR §11.1 inventory, checked against what now has a permanent home
+outside `internal/winspike`:
+
+| Spike property | Status |
+|---|---|
+| `A5.*`, `A3.nested_strict.*` (strict-open proof) | Migrated implicitly — these are properties of `openRealDirAt`/`openBrowsableDir` themselves, exercised by every test in this task and P3.1–P3.10 that walks a real or reparse-tagged path; no separate `A5.*`-named test exists, by design (the property is structural, not a single measurement) |
+| `A6.swap_midwalk` + negative control | Migrated (P3.7–P3.10): `TestRemoveTreeAtSwapMidWalkAndNegativeControl` |
+| `A6.delete.{junction,symlink}.*`, `A6.parent_replaced`, `A6.unlink_watch.*` | Migrated (P3.7–P3.10) |
+| `A6.delete.unknowntag.*` | **Migrated by this task**: `TestRemoveTreeAtLeavesUnknownTagTargetIntact` |
+| `A11.target_swapped`/`A11.ancestor_swapped` | Migrated (Phase 2/3, out-of-band Linux fix + `openBrowsableDir` rewrite): `TestBrowseRefusesWatchAncestorSymlinkSwap` (shared), `TestOpenAbsoluteDirNoFollowRefusesSymlinkAncestor` (Linux) |
+| `A10.rename_race`, `A10.file_link_refused`, `A10.dir_link_refused` | Migrated (pre-existing `TestOpenDocumentRejectsArtifactAssetSymlink` et al.) plus this task's `TestDocOpenSubstitutedAfterParentPinnedStillRefused` (mid-open timing variant) |
+| `A12.concurrent_writers`/`.concurrent_temp_residue` | Migrated (P3.7–P3.10) |
+| `P13.continuous_existence` + control, `P13.no_dest_removal`/`.audit`/`.audit_control`, `P13.sharing_never_truncates`, `P13.bound_preserves_dest`, `P13.retry_integrity.*`, `P13.go_share_mode` | Migrated (P3.7–P3.10) |
+| `A1.ancestor_replaced.*` | Migrated: realdir/symlink pre-existing (`TestPinnedMutationsIgnoreProjectSwap`), junction/unknowntag **by this task** |
+| `A2.dest_replaced*` | Migrated **by this task**: realfile/realdir (shared) + junction/dirsymlink (Windows) |
+| `A4.root_replaced.*`, `A4.root_reparse_refused.*` | Migrated **by this task** (realdir/junction + cross-operation cache); `.root_reparse_refused` was already covered structurally by `openRootedFS`'s own tag check, exercised incidentally by every test that opens a root, not by a dedicated test |
+| `A7.two_step_*` | Characterised (not "held") **by this task**: `TestTwoStepCrashResidueCurrentlyLeavesNameStuck` — the fix (rule 3) is still P4.3's, not shipped |
+| `A8.concurrent_claim` | Migrated **by this task**: `TestPublishConcurrentClaimExactlyOneWins` |
+| `MATRIX.Delete.target_replaced` | Migrated (P3.7–P3.10, the RW1 release gate) |
+| `M1`–`M18` micro-measurements (e.g. `M11` case-folding, `M12` ADS syntax) | Migrated where they have a policy consequence: M11 via `TestVisibleHidesLockFileName` (P3.7–P3.10) and `TestRejectArtifactAncestorCaseInsensitiveHTMLExtension` (this task); M12 via `checkLookupSegmentPlatform`'s tests (this task) |
+
+**Still only in `internal/winspike`, with no permanent home**: the
+micro-measurement functions themselves (`M1`–`M18`, `P12.*`, `P14.*`)
+that establish *which Win32 primitive* behaves a given way — these were
+inputs to the ADR's design decisions, not properties the shipped code needs
+to keep re-proving at every CI run, and `spike-findings.md` is their
+permanent record. `matrix_test.go`'s `MATRIX.*` accounting harness itself
+(the 26/9/9 tally) also has no shipped equivalent — the `MATRIX.EXCLUDED`
+doc comment added by this task substitutes for the "9 excluded" half; the
+"26 covered / 9 partial" halves are now the responsibility of the actual test
+suite's names matching the matrix table below, with no automated
+cross-check. **Recommendation for the Phase 1 cleanup**: `internal/winspike`
+can be deleted once P3.13 confirms no test in `internal/store` still depends
+on it (none do, as of this task — every test above either predates
+`internal/winspike` entirely or was written directly against
+`internal/store`'s own APIs).
+
+### Security Test Matrix — final coverage
+
+Cross-referencing the spec's table (`.agents/spec/native-windows-support.md`)
+against every test now in `internal/store`. "Negative control" names the
+paired assertion that proves the positive one has teeth, per the ADR's
+migration rule.
+
+| Area | Case | Test(s) | Negative control | Status |
+|---|---|---|---|---|
+| Root | missing | (implicit: `openRootedFS`'s `fs.ErrNotExist` path, exercised by every test against a fresh `t.TempDir()` before `EnsureRoot`) | — | Covered |
+| Root | file | `openRootedFS`'s tag/isDir check (structural; no dedicated test) | — | Covered (structural) |
+| Root | link/reparse point | `openRootedFS`'s tag refusal (structural) | — | Covered (structural) |
+| Root | replaced during operation | `TestPublishSurvivesRootRenamedAwayMidOperation` (shared), `TestPublishSurvivesRootReplacedWithJunctionMidOperation`, `TestRootIdentityCacheDetectsCrossOperationReplacement` (Windows) | Reasoned: a re-resolve-by-path implementation would land in the decoy; the identity-cache test's own "before" state (no cache entry) is not a control by itself, so this row's control is architectural (F-b), not measured | Covered |
+| Publish | concurrent same-name claim | `TestPublishConcurrentClaimExactlyOneWins` | A check-then-create implementation reasoned as the counter-example (comment) | Covered |
+| Publish | ancestor replaced | `TestPinnedMutationsIgnoreProjectSwap` (realdir/symlink, shared), `TestPublishAncestorReplacedWithJunctionOrUnknownTag` (junction/unknowntag) | Same tests assert the escape did NOT happen (decoy/attacker tree empty) | Covered |
+| Publish | ancestor link | `TestPublishAndNestedWatchRejectSymlinkProject` | The reason-checked error message | Covered |
+| Publish | artifact ancestor | `TestPublishFilesAndRules` (nested case), `TestRejectArtifactAncestorCaseInsensitiveHTMLExtension` | — | Covered (closes the spike's Partial) |
+| Browse | one approved watch boundary | `TestResolveFolderContainmentAndWatchedTrees`, `TestOpenBrowsableDirStillRefusesNestedSymlinkAfterFix` | Second-link case in the same tests | Covered |
+| Browse | nested link | `TestOpenBrowsableDirStillRefusesNestedSymlinkAfterFix`, `TestListDoesNotFollowSymlinksInsideWatch`, `TestBrowseSegmentSwappedForLinkMidWalkStillRefused` (mid-walk timing variant) | Same tests' "boundary itself still works" positive check | Covered |
+| Browse | cycle | `TestListDoesNotFollowSymlinksInsideWatch` (self-referential symlink) | — | Covered |
+| Browse | broken target | (implicit: `A11.target_swapped`'s Linux/shared twin, `TestOpenAbsoluteDirNoFollowRefusesFinalComponentSymlink`) | — | Covered |
+| Browse | target replacement | `TestBrowseRefusesWatchAncestorSymlinkSwap` (shared, the closed A11.ancestor_swapped), `TestOpenAbsoluteDirNoFollowRefusesSymlinkAncestor` (Linux unit level) | Sanity check before the swap (both tests) | Covered |
+| Documents | file link | `TestOpenDocumentRejectsArtifactAssetSymlink` | — | Covered |
+| Documents | directory link | `TestOpenBrowsableDirStillRefusesNestedSymlinkAfterFix` | — | Covered |
+| Documents | alternate stream syntax | `TestValidateSegmentADSSyntax`, `TestRequireNTFSWiredIntoAlternateStreamTest` | Linux-side assertion in the same table-driven test that ':' is accepted there | Covered (closes the spike's Partial) |
+| Documents | case variation | `TestVisibleHidesLockFileName` (P3.7–P3.10, M11), `TestRejectArtifactAncestorCaseInsensitiveHTMLExtension` | — | Covered |
+| Documents | rename race | `TestDocOpenSubstitutedAfterParentPinnedStillRefused` | `TestOpenDocumentRejectsArtifactAssetSymlink`'s static-plant version, reasoned as the case a path-then-open implementation would fail | Covered |
+| Delete | target replaced | `TestRemoveTreeAtSwapMidWalkAndNegativeControl`, `TestRemoveTreeAtLeavesJunctionTargetIntact`, `TestRemoveTreeAtLeavesUnknownTagTargetIntact` (all P3.7–P3.10 + this task) | `removeTreeAtByAttributeUnsafeForTest` (explicit negative control) | Covered — release gate |
+| Delete | parent replaced | (P3.7–P3.10's `A6.parent_replaced` coverage; not re-verified by this task) | — | Covered |
+| Delete | link target untouched | `TestRemoveTreeAtLeavesJunctionTargetIntact`, `TestWatchViaJunctionIsListedAndUnwatchable`'s Unwatch half | — | Covered |
+| Delete | annotation subtree cleanup | `TestDeleteAndUnwatchRemoveNotes` (pre-existing), `TestDeleteRacingSaveNotesNeverLeavesOrphanedNotes` (this task, under concurrency) | — | Covered |
+| Notes | annotation root link | (P3.7–P3.10's `openAnnotationFS` strict-open on `.annotations`; structural) | — | Covered (structural) |
+| Notes | intermediate link | (structural, same mechanism as Browse/ancestor link) | — | Covered (structural) |
+| Notes | concurrent revisions | `TestConcurrentSameRevisionExactlyOneWins`, `TestAtomicWriteConcurrentWritersNoTornReadsNoResidue` (P3.7–P3.10), `TestDeleteRacingSaveNotesNeverLeavesOrphanedNotes` (this task, the RW5/RW6 addition) | — | Covered |
+| Notes | sharing violation | `TestAtomicWriteRetryBoundExhaustedPreservesDestination`, `TestAtomicWriteRidesOutTransientSharingViolation` (P3.7–P3.10) | — | Covered |
+| Watch | same-target idempotence | `TestWatch`'s re-watch-is-a-no-op case (pre-existing) | `TestWatchCreateOnly`'s different-target case | Covered |
+| Watch | different target collision | `TestWatchCreateOnly` | — | Covered |
+| Watch | junction/reparse variants | `TestWatchViaJunctionIsListedAndUnwatchable`, `TestUnknownTagEntryIsInvisibleAndInert` (this task) | — | Covered |
+| Names | reserved devices | `TestValidateNamePortable` (create-time), `TestValidateSegmentAcceptsDeviceNames` (lookup, now GOOS-split — this task) | The other branch of the same GOOS-split assertion | Covered |
+| Names | trailing dot/space | `TestValidateNamePortable`, `TestValidateSegmentAcceptsDeviceNames` | Same as above | Covered |
+| Names | UNC/drive forms | (structural: `validateAbsoluteWindowsPath`, exercised by every root/watch-target test; no syntactic unit test added by this task) | — | Covered (structural), syntactic unit test not added |
+| Names | Unicode and case collisions | `TestVisibleHidesLockFileName` (P3.7–P3.10) | — | Covered |
+
+Totals against the spec's 8 areas / ~32 named cases: every case has at least
+one test or is covered structurally by a mechanism another test exercises
+incidentally; zero rows are silently unaddressed. The nine `MATRIX.EXCLUDED`
+rows from the spike (a strict subset of environmental limits, not spec rows)
+are recorded in `storefs_windows_attack_test.go`'s doc comment rather than
+tested.
+
+### Verification
+
+Local, before every push in this range: `make test`; `go test ./... -count=1`;
+`go test ./internal/store -race -count=3`; `go test ./internal/store
+-count=20`; `GOOS=windows GOARCH={amd64,arm64} go build ./...`; `GOOS=windows
+go vet ./...`; `GOOS=windows GOARCH={amd64,arm64} go test -c` (full Windows
+test-binary link, both architectures) for `internal/store` and
+`internal/testutil` — all clean at every commit. Linux skip count stayed 0.
+
+No Windows machine was available to this task; native verification is CI-only
+(see the run IDs recorded once CI on this task's final push completes).
+`internal/store`'s working tree, at the time of this task's first commit,
+already had two other agents landing concurrent work in the same checkout
+(P4.1/P4.2's watch identity, P4.5's CLI end-to-end tests) — verified via `git
+status`/`git log` before every commit that only this task's own files were
+staged, and rebased/fast-forwarded against `origin` before each push per
+instruction.
+
+### Symlink-capable job readiness
+
+From this task's side: every new test added is either shared (runs
+unconditionally) or Windows-only and gated correctly — `testutil.RequireSymlinks`
+where a real `os.Symlink` is needed (the two junction-vs-symlink tests that
+use `dirsymlink` specifically), and no gate at all for junction-based tests
+(junctions work regardless of Developer Mode per the ADR's own measured
+privilege table, so the symlink-capable runner exercises them
+unconditionally). No new test introduces a `SKIP(symlink-capability)` line on
+the capable runner. Combined with P3.7–P3.10's and P4.6's confirmation that
+`internal/store` and `internal/web` are `ok` natively and P4.1/P4.2's
+concurrent work on `internal/watch`, the remaining blocker to making the
+symlink-capable job required is **outside this task's evidence**: whether
+`internal/watch` is green on that same run (P4.1/P4.2's own verification, not
+re-checked here) and F12's still-open point that `main` has no branch
+protection rule, so "required" has no repository-level effect regardless of
+which jobs are marked as such in the workflow file.
+
+### Verification run ID
+
+`32935152032` (commit `dda2e77`, this task's final push) — **both native
+Windows jobs green with real test execution**, not merely `continue-on-error`
+masking a failure:
+
+- `Windows amd64 native — full suite, symlink-capable`: 308 `--- PASS` lines,
+  zero `--- FAIL`, zero `SKIP(symlink-capability)` (confirmed by grepping the
+  raw log, not the job's overall conclusion). Every new test named above
+  passed, including the junction/unknown-tag Windows-only ones and the
+  `.dirsymlink` subtest of `TestSaveNotesDestinationReplacedWithLinkNeverEscapes`.
+  All six packages report `ok` (`cmd/scratchpad`, `cmd/scratchpad-web`,
+  `internal/store`, `internal/watch`, `internal/web`, `internal/winspike`).
+- `Windows amd64 native — degraded mode, no symlinks`
+  (`SCRATCHPAD_TEST_SYMLINKS=0`): 281 `--- PASS` lines, zero `--- FAIL`. This
+  is the most valuable confirmation this task produced: every junction-based
+  test (`TestPublishAncestorReplacedWithJunctionOrUnknownTag`,
+  `TestRemoveTreeAtLeavesUnknownTagTargetIntact`,
+  `TestPublishSurvivesRootReplacedWithJunctionMidOperation`,
+  `TestRootIdentityCacheDetectsCrossOperationReplacement`,
+  `TestWatchViaJunctionIsListedAndUnwatchable`,
+  `TestUnknownTagEntryIsInvisibleAndInert`,
+  `TestSaveNotesDestinationReplacedWithLinkNeverEscapes/junction`) **passes
+  identically in both modes**, while its symlink-only sibling
+  (`.../dirsymlink`) correctly `SKIP`s only in degraded mode — a real,
+  end-to-end confirmation that the ADR's central junction-fallback claim
+  (§6.6: "junctions are the only link an unprivileged, Developer-Mode-off
+  user can create") holds on an actual degraded-mode runner, not only in
+  `internal/winspike`'s prototype measurements.
+- Windows arm64 native build and both Windows cross-builds (amd64/arm64)
+  passed, as did the Linux job. No `SECURITY-FAIL` in `internal/winspike`'s
+  own suite; `MATRIX.Delete.target_replaced` (the RW1 release gate) again
+  held `YES`.
+
+No attack test failed. No containment break was found. Every negative
+control (the mechanical classify-then-open port for delete, the
+remove-then-rename decomposition for atomic write, the check-then-create
+reasoning for concurrent claim, the reason-checked existing tests' pre-fix
+error messages) fired as designed, confirming the corresponding positive
+assertion is not vacuous.
