@@ -3318,7 +3318,8 @@ no-result-lines assertions, and both blocks in the new job carry one.
   `windows-artifacts`' `git describe` output the same way. The recommended
   second half — quoting `-version "$(VERSION)"` in the Makefile, left alone
   here because that file was shared with the concurrent P6.6 task — was closed
-  by P6.6 in `607a131`, with a negative control (revert the quotes and
+  by the coordinator in `607a131`, once P6.6 confirmed it had never touched
+  the Makefile and handed it over, with a negative control (revert the quotes and
   `VERSION='v9.9;echo INJECTED>/tmp/pwn-proof;'` creates the file; apply them
   and the metacharacters reach `mkrelease` as a literal archive name). Closed
   at both layers.
