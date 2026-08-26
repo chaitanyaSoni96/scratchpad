@@ -2379,3 +2379,136 @@ concurrently with another agent working the P4.7 semantic-parity review
 this task's commits; every `git add` here named exact files, never `-A`/`.`,
 specifically to avoid picking up the other agent's concurrent uncommitted
 changes.
+
+## P4.7 — Semantic parity remediation (P-3, P-4, P-6)
+
+Fixes the three code-level findings the P4.7 semantic-parity review handed
+to this task (P-1a/P-2/P-7/P-8 documentation and P-1b/P-5/P-9/P-10 behaviour
+are other owners' scope; see `reviews/P4.7-semantic-parity.md`).
+
+**P-3 — the Linux boot loop.** `internal/watch/identity_unix.go`'s
+`skipWalkError` recognized only a disappeared entry (`os.IsNotExist`), so a
+single unreadable directory anywhere under the store root (`chmod 000`,
+root-owned, etc.) made `desiredDirs`/`newWatcher`/`cmd/scratchpad-web`'s
+startup call return a hard error — the exact boot loop ADR §6.11 fixed on
+Windows only. Reproduced first with
+`TestDesiredDirsSkipsUnreadableEntryInsteadOfFailing` (confirmed failing
+before the fix), then `skipWalkError` was extended to also treat
+`fs.ErrPermission` as a logged skip, switching `os.IsNotExist` to
+`errors.Is(err, fs.ErrNotExist)` to match `identity_windows.go`'s own
+in-flight fix for the same non-`Unwrap`-aware helper defect (P3.14 L4).
+Genuine watcher/backend failures (`Add` error, event/error channel closing)
+are unaffected and stay fatal, confirmed by the existing
+`TestNewWatcherRegistersInitialTreeAndReportsFailure` /
+`TestRunReturnsBackendFailures` / `TestRunReturnsWhenBackendChannelsClose`
+still passing unchanged. New `testutil.RequireNotRoot` guards the
+reproduction test (root ignores permission bits).
+
+**P-4 — junction-flavour coverage.** `testutil.RequireWatchLinks`/
+`WatchLinkCapable` existed with zero call sites; junction coverage in
+`internal/watch`/`internal/web` was zero. Added `testutil.MakeJunction`
+(Windows-only, path-based, factored out of the existing `probeJunction`
+capability probe) so tests can plant a deterministic junction without going
+through `store.Watch` (which tries a symlink first and only falls back to a
+junction when that fails — silently defeating a junction-specific test on a
+Developer-Mode-on runner). New coverage:
+
+- `internal/watch/junction_windows_test.go`: `desiredDirs` follows a
+  junction watch link (registers its own directory); the reconciler
+  registers a junction watch at startup and stops watching it once the link
+  is removed.
+- `internal/web/junction_windows_test.go`: a junction-watched folder is
+  listed and browsable over HTTP, offers unwatch (`hx-delete=/watch/...`)
+  rather than delete, and `DELETE /watch/{path}` removes it while the
+  source survives.
+- `cmd/scratchpad/main_windows_test.go`
+  (`TestFilesFromDirRejectsJunction`): closes the hole where
+  `TestFilesFromDirRejectsNonRegularEntries` needs symlink privilege and its
+  only sibling (`TestFilesFromDirRejectsNamedPipe`) is unix-only, leaving
+  `publish -dir`'s special-file rejection untested in either direction on a
+  degraded Windows box. `filesFromDir` gained a defensive
+  `ModeIrregular` check alongside the pre-existing symlink rejection
+  (belt-and-braces: measured on real Windows CI that an ordinary junction's
+  `fs.WalkDir` `DirEntry.Type()` is actually `ModeSymlink` there, so
+  rejection currently comes from the pre-existing regular-file branch, not
+  the new one — see the "CI feedback" note below).
+- `internal/store`: re-gated `TestWatch`, `TestWatchCreateOnly`,
+  `TestUnwatch`, `TestIsLinkTruePositiveThroughResolvePath`,
+  `TestDeleteAndUnwatchRemoveNotes`, and
+  `TestArtifactCleanupRacesCannotLeaveNotes`'s `unwatch` subtest from
+  `RequireSymlinks` to `RequireWatchLinks` — none of the six call
+  `os.Symlink` themselves; their subject (`Watch`/`Unwatch`) is satisfied by
+  a junction, so gating on symlink capability meant all six silently never
+  ran on the `windows-degraded-test` job. No assertion changed.
+
+**P-5, discovered while proving P-4 (not this task's finding to fix, but
+recorded here for its owner).** The first version of
+`TestDesiredDirsFollowsJunctionWatchLink` asserted that content nested
+*inside* a junction watch link also gets registered, reasoning (as the
+review did) that `canonicalDir`/`filepath.EvalSymlinks` would just pass
+through the non-symlink-tagged junction component. Real Windows CI (run
+`32969235815`) disproved this: `canonicalDir` succeeds resolving a path up
+to and including the junction, but fails with "the system cannot find the
+path specified" for anything nested past it, and `desiredDirs`' own
+skip-and-log path (visible in the CI log) confirms the walk reaches that
+failure and silently drops the entry. This is a real functional gap, worse
+than P-5's original "registered under a different key" framing — a
+junction watch's coverage stops one level short, so changes inside it never
+trigger a live refresh — not merely differently-keyed. The test was
+corrected to `internal/watch/junction_windows_test.go`'s emended commit
+(`185b37d`) to assert the measured behaviour, with a comment pointing
+whoever owns P-5 at this evidence.
+
+**P-6 — untested Windows containment primitives.** Added
+`internal/store/storefs_windows_test.go` (table-driven
+`validateAbsoluteWindowsPath`; `openVolumeRootNoFollow` success/failure;
+`openAbsoluteDirNoFollowWin`'s relative/UNC refusals, success case, and a
+junction-ancestor-swap regression — the Windows counterpart of
+`storefs_linux_test.go`'s ancestor-symlink test) and
+`internal/store/link_windows_test.go` (`readlinkAt`'s
+`SYMLINK_FLAG_RELATIVE` and `\??\Volume{` refusals, each built with a raw
+reparse buffer since `symlinkAt` never produces either shape itself, plus a
+negative control proving an ordinary junction is still followed normally).
+Before this, grep found neither `SYMLINK_FLAG_RELATIVE`/"relative symlink"
+nor `Volume{` in any `_test.go` in the tree.
+
+**CI feedback loop.** The first push (`8ead5fd`) surfaced two wrong
+assumptions on real Windows CI that this Linux-only agent could not have
+caught by reading source alone: the P-5-adjacent nested-junction assertion
+above, and `TestFilesFromDirRejectsJunction` expecting the new
+`ModeIrregular` branch's message specifically, when the pre-existing
+regular-file branch is what actually fires (fixed in `185b37d`; see that
+commit message for the measured detail). Both are now asserting only what
+was actually observed, not what was reasoned from source.
+
+### Verification
+
+```
+make test                                          # ok, all packages
+go test ./... -count=1                              # ok, all packages
+go test ./internal/watch ./internal/web -race -count=3   # ok
+go test ./internal/watch -count=20                  # ok
+GOOS=windows GOARCH=amd64 go build ./cmd/...        # clean
+GOOS=windows GOARCH=arm64 go build ./cmd/...        # clean
+GOOS=windows go vet ./...                           # clean
+go test ./... -v -count=1 | grep -c '^--- SKIP'     # 0, unchanged on Linux
+```
+
+Six commits: `fix(watch): bring Linux to parity with Windows on
+entry-scoped skip triage` (P-3, `9664a36`), `test(watch,web,cmd): add
+junction-flavour watch-link coverage (P-4)` (`8ead5fd`), `test(store):
+re-gate junction-satisfiable watch tests on RequireWatchLinks` (P-4,
+`e8dd8b5`), `test(store): add direct coverage for untested Windows
+containment primitives` (P-6, `2d51cb3`), `fix(watch,cmd): correct two
+false assumptions found by real Windows CI` (`185b37d`).
+
+**Concurrency note.** This task ran on the same branch and shared local
+checkout concurrently with the P3.14 red-team remediation and the P4.7
+documentation-remediation agents. Every `git add` here named exact files,
+never `-A`/`.`; `git pull --rebase` ran before every push; no commit here
+touched `.github/`, `scripts/`, `internal/winspike/`, `docs/`, or any ADR.
+No conflicts were hit against `internal/store`'s concurrently-edited files
+(`win32_windows.go`, `annotationfs_windows*.go`) — this task's own
+`internal/store` edits (the six re-gated tests, plus the two new P-6 test
+files) landed cleanly because they touched different lines/files than the
+concurrent M1/M2/M3 work.
