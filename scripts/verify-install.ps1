@@ -376,6 +376,28 @@ try {
     Add-LocalGroupMember -Group 'Users' -Member $naUser
     Copy-MinimalRepo $naRepo
     New-Item -ItemType Directory -Path $naOutDir -Force | Out-Null
+
+    # Start-Process -Credential hands the child the PARENT's environment
+    # block (a documented CreateProcessWithLogonW/.NET behaviour), so
+    # %USERPROFILE%/%LOCALAPPDATA%/%APPDATA% would still point at this admin
+    # profile and every install would correctly be denied. A real sign-in
+    # session derives those variables from the user's own logon token; this
+    # bootstrap does the same (GetFolderPath reads the token's profile, not
+    # the inherited environment) before handing control to install.ps1, so
+    # the installer under test sees exactly what it would see on a real
+    # machine and is itself unmodified.
+    $bootstrap = Join-Path $naRepo 'scripts\na-bootstrap.ps1'
+    @'
+param(
+    [Parameter(Mandatory)][string]$Installer,
+    [Parameter(ValueFromRemainingArguments = $true)][string[]]$Rest
+)
+$env:USERPROFILE  = [Environment]::GetFolderPath('UserProfile')
+$env:LOCALAPPDATA = [Environment]::GetFolderPath('LocalApplicationData')
+$env:APPDATA      = [Environment]::GetFolderPath('ApplicationData')
+& $Installer @Rest
+if ($null -eq $LASTEXITCODE) { exit 0 } else { exit $LASTEXITCODE }
+'@ | Set-Content -LiteralPath $bootstrap
     $naReady = $true
 } catch {
     Assert $false 'non-admin environment setup (local user + public repo copy)' $_.Exception.Message
@@ -389,7 +411,8 @@ function Invoke-AsNonAdmin {
     $outF = Join-Path $naOutDir "out-$stamp.txt"
     $errF = Join-Path $naOutDir "err-$stamp.txt"
     $argList = @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
-                 '-File', (Join-Path $naRepo 'scripts\install.ps1')) + $InstallerArgs
+                 '-File', (Join-Path $naRepo 'scripts\na-bootstrap.ps1'),
+                 (Join-Path $naRepo 'scripts\install.ps1')) + $InstallerArgs
     Write-Host ""
     Write-Host ">> [as $naUser] $Engine -File install.ps1 $($InstallerArgs -join ' ')"
     $p = Start-Process -FilePath $Engine -ArgumentList $argList -Credential $cred -LoadUserProfile `
