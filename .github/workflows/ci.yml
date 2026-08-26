@@ -567,12 +567,20 @@ jobs:
           $bin = Join-Path $sandbox 'bin target'
           $ps1 = Join-Path $pkg 'install.ps1'
 
-          function Invoke-Installer([string[]]$Args) {
-            Write-Host "--> $engine install.ps1 $($Args -join ' ')"
+          # NOTE: the parameter must not be named $Args. That is a PowerShell
+          # automatic variable, and binding it silently yields an empty array,
+          # which ran every verb below as a bare `install.ps1` (default verb,
+          # default BinDir) while still reporting exit 0. The sentinel below
+          # is the same discipline: if the child never launches, $LASTEXITCODE
+          # keeps whatever the previous native call left there, so an
+          # unlaunched command would otherwise read as success.
+          function Invoke-Installer([string[]]$InstallerArgs) {
+            Write-Host "--> $engine install.ps1 $($InstallerArgs -join ' ')"
+            $global:LASTEXITCODE = 97
             if ($engine -eq 'powershell') {
-              & powershell -NoProfile -ExecutionPolicy Bypass -File $ps1 @Args 2>&1 | ForEach-Object { Write-Host "      $_" }
+              & powershell -NoProfile -ExecutionPolicy Bypass -File $ps1 @InstallerArgs 2>&1 | ForEach-Object { Write-Host "      $_" }
             } else {
-              & pwsh -NoProfile -ExecutionPolicy Bypass -File $ps1 @Args 2>&1 | ForEach-Object { Write-Host "      $_" }
+              & pwsh -NoProfile -ExecutionPolicy Bypass -File $ps1 @InstallerArgs 2>&1 | ForEach-Object { Write-Host "      $_" }
             }
             return $LASTEXITCODE
           }
@@ -580,8 +588,14 @@ jobs:
           Assert ((Invoke-Installer @('cli', '-BinDir', $bin)) -eq 0) "cli from the archive exits 0"
           Assert (Test-Path -LiteralPath (Join-Path $bin 'scratchpad.exe')) "cli installed scratchpad.exe into -BinDir"
 
-          # The shipped binary must actually run, not merely copy.
-          & (Join-Path $bin 'scratchpad.exe') list 2>&1 | ForEach-Object { Write-Host "      $_" }
+          # The shipped binary must actually run, not merely copy. Same
+          # sentinel: "file not found" is a PowerShell error, not a native
+          # exit code, and would leave $LASTEXITCODE at its previous value.
+          $exe = Join-Path $bin 'scratchpad.exe'
+          $global:LASTEXITCODE = 98
+          if (Test-Path -LiteralPath $exe) {
+            & $exe list 2>&1 | ForEach-Object { Write-Host "      $_" }
+          }
           Assert ($LASTEXITCODE -eq 0) "the installed scratchpad.exe runs (list exits 0)"
 
           Assert ((Invoke-Installer @('skill')) -eq 0) "skill from the archive exits 0"
