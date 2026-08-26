@@ -2053,3 +2053,91 @@ outside `internal/store`'s or this task's evidence.
 
 No containment defect was found in `symlinkAt`, `Watch`, `Unwatch`, or
 `Delete`.
+
+## Phase 3 — Security Remediation (P3.13 F-1/F-2)
+
+Fixes for the two release-blocking findings in
+`reviews/P3.13-security-invariants.md`. Both are pre-existing/cross-cutting
+bugs in `internal/store`, not Windows-support regressions; fixed on this
+branch because P3.13 found them here and both are release blockers per the
+spec's acceptance criterion 5.
+
+### F-1 — root-level `.html` disabled every ignore rule
+
+`visibleSegments` (`store.go`) evaluated its "inside an artifact, the rest
+is assets" short-circuit (`hasHTML(dir)`) with `dir == root` on the loop's
+first iteration, before any segment's `Visible` check ran. A single stray
+`*.html` file directly in the store root made the function return `true`
+unconditionally for every lookup path — disabling the hard-coded
+`.annotations`/`.scratchpad-lock` guard, every `defaultIgnores` entry and
+every `.scratchpadignore` rule.
+
+Traced every other call site the review named (`Visible`, `VisiblePath`,
+`ResolvePath`, `ResolveDoc`, `OpenDocument`) plus `ResolveFolder`, `List`,
+`Watches`, and the artifact-nesting guards in `openRealDir`/
+`openBrowsableDir` (both platforms): none has the same mistake — they all
+check `hasHTML`/`dirHasHTMLFD` against the directory just entered for the
+*current* segment (a live handle/path for that segment), never against a
+value still equal to the pre-loop root. `visibleSegments` was the only site.
+
+Fix: gate the short-circuit on `dir != root` rather than moving the check
+blindly, so the root is never treated as an artifact for visibility purposes
+(matching how `List`/`ResolvePath`/`Watches` already start their own html
+test one level below the root) while the short-circuit still fires for
+every real, non-root artifact directory exactly as before.
+
+New tests: `TestRootLevelHTMLDoesNotDisableIgnoreRules` (`internal/store`)
+and `TestRootLevelHTMLDoesNotExposeHiddenPathsOverHTTP` (`internal/web`,
+reproducing the review's live GET/DELETE appendix against the real mux).
+Both include a positive control confirming assets inside a real artifact
+stay unfiltered. Closes the spec Security Test Matrix's `.annotations`-guard
+and ignore-reachability-with-a-root-artifact rows.
+
+### F-2 — the ADR's `matchName` platform pair was never implemented
+
+ADR §7.4 specifies `matchName(pattern, name string) (bool, error)` for
+`defaultIgnores`/`.scratchpadignore` glob matching: case-sensitive
+`path.Match` on Linux, `path.Match` over lower-cased operands on Windows.
+Only `nameEquals` (the `.annotations` reserved-name half) shipped;
+`ignore.go`'s `matchSegments` still called `path.Match` directly. On NTFS
+this left `.SSH`, `key.PEM`, `Node_Modules` unmatched by their
+`defaultIgnores` rules — RR5's credential-ignore half, live.
+
+Added `matchName` to the `names_linux.go`/`names_windows.go` platform-pair
+split (the file already carrying `checkLookupSegmentPlatform`; `nameEquals`
+itself lives in `storefs_linux.go`/`storefs_windows.go` — `names_*.go` was
+picked as the closest existing home for a *names*-comparison platform pair,
+noted here since the task description's claim that `nameEquals` lives in
+`names_*.go` doesn't match the tree). Windows folds with `strings.ToLower`
+per the ADR's literal wording; the doc comment records that Go's folding
+(like `strings.EqualFold`, which `nameEquals` uses) is a Unicode
+approximation of NTFS's `$UpCase`, over-broad on the Kelvin sign and
+`ß`/`ẞ` (M11) — safe for this deny rule, never to be reused for identity.
+
+New tests: `TestMatchNameCaseVariants` and
+`TestVisibleDefaultIgnoresCaseVariants` (`internal/store/names_test.go`),
+table-driven and run on both platforms via `runtime.GOOS` (matching this
+file's existing convention), asserting the platform-appropriate expectation
+rather than skipping on Linux. Closes the spec Security Test Matrix's
+"Names / Unicode and case collisions" and "Documents / case variation" rows.
+
+Per this task's constraints, `.agents/ADRs/` was left untouched even though
+RW4's "Mitigated — §7.4" row is now accurate again — flagged for whoever
+next has ADR-editing scope.
+
+### Verification
+
+```
+make test                                          # ok, all packages
+go test ./... -count=1                              # ok, all packages
+go test ./internal/store ./internal/web -race -count=3   # ok
+go test ./internal/store -count=20                  # ok
+GOOS=windows GOARCH=amd64 go build ./...            # clean
+GOOS=windows GOARCH=arm64 go build ./...            # clean
+GOOS=windows go vet ./...                           # clean
+go test ./... -v -count=1 | grep -c '^--- SKIP'     # 0, unchanged on Linux
+```
+
+Two commits: `fix(store): stop a root-level .html from disabling every
+ignore rule` (F-1) and `fix(store): implement the matchName platform pair
+for defaultIgnores` (F-2).
