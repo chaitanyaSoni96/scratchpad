@@ -260,3 +260,49 @@ func TestVisibleDefaultIgnoresCaseVariants(t *testing.T) {
 		}
 	}
 }
+
+// TestCanonicalLookupNameIsOnDiskSpelling is the wiring test for the third
+// member of the ADR §7.4 name-comparison platform pair (nameEquals,
+// matchName, canonicalLookupName), added for P6.3 F1. Like
+// TestMatchNameCaseVariants it runs on BOTH platforms and asserts the
+// platform-appropriate answer rather than skipping on Linux, so the pair
+// cannot be silently unwired on either side.
+//
+// The property: given a lookup segment the requester typed, return the name
+// the filesystem actually holds. Case is the deterministic way to exercise
+// that without depending on 8.3 generation being enabled (the 8.3 half is
+// shortname_windows_test.go's job, and it is capability-gated); the
+// mechanism is the same one either way.
+func TestCanonicalLookupNameIsOnDiskSpelling(t *testing.T) {
+	root := testRoot(t)
+	mkdirs(t, root, "ordinary")
+
+	got := canonicalLookupName(root, "ORDINARY")
+	switch runtime.GOOS {
+	case "windows":
+		// NTFS resolves "ORDINARY" to the directory spelled "ordinary", so
+		// the visibility decision must be made against "ordinary".
+		if got != "ordinary" {
+			t.Errorf("canonicalLookupName(root, %q) = %q on Windows, want %q (the on-disk spelling)", "ORDINARY", got, "ordinary")
+		}
+	default:
+		// A case-sensitive namespace has exactly one spelling per name, so
+		// this must be a pure no-op — never a lookup, never a rewrite.
+		if got != "ORDINARY" {
+			t.Errorf("canonicalLookupName(root, %q) = %q on %s, want it returned unchanged (the Linux half must stay a compile-time no-op)", "ORDINARY", got, runtime.GOOS)
+		}
+	}
+
+	// A name with no entry behind it must come back unchanged on every
+	// platform: there is nothing on disk to canonicalise against, and an
+	// entry that does not exist has nothing to hide.
+	if got := canonicalLookupName(root, "nothing-here"); got != "nothing-here" {
+		t.Errorf("canonicalLookupName(root, %q) = %q, want it returned unchanged for a nonexistent entry", "nothing-here", got)
+	}
+
+	// An exact-spelling lookup is unchanged on both platforms — the pair
+	// changes how much is normalised, never the baseline case.
+	if got := canonicalLookupName(root, "ordinary"); got != "ordinary" {
+		t.Errorf("canonicalLookupName(root, %q) = %q, want it unchanged", "ordinary", got)
+	}
+}

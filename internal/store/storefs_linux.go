@@ -49,6 +49,22 @@ func (r *rootedFS) close() error { return r.root.Close() }
 // case-sensitive namespace.
 func nameEquals(a, b string) bool { return a == b }
 
+// canonicalLookupName is the third member of the §7.4 name-comparison
+// platform pair (alongside nameEquals here and matchName in names_linux.go).
+// It answers "what is this entry ACTUALLY called on disk", for a single
+// requester-supplied lookup segment, so visibleSegments (store.go) decides
+// visibility on the filesystem's own spelling rather than on the spelling the
+// requester typed.
+//
+// On Linux it is a compile-time no-op and must stay one: a Linux filesystem
+// namespace is byte-exact, there is no alias for a name to be resolved from,
+// and asking the OS to canonicalise here would only introduce a path
+// re-resolution with nothing to gain. See storefs_windows.go's twin for the
+// hazard it exists to close (P6.3 F1: an NTFS 8.3 short name is a second,
+// requester-typeable spelling of a name that Visible's reserved-name check
+// and every defaultIgnores/.scratchpadignore rule compare as a string).
+func canonicalLookupName(dir, name string) string { return name }
+
 func dupFD(fd int) (int, error) { return unix.FcntlInt(uintptr(fd), unix.F_DUPFD_CLOEXEC, 0) }
 
 // closeFD closes fd, discarding the error like every existing call site

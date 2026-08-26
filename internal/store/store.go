@@ -202,9 +202,27 @@ func visibleSegments(root string, segs []string) bool {
 		if dir != root && hasHTML(dir) {
 			return true // inside a real (non-root) artifact: the rest is assets
 		}
-		full := filepath.Join(dir, s)
+		// canonicalLookupName (storefs_{linux,windows}.go) is the third
+		// member of the ADR §7.4 name-comparison platform pair. This is the
+		// ONE Visible call site whose `name` operand is requester-supplied
+		// rather than an os.DirEntry.Name() the filesystem just handed us,
+		// and that asymmetry is what P6.3 F1 found: on NTFS an 8.3 short
+		// name is a second spelling of the same object that no string
+		// comparison in ignore.go matches, so `GET /p/ANNOTA~1` walked
+		// straight past the .annotations reserved-name deny and past every
+		// defaultIgnores/.scratchpadignore rule while the kernel resolved
+		// the alias normally. Deciding on the on-disk spelling closes both
+		// halves at once. A permanent no-op on Linux, where a name has
+		// exactly one spelling.
+		//
+		// The canonical name also advances `dir`, so an aliased ANCESTOR
+		// cannot defeat an anchored multi-segment rule (`node_modules/**`)
+		// further down the walk — Visible derives its rule path from `dir`
+		// via filepath.Rel, and that path must be canonical the whole way.
+		canon := canonicalLookupName(dir, s)
+		full := filepath.Join(dir, canon)
 		fi, err := os.Stat(full)
-		if !Visible(dir, s, err == nil && fi.IsDir()) {
+		if !Visible(dir, canon, err == nil && fi.IsDir()) {
 			return false
 		}
 		dir = full

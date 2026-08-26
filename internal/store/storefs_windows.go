@@ -8,6 +8,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -181,6 +182,75 @@ func (r *rootedFS) close() error { return r.root.Close() }
 // reserved names, which is correct behaviour anyway. Never used for
 // identity (identity is FILE_ID_INFO, everywhere, without exception).
 func nameEquals(a, b string) bool { return strings.EqualFold(a, b) }
+
+// canonicalLookupName is the third member of the §7.4 name-comparison
+// platform pair (nameEquals above, matchName in names_windows.go), and it
+// closes the half of that pair those two cannot reach: NTFS gives a name a
+// second, requester-typeable SPELLING, not merely a second case.
+//
+// P6.3 F1. nameEquals folds case, so `.Annotations` no longer bypasses
+// Visible's reserved-name deny (ignore.go) and matchName no longer lets
+// `.SSH` slip past defaultIgnores. Neither helps against an 8.3 short name:
+// with 8.3 generation on — the Windows default for the system volume, where
+// `~\.scratchpad` lives, and measured ON for the runner's C: in the spike's
+// M6.enabled — NTFS stores `ANNOTA~1` alongside `.annotations` and resolves
+// both, including through an OBJECT_ATTRIBUTES.RootDirectory-relative
+// NtCreateFile. EqualFold("ANNOTA~1", ".annotations") is false and
+// path.Match("node_modules", "node_m~1") is false, so a requester-supplied
+// URL segment spelled as the alias passed every string comparison in
+// ignore.go while the kernel happily resolved it to the hidden object.
+//
+// Three fixes were considered (the trade-off is argued in
+// reviews/P6.2-threat-model-audit.md §10):
+//
+//   - Refusing the 8.3 SHAPE in checkLookupSegmentPlatform (`FOO~1`-like) is
+//     one line, but it is a string guess at NTFS's generation algorithm — the
+//     exact class of reasoning P-5 already falsified once on this branch —
+//     and it makes an entry a watched repo literally named `FOO~1.TXT`
+//     unaddressable.
+//   - Comparing objectIDOf against `.annotations`' own identity after the
+//     open is sound but fixes only the two RESERVED names; every
+//     defaultIgnores and .scratchpadignore rule — the half that carries the
+//     content-disclosure routes — would stay bypassable, and it would put a
+//     policy decision inside openBrowsableDir, a mechanism function.
+//   - This: ask the filesystem what the entry is called and decide on THAT.
+//     It is a fact obtained from the filesystem rather than a guess about it,
+//     it fixes the reserved names and every ignore rule in one place, and it
+//     generalises to any future aliasing mechanism rather than to 8.3 alone.
+//
+// It normalises the DECISION only, never the request: a caller may still
+// address a visible entry by any spelling NTFS accepts, so case-variant URLs
+// (`/a/ART/index.html`) keep working exactly as docs/windows.md documents.
+// What changes is that the ignore rules and the reserved-name deny now run
+// against the name on disk.
+//
+// The returned value is used for a string comparison and to extend the
+// advisory path walk — never to open anything — so GetLongPathName's
+// whole-path resolution (it follows reparse points, and this is the
+// path-based advisory layer, ADR §6.9 row 2) cannot redirect an operation.
+// Any failure — most commonly "the entry does not exist" — falls back to the
+// requested spelling, which is correct: an entry that is not there has
+// nothing to hide.
+func canonicalLookupName(dir, name string) string {
+	p, err := windows.UTF16PtrFromString(filepath.Join(dir, name))
+	if err != nil {
+		return name
+	}
+	buf := make([]uint16, windows.MAX_LONG_PATH)
+	n, err := windows.GetLongPathName(p, &buf[0], uint32(len(buf)))
+	if err == nil && int(n) > len(buf) {
+		buf = make([]uint16, n+1)
+		n, err = windows.GetLongPathName(p, &buf[0], uint32(len(buf)))
+	}
+	if err != nil || n == 0 {
+		return name
+	}
+	base := filepath.Base(windows.UTF16ToString(buf))
+	if base == "" || base == "." || base == string(filepath.Separator) {
+		return name
+	}
+	return base
+}
 
 // verifyRoot re-reads FILE_ID_INFO on the pinned handle and compares it
 // against the identity recorded at pin time (R13). It distinguishes a

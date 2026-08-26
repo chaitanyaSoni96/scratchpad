@@ -365,3 +365,80 @@ func TestValidateSegment(t *testing.T) {
 		}
 	}
 }
+
+// TestIgnoreHidesContentNotJustListings establishes what an ignore-rule
+// bypass actually costs, on both platforms, by exercising the two routes
+// that serve bytes out of the store: ResolveDoc (any .md under a visible
+// path) and ResolvePath (an artifact directory and every asset beneath it).
+//
+// This is the correction to P6.3 F1's impact statement, made executable
+// rather than argued. F1 bounded an ignore-rule bypass to "listing
+// disclosure, not content", reasoning that /a/ serves a file only under an
+// .html-bearing ancestor and that neither .annotations nor a credential
+// directory has one. That is right about .annotations — note sidecars are
+// <doc>.html.json and dirHasHTMLFD's HasSuffix(…, ".html") correctly does
+// not match them, which the first block below pins — but it does not hold
+// for a hidden DIRECTORY in general: a directory hidden by defaultIgnores or
+// by a .scratchpadignore rule may perfectly well contain markdown or a
+// complete artifact, and node_modules/.venv routinely contain both.
+//
+// So the rule is load-bearing for content, and the positive control proves
+// the assertions have teeth: byte-identical content one directory over, not
+// covered by the rule, IS served.
+func TestIgnoreHidesContentNotJustListings(t *testing.T) {
+	root := testRoot(t)
+
+	// A defaultIgnores directory holding both servable content types.
+	writeFile(t, root, "node_modules/pkg/index.html", "<h1>hidden artifact</h1>")
+	writeFile(t, root, "node_modules/pkg/readme.md", "# hidden markdown")
+	// The same shapes under a .scratchpadignore rule the user wrote.
+	writeFile(t, root, ".scratchpadignore", "private\n")
+	writeFile(t, root, "private/deck/index.html", "<h1>private artifact</h1>")
+	writeFile(t, root, "private/notes.md", "# private markdown")
+	// Positive control: identical content, no rule covering it.
+	writeFile(t, root, "public/deck/index.html", "<h1>public artifact</h1>")
+	writeFile(t, root, "public/notes.md", "# public markdown")
+	// The annotations tree, whose sidecars are .json and therefore reachable
+	// by neither route even if the reserved-name deny were bypassed.
+	writeFile(t, root, AnnotationsDir+"/public/deck/index.html.json", `{"rev":1,"annotations":[]}`)
+	resetIgnoreCache()
+
+	hiddenDocs := [][]string{
+		{"node_modules", "pkg", "readme.md"},
+		{"private", "notes.md"},
+	}
+	for _, segs := range hiddenDocs {
+		if _, ok := ResolveDoc(segs); ok {
+			t.Errorf("ResolveDoc(%v) succeeded: markdown inside an ignore-hidden directory is CONTENT, and the ignore rule is the only thing withholding it", segs)
+		}
+	}
+	hiddenArtifacts := [][]string{
+		{"node_modules", "pkg", "index.html"},
+		{"private", "deck", "index.html"},
+	}
+	for _, segs := range hiddenArtifacts {
+		if _, _, ok := ResolvePath(segs); ok {
+			t.Errorf("ResolvePath(%v) succeeded: an artifact inside an ignore-hidden directory is CONTENT, and its whole asset subtree comes with it", segs)
+		}
+	}
+
+	// Positive control: the same two routes work for identical content that
+	// no rule covers, so the assertions above are not passing vacuously.
+	if _, ok := ResolveDoc([]string{"public", "notes.md"}); !ok {
+		t.Error("ResolveDoc(public/notes.md) failed: the control content must be served, or the assertions above prove nothing")
+	}
+	if _, _, ok := ResolvePath([]string{"public", "deck", "index.html"}); !ok {
+		t.Error("ResolvePath(public/deck/index.html) failed: the control content must be served, or the assertions above prove nothing")
+	}
+
+	// The annotations tree carries no .html and no .md, so even with the
+	// reserved-name deny out of the picture neither route can serve a
+	// sidecar. This is the half of F1's bounding that does hold, pinned so a
+	// future sidecar rename (to .md, say) cannot quietly falsify it.
+	if _, ok := ResolveDoc([]string{AnnotationsDir, "public", "deck", "index.html.json"}); ok {
+		t.Error("ResolveDoc served a note sidecar: sidecars must not be reachable as documents")
+	}
+	if _, _, ok := ResolvePath([]string{AnnotationsDir, "public", "deck"}); ok {
+		t.Error("ResolvePath treated a sidecar directory as an artifact: <doc>.html.json must not satisfy dirHasHTMLFD")
+	}
+}
