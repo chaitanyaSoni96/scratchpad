@@ -13,6 +13,7 @@ import (
 	"unsafe"
 
 	"golang.org/x/sys/windows"
+	"golang.org/x/sys/windows/registry"
 )
 
 // ---------------------------------------------------------------------------
@@ -199,51 +200,139 @@ func runDegradedModeChild(t *testing.T) {
 	}
 	fmt.Println("DEGRADED|delete|ok")
 
-	// --- watch: the property acceptance criterion 6 is actually about ---
+	// --- watch: acceptance criterion 6, and the actual three-row reality ---
+	//
+	// The token privilege and Developer Mode are TWO INDEPENDENT dimensions
+	// (ADR §6.6's measured privilege table): with the privilege removed but
+	// Developer Mode ON (this runner's
+	// ambient state), SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE still
+	// succeeds, so symlinkAt correctly produces a real directory SYMBOLIC
+	// LINK, not a junction — that is row 2, and it is the primary path for
+	// every Developer-Mode user, so a test must not treat it as failure.
+	// Only row 3 (privilege AND Developer Mode both absent) forces the
+	// junction fallback, and Developer Mode is machine policy
+	// (AllowDevelopmentWithoutDevLicense), not a per-process token bit —
+	// reaching it needs the registry toggle below, which only an elevated
+	// process (this runner) can perform.
+	devModeBefore, devModePresent := readDevMode()
+	fmt.Printf("DEGRADED|devmode_before|value=%d|present=%v\n", devModeBefore, devModePresent)
 
+	// Row 2: privilege removed, Developer Mode left exactly as this runner
+	// already has it.
+	row2Want := uint32(windows.IO_REPARSE_TAG_SYMLINK)
+	if devModePresent && devModeBefore == 0 {
+		row2Want = windows.IO_REPARSE_TAG_MOUNT_POINT
+	}
+	assertWatchFlavour(t, "row2", "wsrc-row2", row2Want)
+
+	// Row 3: ALSO turn Developer Mode off, matching internal/winspike's
+	// devmode_test.go technique exactly (registry write, deferred restore —
+	// safe here because this runner is elevated, ephemeral, and no other
+	// job depends on the value). If this process cannot write the key (not
+	// elevated), row 3 is simply not reachable here — report that plainly
+	// rather than failing on an environment this task cannot control.
+	if !devModePresent {
+		fmt.Println("DEGRADED|devmode_toggle|skipped|reason=AllowDevelopmentWithoutDevLicense absent")
+	} else if err := writeDevMode(0); err != nil {
+		fmt.Printf("DEGRADED|devmode_toggle|skipped|reason=%v\n", err)
+	} else {
+		defer func() {
+			restoreErr := writeDevMode(devModeBefore)
+			fmt.Printf("DEGRADED|devmode_restored|value=%d|err=%v\n", devModeBefore, restoreErr)
+		}()
+		now, _ := readDevMode()
+		fmt.Printf("DEGRADED|devmode_toggle|ok|value=%d\n", now)
+		// Row 3: privilege AND Developer Mode both unavailable — the ONLY
+		// state the ADR's table says forces the junction fallback.
+		assertWatchFlavour(t, "row3", "wsrc-row3", windows.IO_REPARSE_TAG_MOUNT_POINT)
+	}
+
+	// One more Delete, on whatever assertWatchFlavour's row2 case published
+	// (always created regardless of which rows ran), so Delete is proven a
+	// second time after a watch — not just before one.
+	if err := Delete("", "pub-after-wsrc-row2"); err != nil {
+		t.Fatalf("Delete after a watch failed with the link privilege revoked: %v", err)
+	}
+	fmt.Println("DEGRADED|final_delete|ok")
+}
+
+// assertWatchFlavour runs Watch(name, a fresh source directory) and asserts
+// the resulting link carries wantTag, printing a DEGRADED|watch|... marker
+// either way. A successful watch must never have cost publish-only
+// operation anything, so it re-proves Publish immediately afterward — this
+// is "watch failure does not disable publish-only workflows" run in
+// reverse (a watch SUCCESS must not disable it either).
+func assertWatchFlavour(t *testing.T, label, name string, wantTag uint32) {
+	t.Helper()
 	source := t.TempDir()
 	if err := os.WriteFile(filepath.Join(source, "index.html"), []byte("<h1>src</h1>"), 0o644); err != nil {
-		t.Fatalf("test setup: %v", err)
+		t.Fatalf("[%s] test setup: %v", label, err)
 	}
-	link, watchErr := Watch("", "wsrc", source)
-	if watchErr == nil {
-		rfs, openErr := openRootedFS(false)
-		if openErr != nil {
-			t.Fatalf("openRootedFS to classify the new link: %v", openErr)
-		}
-		tag, tagErr := readLinkTagAt(int(rfs.root.Fd()), "wsrc")
-		rfs.close()
-		fmt.Printf("DEGRADED|watch|outcome=succeeded|link=%s|flavour_tag=0x%08X|tagErr=%v\n", link, tag, tagErr)
-		if tagErr != nil || tag != windows.IO_REPARSE_TAG_MOUNT_POINT {
-			t.Fatalf("watch succeeded with the symlink privilege genuinely revoked, but the link is NOT a junction (tag=0x%08X, err=%v) — a real directory symbolic link should be impossible in this state", tag, tagErr)
-		}
-		// A successful watch must not have cost publish-only operation
-		// anything: prove it again, after the watch.
-		if _, err := Publish("", "pub2", map[string][]byte{"index.html": []byte("<p>hi</p>")}); err != nil {
-			t.Fatalf("Publish after a successful watch failed: %v", err)
-		}
-		fmt.Println("DEGRADED|publish_after_watch|ok")
-	} else {
+	link, watchErr := Watch("", name, source)
+	if watchErr != nil {
 		msg := watchErr.Error()
-		fmt.Printf("DEGRADED|watch|outcome=failed|err=%s\n", msg)
+		fmt.Printf("DEGRADED|watch|label=%s|outcome=failed|err=%s\n", label, msg)
 		lower := strings.ToLower(msg)
 		if !strings.Contains(lower, "developer mode") {
-			t.Fatalf("watch failure message does not name Developer Mode as remediation: %q", msg)
+			t.Fatalf("[%s] watch failure message does not name Developer Mode as remediation: %q", label, msg)
 		}
 		if strings.Contains(lower, "elevated is not") || strings.Contains(lower, "not the recommended fix") || strings.Contains(lower, "do not run") {
 			// explicitly de-prioritizes elevation — good.
 		} else if strings.Contains(lower, "elevat") {
-			t.Fatalf("watch failure message mentions elevation without clearly de-prioritizing it as the default fix: %q", msg)
+			t.Fatalf("[%s] watch failure message mentions elevation without clearly de-prioritizing it as the default fix: %q", label, msg)
 		}
-		// Watch failure must never degrade publish-only operation.
-		if _, err := Publish("", "pub2", map[string][]byte{"index.html": []byte("<p>hi</p>")}); err != nil {
-			t.Fatalf("Publish after a FAILED watch must still work: %v", err)
+		if _, err := Publish("", "pub-after-"+name, map[string][]byte{"index.html": []byte("<p>hi</p>")}); err != nil {
+			t.Fatalf("[%s] Publish after a FAILED watch must still work: %v", label, err)
 		}
-		fmt.Println("DEGRADED|publish_after_failed_watch|ok")
+		fmt.Printf("DEGRADED|publish_after_watch|label=%s|ok\n", label)
+		return
 	}
 
-	if err := Delete("", "pub2"); err != nil {
-		t.Fatalf("Delete of the second artifact failed with the link privilege revoked: %v", err)
+	rfs, openErr := openRootedFS(false)
+	if openErr != nil {
+		t.Fatalf("[%s] openRootedFS to classify the new link: %v", label, openErr)
 	}
-	fmt.Println("DEGRADED|final_delete|ok")
+	tag, tagErr := readLinkTagAt(int(rfs.root.Fd()), name)
+	rfs.close()
+	fmt.Printf("DEGRADED|watch|label=%s|outcome=succeeded|link=%s|flavour_tag=0x%08X|tagErr=%v\n", label, link, tag, tagErr)
+	if tagErr != nil || tag != wantTag {
+		t.Fatalf("[%s] watch succeeded but produced tag 0x%08X (err=%v), want 0x%08X", label, tag, tagErr, wantTag)
+	}
+	if _, err := Publish("", "pub-after-"+name, map[string][]byte{"index.html": []byte("<p>hi</p>")}); err != nil {
+		t.Fatalf("[%s] Publish after a successful watch failed: %v", label, err)
+	}
+	fmt.Printf("DEGRADED|publish_after_watch|label=%s|ok\n", label)
+}
+
+// readDevMode/writeDevMode are a direct port of
+// internal/winspike/devmode_test.go's identically-named functions: the same
+// registry key, the same safety reasoning (elevated, ephemeral CI runner;
+// always restored). Duplicated rather than imported because internal/store
+// must not depend on internal/winspike (Phase 1 spike scaffolding, slated
+// for deletion).
+const (
+	appModelUnlockKey = `SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock`
+	devModeValue      = "AllowDevelopmentWithoutDevLicense"
+)
+
+func readDevMode() (uint32, bool) {
+	k, err := registry.OpenKey(registry.LOCAL_MACHINE, appModelUnlockKey, registry.QUERY_VALUE)
+	if err != nil {
+		return 0, false
+	}
+	defer k.Close()
+	v, _, err := k.GetIntegerValue(devModeValue)
+	if err != nil {
+		return 0, false
+	}
+	return uint32(v), true
+}
+
+func writeDevMode(v uint32) error {
+	k, err := registry.OpenKey(registry.LOCAL_MACHINE, appModelUnlockKey, registry.SET_VALUE)
+	if err != nil {
+		return err
+	}
+	defer k.Close()
+	return k.SetDWordValue(devModeValue, v)
 }
