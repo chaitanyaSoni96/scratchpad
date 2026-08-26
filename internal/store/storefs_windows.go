@@ -288,9 +288,25 @@ func openDirAt(parent int, name string) (int, error) { return openRealDirAt(pare
 // Watch's same-target idempotence branch (store.go) hang off the right
 // status instead of a mechanical errors.Is(err, unix.EEXIST) port that would
 // turn every repeat `watch` into a hard error.
+//
+// FILE_OPEN_REPARSE_POINT (M3, win32_windows.go's noFollowAttrs comment):
+// this is called both directly (Publish's directory claim) and through
+// symlinkAt (a watch link's name claim). Pre-existing compensating control,
+// per caller:
+//   - Publish: caught one line later by openDirAt's own strict open
+//     (store.go), which fails and writes no content if a traversed claim
+//     landed on a driver-serviced reparse target — the residue is an empty
+//     directory at the driver's target, cleaned up by Publish's rollback
+//     removing the attacker's link, not that directory.
+//   - symlinkAt: its own post-claim reopen (link_windows.go) already passes
+//     FILE_OPEN_REPARSE_POINT (a FILE_OPEN, not a create disposition, so it
+//     was never in scope for this finding) and so never traverses through to
+//     a driver's target either — it opens whatever is actually at the name.
+//     Both callers therefore had a real backstop; this flag closes the gap
+//     at its source instead of relying on either one.
 func mkdirClaim(parent int, name string) error {
 	h, err := ntOpenAt(windows.Handle(parent), name, dirReadAccess, windows.FILE_CREATE,
-		windows.FILE_DIRECTORY_FILE, noFollowAttrs, windows.FILE_ATTRIBUTE_NORMAL)
+		windows.FILE_DIRECTORY_FILE|windows.FILE_OPEN_REPARSE_POINT, noFollowAttrs, windows.FILE_ATTRIBUTE_NORMAL)
 	if err != nil {
 		return translateClaim("mkdir", err)
 	}
@@ -713,9 +729,17 @@ func mkdirsAt(root int, segs []string) (int, error) {
 // mkdirsAt into existence first, and writes data through the handle it
 // created — R15's "documents are never served through os.Open" applies
 // symmetrically to writes: FILE_CREATE|FILE_NON_DIRECTORY_FILE|
-// OBJ_DONT_REPARSE means a pre-planted link at this name cannot capture the
-// write (it is refused, translated to errExistsReparse, never silently
-// followed).
+// FILE_OPEN_REPARSE_POINT|OBJ_DONT_REPARSE means a pre-planted link at this
+// name cannot capture the write (it is refused, translated to
+// errExistsReparse, never silently followed).
+//
+// FILE_OPEN_REPARSE_POINT (M3): this site has NO pre-existing compensating
+// control — unlike Publish's directory claim, nothing reopens this write
+// strictly afterward to catch a traversed claim, so before this flag a
+// serviced unknown tag planted at this name (inside a directory this
+// package just created empty, e.g. by mkdirsAt above) could have captured
+// `data` as an arbitrary file write at the driver's target. This was the one
+// real hole M3 found, not defence in depth.
 func writeFileAt(root int, segs []string, data []byte) error {
 	parent, err := mkdirsAt(root, segs[:len(segs)-1])
 	if err != nil {
@@ -724,7 +748,7 @@ func writeFileAt(root int, segs []string, data []byte) error {
 	defer closeFD(parent)
 	name := segs[len(segs)-1]
 	h, err := ntOpenAt(windows.Handle(parent), name, windows.FILE_GENERIC_WRITE, windows.FILE_CREATE,
-		windows.FILE_NON_DIRECTORY_FILE, noFollowAttrs, windows.FILE_ATTRIBUTE_NORMAL)
+		windows.FILE_NON_DIRECTORY_FILE|windows.FILE_OPEN_REPARSE_POINT, noFollowAttrs, windows.FILE_ATTRIBUTE_NORMAL)
 	if err != nil {
 		return translateClaim("create file", err)
 	}

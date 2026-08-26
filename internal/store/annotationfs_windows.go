@@ -154,10 +154,19 @@ func resetLockIdentityCacheForTest() {
 // create-or-open a two-step FILE_CREATE-then-FILE_OPEN would otherwise need)
 // <root>\.scratchpad-lock relative to the pinned root handle, and records
 // its identity in the detector above.
+//
+// FILE_OPEN_REPARSE_POINT (M3): this site had NO pre-existing compensating
+// control — a serviced unknown tag planted at lockFileName could have been
+// silently traversed and the rendezvous would end up locking an object
+// outside the store entirely, defeating the annotation lock without any
+// error. checkLockIdentity below (via fileIDOf) only detects the object's
+// identity CHANGING between calls; it never had a way to tell "the object at
+// this name is legitimately inside the store" from "the open just walked
+// through a reparse point to somewhere else" in the first place.
 func openRendezvousLockFile(parent int, rootPath string) (*os.File, error) {
 	h, err := ntOpenAt(windows.Handle(parent), lockFileName,
 		windows.FILE_GENERIC_READ|windows.FILE_GENERIC_WRITE, windows.FILE_OPEN_IF,
-		windows.FILE_NON_DIRECTORY_FILE, noFollowAttrs, windows.FILE_ATTRIBUTE_NORMAL)
+		windows.FILE_NON_DIRECTORY_FILE|windows.FILE_OPEN_REPARSE_POINT, noFollowAttrs, windows.FILE_ATTRIBUTE_NORMAL)
 	if err != nil {
 		return nil, translateOpen("open annotation lock file", err)
 	}
@@ -241,12 +250,17 @@ func unlockRendezvous(a *annotationFS) error {
 // openLockFileAt creates or opens name (a per-document lock file) relative
 // to parent, via the strict open's disposition (FILE_OPEN_IF) so a lock file
 // the store creates itself is never silently redirected by a planted link:
-// OBJ_DONT_REPARSE and FILE_NON_DIRECTORY_FILE together refuse a reparse
-// point or a directory at this name outright rather than transparently
-// opening through it.
+// OBJ_DONT_REPARSE, FILE_OPEN_REPARSE_POINT and FILE_NON_DIRECTORY_FILE
+// together refuse a reparse point or a directory at this name outright
+// rather than transparently opening through it.
+//
+// FILE_OPEN_REPARSE_POINT (M3): this site had NO pre-existing compensating
+// control, same shape as openRendezvousLockFile above — a serviced unknown
+// tag at a document's lock-file name would previously have been traversed,
+// silently defeating that document's lock rather than refusing the open.
 func openLockFileAt(parent int, name string) (*os.File, error) {
 	h, err := ntOpenAt(windows.Handle(parent), name, windows.FILE_GENERIC_READ|windows.FILE_GENERIC_WRITE,
-		windows.FILE_OPEN_IF, windows.FILE_NON_DIRECTORY_FILE, noFollowAttrs, windows.FILE_ATTRIBUTE_NORMAL)
+		windows.FILE_OPEN_IF, windows.FILE_NON_DIRECTORY_FILE|windows.FILE_OPEN_REPARSE_POINT, noFollowAttrs, windows.FILE_ATTRIBUTE_NORMAL)
 	if err != nil {
 		return nil, translateOpen("open document lock file", err)
 	}
@@ -533,8 +547,13 @@ func atomicWriteFileAt(parent int, name string, data []byte) error {
 		if err != nil {
 			return err
 		}
+		// FILE_OPEN_REPARSE_POINT (M3): pre-existing compensating control —
+		// tmp is an unguessable random name (newAnnotationTempName), so an
+		// attacker cannot plant a reparse point at it in advance; the flag is
+		// added for consistency with the rest of the package's create
+		// dispositions, not because this site was reachable.
 		h, err = ntOpenAt(windows.Handle(parent), tmp, windows.FILE_GENERIC_WRITE|windows.DELETE,
-			windows.FILE_CREATE, windows.FILE_NON_DIRECTORY_FILE, noFollowAttrs, windows.FILE_ATTRIBUTE_NORMAL)
+			windows.FILE_CREATE, windows.FILE_NON_DIRECTORY_FILE|windows.FILE_OPEN_REPARSE_POINT, noFollowAttrs, windows.FILE_ATTRIBUTE_NORMAL)
 		if !isNameCollision(err) {
 			break
 		}

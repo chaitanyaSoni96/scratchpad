@@ -97,6 +97,21 @@ const (
 // INTERMEDIATE component before a handle even exists (M1.intermediate); the
 // containment primitive is the strict open (openStrictAt below), which reads
 // the tag from the handle regardless of what OBJ_DONT_REPARSE did.
+//
+// The strict-open discipline covers CREATE dispositions too, not only
+// FILE_OPEN: every FILE_CREATE/FILE_OPEN_IF in this package (mkdirClaim,
+// writeFileAt, atomicWriteFileAt's temp, the two lock-file opens) passes
+// windows.FILE_OPEN_REPARSE_POINT in CreateOptions alongside noFollowAttrs,
+// for the same reason A5.obj_dont_reparse_inert_for_unknown_tags forced it
+// onto openStrictAt: OBJ_DONT_REPARSE does nothing for a non-Microsoft tag on
+// a machine with a filter driver servicing it (WCIFS, ProjFS, a vendor
+// filter), so without the flag a claim or an open-or-create could be
+// serviced and land on the driver's target instead of colliding/failing at
+// this name. There is no open-then-classify step for a create the way
+// openStrictAt has one for FILE_OPEN — FILE_OPEN_REPARSE_POINT is the whole
+// fix here: with it, an existing reparse point at the name collides
+// (STATUS_OBJECT_NAME_COLLISION for FILE_CREATE) or is opened as itself,
+// never traversed through.
 const noFollowAttrs = windows.OBJ_CASE_INSENSITIVE | windows.OBJ_DONT_REPARSE
 
 // ---------------------------------------------------------------------------
