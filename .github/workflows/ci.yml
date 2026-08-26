@@ -172,9 +172,26 @@ jobs:
           } else {
             Write-Host "symlink-capability skips: 0 (as required)"
           }
+          # The same assertion for 8.3 short-name capability (P6.2/P6.3 F1).
+          # TestShortNameAliasDoesNotBypassVisibility is the only executable
+          # proof that a requester-supplied URL segment cannot address an
+          # ignore-hidden or reserved directory through its 8.3 alias, and it
+          # self-skips when the volume generates no aliases. Hosted runners
+          # generate them today (spike M6.enabled), so a skip here means a
+          # runner-image change has silently retired the test rather than
+          # that the hazard went away -- exactly the failure mode the
+          # symlink assertion above exists to prevent.
+          $shortSkips = @(Select-String -Path $out -SimpleMatch 'SKIP(8dot3-capability)')
+          if ($shortSkips.Count -gt 0) {
+            Write-Host "::error::$($shortSkips.Count) test(s) skipped for missing 8.3 short-name capability - the F1 alias-bypass proof is no longer running on this image:"
+            $shortSkips | ForEach-Object { Write-Host $_.Line }
+            $failed = $true
+          } else {
+            Write-Host "8dot3-capability skips: 0 (as required)"
+          }
           if ($failed -or ($testExit -ne 0)) { exit 1 }
       # P5.6 — retain the full -v suite output so failures on this
-      # allowed-to-fail job stay inspectable after the run log expires.
+      # gating job stay inspectable after the run log expires.
       - name: Upload test log
         if: ${{ always() }}
         uses: actions/upload-artifact@v4
