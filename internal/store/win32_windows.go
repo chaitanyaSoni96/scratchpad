@@ -493,15 +493,26 @@ func (e *winError) Error() string {
 func (e *winError) Unwrap() error { return e.err }
 
 var (
-	errExistsReparse   = fmt.Errorf("scratchpad: name exists as a reparse point: %w", errExists)
-	errDeletePending   = errors.New("scratchpad: entry is pending deletion")
-	errReparse         = errors.New("scratchpad: reparse point encountered where a real directory entry was required")
-	errNotDir          = errors.New("scratchpad: not a directory")
-	errIsDir           = errors.New("scratchpad: is a directory")
-	errSharing         = errors.New("scratchpad: sharing violation (retryable)")
-	errLockViolation   = errors.New("scratchpad: lock violation (retryable)")
-	errNotEmpty        = errors.New("scratchpad: directory not empty")
-	errNoLinkPrivilege = errors.New("scratchpad: creating a link requires Developer Mode (Settings > System > For developers) or elevated privilege")
+	errExistsReparse = fmt.Errorf("scratchpad: name exists as a reparse point: %w", errExists)
+	errDeletePending = errors.New("scratchpad: entry is pending deletion")
+	errReparse       = errors.New("scratchpad: reparse point encountered where a real directory entry was required")
+	errNotDir        = errors.New("scratchpad: not a directory")
+	errIsDir         = errors.New("scratchpad: is a directory")
+	errSharing       = errors.New("scratchpad: sharing violation (retryable)")
+	errLockViolation = errors.New("scratchpad: lock violation (retryable)")
+	errNotEmpty      = errors.New("scratchpad: directory not empty")
+	// errNoLinkPrivilege is reached only when BOTH link flavours fail
+	// (symlinkAt already tried a directory symbolic link, then a junction,
+	// before surfacing this): per the ADR §6.6 measured privilege table, a
+	// junction succeeds unprivileged with Developer Mode off, so this is the
+	// rare case where policy blocks reparse-point creation entirely. The
+	// message names Developer Mode as the remediation, never suggests
+	// elevation as the default (running elevated is a workaround of last
+	// resort, not the fix), and states that every other operation is
+	// unaffected — watch is the only thing that needs this privilege.
+	errNoLinkPrivilege = errors.New("scratchpad: could not create a watch link (neither a directory symbolic link nor a junction succeeded); " +
+		"enable Developer Mode (Settings > System > For developers) and retry — running scratchpad elevated is not the recommended fix. " +
+		"publish, list, delete, and notes do not need this privilege and are unaffected")
 )
 
 // ntStatusOf extracts the NTSTATUS an NT call failed with, if err is one.

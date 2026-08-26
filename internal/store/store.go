@@ -834,9 +834,26 @@ func Watch(project, name, target string) (string, error) {
 		if !errors.Is(err, errExists) {
 			return "", err
 		}
+		// ADR §6.6 rule 3: classify the existing entry rather than reporting
+		// one generic "already exists" for every collision shape. A bare real
+		// directory (an interrupted two-step link creation, or an ordinary
+		// published artifact) gets its own message, because Delete now
+		// actually removes it — either as an artifact (removeTreeAt) or, if
+		// it is empty, as recovered residue (rmdirAt) — so "delete it and
+		// retry" is true in both cases. A recognized link pointing elsewhere
+		// and an unrecognized reparse point are told apart too, since only
+		// the former is something `unwatch`/`delete` can clear.
+		rel := strings.TrimPrefix(link[len(root):], string(filepath.Separator))
 		linkTarget, readErr := readlinkAt(parent, name)
-		if readErr != nil || !sameWatchTarget(linkTarget, real) {
-			return "", fmt.Errorf("%q already exists — delete it in the web UI or pick a different name", strings.TrimPrefix(link[len(root):], string(filepath.Separator)))
+		switch {
+		case readErr == nil && sameWatchTarget(linkTarget, real):
+			// idempotent no-op: already watching exactly this target.
+		case readErr == nil:
+			return "", fmt.Errorf("%q already exists — it watches a different folder (%s); unwatch it first, or pick a different name", rel, linkTarget)
+		case isNotALinkAt(readErr):
+			return "", fmt.Errorf("%q already exists as a directory, not a watch link — an interrupted watch may have left it behind, or it is a published artifact; delete it (\"scratchpad delete %s\") and retry, or pick a different name", rel, rel)
+		default:
+			return "", fmt.Errorf("%q already exists as a reparse point scratchpad does not recognize as a watch link — remove it manually and retry, or pick a different name", rel)
 		}
 	}
 	if !hasHTML(real) {
@@ -1071,6 +1088,21 @@ func Delete(project, name string) error {
 			hasHTML, htmlErr := dirHasHTMLFD(artifactFD)
 			closeFD(artifactFD)
 			if htmlErr != nil || !hasHTML {
+				// ADR §6.6 rule 3: a real (non-artifact, non-link) directory
+				// here is either an ordinary empty project folder or the
+				// residue of an interrupted two-step watch-link creation —
+				// the two are indistinguishable and, per the ADR, treated
+				// alike, because removing an EMPTY directory can never
+				// destroy content. rmdirAt refuses anything non-empty
+				// (errNotEmpty) and never follows a link, so this can only
+				// ever clear a name that carried nothing. Deliberately not
+				// offered by Unwatch (agent-reachable) — only Delete
+				// (user-only) gains this recovery power, preserving the
+				// create-only-for-agents asymmetry the verb split exists for.
+				if rmErr := rmdirAt(parent, name); rmErr == nil {
+					pruneAt(rfs, segs)
+					return removeNotesFor(annotationGuard, (Artifact{Project: project, Name: name}).RelPath())
+				}
 				err = fmt.Errorf("could not verify %q is an artifact", name)
 			}
 		}

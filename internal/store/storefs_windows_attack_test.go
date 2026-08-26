@@ -426,7 +426,14 @@ func TestSaveNotesDestinationReplacedWithLinkNeverEscapes(t *testing.T) {
 // in code instead of only in the ADR, and a future P4.3 change that closes it
 // will make the "still stuck" assertion below fail LOUDLY, prompting an
 // update here rather than silently drifting out of sync with the fix.
-func TestTwoStepCrashResidueCurrentlyLeavesNameStuck(t *testing.T) {
+// TestTwoStepCrashResidueRecoversViaDelete is
+// TestTwoStepCrashResidueCurrentlyLeavesNameStuck, updated (not silently
+// deleted — see that test's own former comment, which asked for exactly
+// this) now that P4.3 has landed ADR §6.6 rule 3's widening in
+// internal/store's shared Delete: an empty, non-artifact, non-link
+// directory is real recovery for the residue a crash between symlinkAt's
+// mkdirClaim and its FSCTL_SET_REPARSE_POINT leaves behind.
+func TestTwoStepCrashResidueRecoversViaDelete(t *testing.T) {
 	root := testRoot(t)
 	// Simulate the crash: the name claim (step 1) succeeded, but the reparse
 	// tag (step 2) was never applied — exactly what a process kill between
@@ -454,18 +461,28 @@ func TestTwoStepCrashResidueCurrentlyLeavesNameStuck(t *testing.T) {
 		t.Fatalf("residue = %v, %v, want an ordinary empty directory", entries, err)
 	}
 
-	// A7.two_step_recovery, current state: no existing verb clears it.
+	// Re-running watch over the residue still fails: it is not a link, so
+	// symlinkAt's own idempotence check (readlinkAt failing with
+	// isNotALinkAt) correctly refuses to adopt it silently.
 	if _, err := Watch("", "wedged", t.TempDir()); err == nil {
 		t.Fatal("re-running watch over the residue unexpectedly succeeded")
 	}
-	if err := Delete("", "wedged"); err == nil {
-		t.Fatal("Delete unexpectedly removed the residue — if this now passes, P4.3's rule-3 widening has landed in internal/store and this test (and its doc comment) need updating, not silent deletion")
-	}
+	// Unwatch deliberately does NOT gain rule 3's recovery power — it stays
+	// link-only, preserving the create-only-for-agents asymmetry (Unwatch is
+	// agent-reachable; Delete is user-only).
 	if err := Unwatch("", "wedged"); err == nil {
-		t.Fatal("Unwatch unexpectedly removed the residue — see the comment on the Delete assertion above; same update is owed here")
+		t.Fatal("Unwatch unexpectedly removed the residue — that recovery power belongs to Delete only")
 	}
 	if _, err := os.Stat(filepath.Join(root, "wedged")); err != nil {
-		t.Fatalf("the wedged name must still be exactly where it was (benign for containment, a usability trap): %v", err)
+		t.Fatalf("the wedged name must still be there after the refused unwatch: %v", err)
+	}
+	// Delete DOES recover it now (rule 3): an empty, non-artifact, non-link
+	// directory is exactly what rmdirAt is safe to remove.
+	if err := Delete("", "wedged"); err != nil {
+		t.Fatalf("Delete must remove the empty residue (ADR §6.6 rule 3): %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "wedged")); !os.IsNotExist(err) {
+		t.Fatalf("residue must be gone after Delete, stat err = %v", err)
 	}
 }
 

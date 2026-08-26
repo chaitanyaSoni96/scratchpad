@@ -269,6 +269,60 @@ func TestUnwatch(t *testing.T) {
 	}
 }
 
+// TestDeleteRemovesEmptyNonArtifactDirectory is the shared (RW19) regression
+// test for ADR §6.6 rule 3: Delete is widened to remove an empty,
+// non-artifact, non-link directory. On Windows this is what turns "delete it
+// and retry" into a true recovery instruction for the residue an interrupted
+// two-step watch-link creation can leave behind (a crash between the
+// FILE_CREATE name claim and the FSCTL that turns it into a link — see
+// TestTwoStepCrashResidueRecoversViaDelete, storefs_windows_attack_test.go).
+// rmdirAt refuses anything non-empty on every platform (ENOTEMPTY /
+// STATUS_DIRECTORY_NOT_EMPTY) and never follows a link, so the same rule is
+// safe on Linux too, and is tested here unconditionally rather than only
+// behind a Windows build tag.
+func TestDeleteRemovesEmptyNonArtifactDirectory(t *testing.T) {
+	root := testRoot(t)
+	if err := os.Mkdir(filepath.Join(root, "empty"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := Delete("", "empty"); err != nil {
+		t.Fatalf("Delete on an empty non-artifact directory = %v, want nil", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "empty")); !os.IsNotExist(err) {
+		t.Fatalf("directory must be gone after Delete, stat err = %v", err)
+	}
+
+	// A non-empty non-artifact directory (an ordinary project folder holding
+	// real content) must never be silently removable through this path —
+	// only a genuinely EMPTY directory ever qualifies, so this can never
+	// become a way to destroy a populated project tree.
+	if err := os.MkdirAll(filepath.Join(root, "nonempty", "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "nonempty", "note.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := Delete("", "nonempty"); err == nil {
+		t.Fatal("Delete unexpectedly removed a non-empty non-artifact directory")
+	}
+	if _, err := os.Stat(filepath.Join(root, "nonempty", "note.txt")); err != nil {
+		t.Fatalf("content must survive a refused delete: %v", err)
+	}
+
+	// Unwatch deliberately does NOT gain this power — it stays link-only, so
+	// the create-only-for-agents asymmetry (Unwatch is agent-reachable,
+	// Delete is user-only) is preserved.
+	if err := os.Mkdir(filepath.Join(root, "bareagain"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := Unwatch("", "bareagain"); err == nil {
+		t.Fatal("Unwatch unexpectedly removed a bare non-link directory — that recovery power belongs to Delete only")
+	}
+	if _, err := os.Stat(filepath.Join(root, "bareagain")); err != nil {
+		t.Fatalf("directory must survive a refused unwatch: %v", err)
+	}
+}
+
 func TestListAndResolvePath(t *testing.T) {
 	root := testRoot(t)
 

@@ -3,6 +3,7 @@
 package store
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -237,6 +238,17 @@ func sameWatchTarget(existing, abs string) bool {
 	}
 	return strings.EqualFold(existing, abs)
 }
+
+// isNotALinkAt reports whether err (from readlinkAt) means "name exists but
+// is not a reparse point at all" — FSCTL_GET_REPARSE_POINT on a real
+// directory fails with ERROR_NOT_A_REPARSE_POINT, raw and untranslated
+// (readLinkHandle returns DeviceIoControl's error as-is). Watch's collision
+// branch (store.go) uses this to give a bare real directory (interrupted
+// two-step creation residue, or an ordinary published artifact) its own
+// remediation message, distinct from "a link pointing elsewhere" and from
+// "a reparse point on no allowlisted tag" (readlinkAt's own tag/relative/
+// volume-mount-point refusals, which fall through to the generic branch).
+func isNotALinkAt(err error) bool { return errors.Is(err, windows.ERROR_NOT_A_REPARSE_POINT) }
 
 // IsLinkInfo/IsLinkEntry are the shared, read-only-listing classification
 // helpers (List, Watches, WatchLinkFor's exported surface, plus

@@ -111,6 +111,15 @@ inside a watched source tree is never browsed or listed.
 `unwatch` removes only the link. The source folder is never modified, for both
 link kinds.
 
+**A name that "already exists" but was never a link.** `watch` claims the
+name and applies the reparse point in two steps; a crash between them can
+leave an ordinary empty directory behind. A later `watch` of that name fails
+and tells you it is a directory, not a watch link — `scratchpad delete
+<name>` clears it (an empty leftover is always safe to remove) and you can
+retry. `unwatch` deliberately does not do this — only `delete` recovers a
+bare directory, so the distinction between "remove a link" and "remove
+content" stays with the command a human runs.
+
 ### If watch fails
 
 Watch failure never affects anything else. `publish`, `list`, `delete`, `notes`

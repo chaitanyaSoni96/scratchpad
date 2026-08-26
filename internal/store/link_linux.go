@@ -46,6 +46,13 @@ func unlinkAt(parent int, name string) error {
 // byte-exact string equality, unchanged from before this was given a name.
 func sameWatchTarget(existing, abs string) bool { return existing == abs }
 
+// isNotALinkAt reports whether err (from readlinkAt) means "name exists but
+// is not a symlink at all" — readlinkat(2) on a real directory or regular
+// file fails EINVAL. Watch's collision branch (store.go) uses this to give a
+// bare real directory its own remediation message instead of the generic
+// "already exists".
+func isNotALinkAt(err error) bool { return errors.Is(err, unix.EINVAL) }
+
 // isLinkAt classifies name, relative to the open directory parent, without
 // following it: err is the stat failure (e.g. the entry does not exist);
 // isLink is meaningful only when err == nil. This backs Unwatch and Delete's
