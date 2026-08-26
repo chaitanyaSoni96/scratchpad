@@ -95,17 +95,19 @@ jobs:
   #      (e.g. every package failed to build), so "zero skips" can never
   #      be satisfied by a suite that never ran.
   #
-  # The code does not compile on Windows yet, so this job is EXPECTED to
-  # fail until the Windows store backend exists. continue-on-error keeps
-  # the workflow green for now; P3.11 / Phase 4 removes this allowance
-  # and makes the job required (note: "required" also needs a branch
-  # protection rule on main naming this check — see EXECUTION.md).
+  # The allowance this job used to carry is GONE. P3.11 and Phase 4 landed
+  # the Windows store backend, and run 32970247103 recorded this job green
+  # with zero capability skips, which was the stated exit condition. A red
+  # here is now a real regression and fails the workflow.
+  #
+  # Failing the workflow is not the same as blocking a merge: that also
+  # needs a branch protection rule on main naming this check, which is an
+  # operator action nobody in this chain can take — see EXECUTION.md.
   # ------------------------------------------------------------------
   windows-symlink-required:
-    name: Windows amd64 native — full suite, symlink-capable (windows-2025) [allowed to fail until P3.11/P4]
+    name: Windows amd64 native — full suite, symlink-capable (windows-2025)
     runs-on: windows-2025
     timeout-minutes: 30
-    continue-on-error: true # expected failure until the Windows backend lands; P3.11 / P4 removes this allowance.
     env:
       CGO_ENABLED: 0
     steps:
@@ -193,15 +195,14 @@ jobs:
   # to a counted, asserted SKIP in this job — never silently erase them
   # from the required job above.
   #
-  # The code does not compile on Windows yet, so this job is EXPECTED to
-  # fail. continue-on-error keeps the workflow green for now; P4.4
-  # removes this allowance.
+  # The allowance this job used to carry is GONE. P4.4 landed, and run
+  # 32970247103 recorded this job green, so a red here is now a real
+  # regression in the degraded (no-symlink) path and fails the workflow.
   # ------------------------------------------------------------------
   windows-degraded-test:
-    name: Windows amd64 native — degraded mode, no symlinks (windows-2025) [allowed to fail until P4.4]
+    name: Windows amd64 native — degraded mode, no symlinks (windows-2025)
     runs-on: windows-2025
     timeout-minutes: 30
-    continue-on-error: true # expected failure until the Windows backend lands; P4.4 removes this allowance.
     env:
       CGO_ENABLED: 0
       SCRATCHPAD_TEST_SYMLINKS: "0" # deliberate: force the no-capability path for the whole suite

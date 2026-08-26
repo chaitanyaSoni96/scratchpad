@@ -2159,6 +2159,40 @@ carried since P3.11/P3.12's own report): "required" has no repository-level
 effect without a branch protection rule naming these checks, which is
 outside `internal/store`'s or this task's evidence.
 
+#### Both allowances removed (follow-through)
+
+Acted on. `windows-symlink-required` and `windows-degraded-test` no longer
+carry `continue-on-error`, and the `[allowed to fail until ...]` suffixes are
+gone from their job names. A red in either now fails the workflow.
+
+The trigger was P6.2's residual-register item 1, which rates the un-gated
+Windows corpus **High** and observes that P0.5 F1/F2 were closed
+*specifically* as the precondition for this removal — a precondition met and
+then not acted on. The evidence relied on is run `32970247103`, where both
+jobs concluded `success` on their own (not merely masked by the allowance).
+
+Two honesty notes carried forward rather than quietly dropped:
+
+- The pass counts quoted in the recommendation above (313 / 286) are
+  **whole-suite** figures that include `internal/winspike`; P4.7 corrected
+  this. The product-suite figures are the ones to cite. The recommendation's
+  *conclusion* is unaffected — zero `--- FAIL` either way — but the numbers
+  should not be re-quoted as product-suite counts.
+- The recommendation asked for one more clean-push re-run before flipping the
+  flag. That is now what the flip itself produces: the next run on this branch
+  is the confirming one, and if either job is red the workflow says so instead
+  of hiding it. This was done while the GitHub Actions incident of
+  2026-08-26 was still draining its queue, so the confirming conclusion
+  arrives late.
+
+`stress-windows` **keeps** its allowance deliberately: its stated exit
+condition (a P6.1 flake baseline for the slower, newer Windows repetition
+campaign) is a different claim and is not yet established.
+
+F12 is untouched and still owed: failing the workflow is not the same as
+blocking a merge. `main` has no branch protection rule, so no check on it is
+enforced at the repository level. That remains an operator action.
+
 ### Bugs found
 
 1. **`errNoLinkPrivilege`'s message contradicted `docs/windows.md`'s own
