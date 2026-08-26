@@ -81,27 +81,27 @@ phase. **Gate review:** the paired model from the other family.
 **Goal:** prove a race-resistant Windows design before production implementation.
 **Gate:** accepted ADR approved by one Claude and one GPT reviewer.
 
-- [ ] **P1.1 [CO] Write threat model.** Enumerate attacker-controlled paths,
+- [x] **P1.1 [CO] Write threat model.** Enumerate attacker-controlled paths,
   rename races, reparse tags, junctions, symlinks, mount points, UNC paths,
   alternate data streams, case folding, device names, and sharing violations.
-- [ ] **P1.2 [CXH] Prototype rooted traversal.** In an isolated spike or test-only
+- [x] **P1.2 [CXH] Prototype rooted traversal.** In an isolated spike or test-only
   package, open a root and child segments without following reparse points,
   retain stable identity, and demonstrate safe create/read/delete primitives.
-- [ ] **P1.3 [CXH] Prototype atomic replacement.** Demonstrate annotation temp
+- [x] **P1.3 [CXH] Prototype atomic replacement.** Demonstrate annotation temp
   creation and atomic replacement under realistic Windows sharing modes. Define
   retryable error codes, backoff, total bound, and durability expectations.
-- [ ] **P1.4 [CS] Probe link options.** Test unprivileged directory symlinks under
+- [x] **P1.4 [CS] Probe link options.** Test unprivileged directory symlinks under
   Developer Mode and without it. Evaluate junctions only as a documented
   fallback; identify reparse tags and target-resolution behavior.
-- [ ] **P1.5 [CXH] Build adversarial spike tests.** Replace an ancestor or target
+- [x] **P1.5 [CXH] Build adversarial spike tests.** Replace an ancestor or target
   between validation and use; assert writes/deletes cannot escape. Include
   nested reparse points and root replacement.
-- [ ] **P1.6 [CO] Author ADR.** Record chosen APIs, containment proof, supported
+- [x] **P1.6 [CO] Author ADR.** Record chosen APIs, containment proof, supported
   filesystems/reparse tags, link policy, fallback behavior, rejected approaches,
   and remaining risk under `.agents/ADRs/`.
-- [ ] **P1.7 [CXH review] Red-team ADR and prototype.** Try to invalidate path
+- [x] **P1.7 [CXH review] Red-team ADR and prototype.** Try to invalidate path
   comparison, identity, and race assumptions. Report findings before approval.
-- [ ] **P1.8 [CO review] Accept or stop.** If no credible race-resistant strategy
+- [x] **P1.8 [CO review] Accept or stop.** If no credible race-resistant strategy
   exists, stop and rescope instead of shipping a path-based backend.
 
 **Exit evidence:** accepted ADR, passing spike tests on NTFS, measured behavior
@@ -115,24 +115,24 @@ Claude Opus 5 from the other family when available.
 **Goal:** make shared domain code compile on Windows while preserving Linux
 behavior. **Gate:** Linux suite passes and both Windows commands cross-compile.
 
-- [ ] **P2.1 [CO] Confirm minimal boundary.** Map each direct Unix operation in
+- [x] **P2.1 [CO] Confirm minimal boundary.** Map each direct Unix operation in
   `store.go`, `annotations.go`, and `watch.go` to the narrowest platform helper.
   Reject broad filesystem interfaces unless the spike proves they are needed.
-- [ ] **P2.2 [CX] Split directory identity.** Move Unix `Stat_t` identity to
+- [x] **P2.2 [CX] Split directory identity.** Move Unix `Stat_t` identity to
   `identity_unix.go`; add the Windows declaration or stub selected by the ADR.
   Keep reconciliation and debounce shared.
-- [ ] **P2.3 [CS] Split link mechanics.** Move create/read/classify/remove link
+- [x] **P2.3 [CS] Split link mechanics.** Move create/read/classify/remove link
   mechanisms into OS files while retaining validation, idempotence policy, and
   user-facing errors in shared code.
-- [ ] **P2.4 [CX] Remove shared Unix imports.** Eliminate direct `x/sys/unix` and
+- [x] **P2.4 [CX] Remove shared Unix imports.** Eliminate direct `x/sys/unix` and
   `syscall.Stat_t` references from untagged files. Keep Linux implementations
   mechanically equivalent.
 - [x] **P2.5 [CS] Add portable name validation.** Implement accepted reserved-name
   and trailing-dot/space rules with table-driven tests on every OS. Document the
   small compatibility change.
-- [ ] **P2.6 [CX] Make cross-build required.** Remove temporary known-failure
+- [x] **P2.6 [CX] Make cross-build required.** Remove temporary known-failure
   allowances once both commands compile.
-- [ ] **P2.7 [CO review] Boundary review.** Verify domain policy was not duplicated
+- [x] **P2.7 [CO review] Boundary review.** Verify domain policy was not duplicated
   into platform files and security-sensitive mechanism was not made generic.
 
 **Exit evidence:** green Linux tests, green Windows cross-build, shared files

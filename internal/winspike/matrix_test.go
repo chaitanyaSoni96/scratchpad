@@ -276,7 +276,7 @@ func TestSecurityTestMatrixCoverage(t *testing.T) {
 		{"MATRIX.Notes.intermediate_link", Yes,
 			"DEMONSTRATED: MX.notes_intermediate_link.junction / .symlink."},
 		{"MATRIX.Notes.concurrent_revisions", Partial,
-			"MECHANISM DEMONSTRATED: A12.concurrent_writers — 8 writers × 40 replaces, no torn read, no temp residue. " +
+			"MECHANISM DEMONSTRATED: A12.concurrent_writers — 8 writers × 25 replaces, no torn read, no temp residue. " +
 				"The rev guard itself and ErrRevMismatch are internal/store. The Windows-extra the threat model asks for " +
 				"(Delete racing SaveNotes without a store-root directory lock, RR6) needs the lock-FILE substitute chosen " +
 				"in the ADR (M14) and is a P3 test."},

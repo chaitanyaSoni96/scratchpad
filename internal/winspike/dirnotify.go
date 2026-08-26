@@ -20,15 +20,23 @@ import (
 // This is not a watcher; it is an INSTRUMENT for one question: did the
 // filesystem see a rename, or did it see a delete followed by a rename?
 //
-// fsnotify cannot answer it — it collapses FILE_ACTION_* into Create/Remove/
-// Rename and coalesces. The kernel's own action codes distinguish the two
-// implementations exactly:
+// WITHDRAWN HYPOTHESIS — read this before trusting the instrument.
 //
-//	atomic replace        -> RENAMED_OLD_NAME(tmp), RENAMED_NEW_NAME(dest)
-//	remove-then-rename    -> REMOVED(dest), RENAMED_OLD_NAME(tmp), RENAMED_NEW_NAME(dest)
+// This comment used to claim the kernel's action codes distinguish the two
+// implementations, so that "no FILE_ACTION_REMOVED naming the destination"
+// was a black-box assertion of atomicity. P13.change_records falsified that
+// on the runner (run 32908643117): a POSIX-semantics rename that REPLACES a
+// destination makes the kernel emit FILE_ACTION_REMOVED for the replaced
+// file as PART OF the atomic rename, so an atomic replace and a deliberate
+// remove-then-rename produce identical record streams.
 //
-// so "no FILE_ACTION_REMOVED naming the destination" is a black-box,
-// deterministic assertion that the destination never left the namespace.
+// The observer is still useful — it detects a 0-byte return, i.e. the
+// ReadDirectoryChangesW overflow condition, and reports it rather than
+// silently truncating, which is the shape internal/watch should copy. But it
+// CANNOT certify atomicity. The guards that actually carry that property are
+// the namespace-removal audit (P13.audit) and the continuous-existence
+// observer (P13.continuous_existence), plus code review — see
+// spike-findings.md §9.6.
 // ---------------------------------------------------------------------------
 
 // DirAction is one FILE_NOTIFY_INFORMATION record.
