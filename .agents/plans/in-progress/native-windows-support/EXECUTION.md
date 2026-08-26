@@ -2184,3 +2184,198 @@ hoc checker resolved every relative markdown link and `#anchor` across
 Pending: `make install-skill` was deliberately not run (writes outside the
 repo); the installed copies of `skill/SKILL.md` are stale until someone runs
 it.
+
+## P3.14 — Implementation Red Team Remediation (M1, M2, M3, RW4, Lows)
+
+Fixes for `reviews/P3.14-implementation-red-team.md`'s three Medium findings,
+the ADR's RW4 row, and four of its seven Low findings. Seven commits.
+
+### M2 — deep artifacts were permanently undeletable (fixed first — reproduced, cross-platform)
+
+`removeTreeAt` (`annotationfs_{linux,windows}.go`) hard-errored past
+`maxArtifactWalkDepth` (64), but nothing bounded artifact *creation* to the
+same depth — `ValidateFilePath` validates each path segment's name but never
+counts them, and `mkdirsAt`/`writeFileAt` walk as deep as told. A publish
+deeper than the bound (a vendored SDK, a `node_modules` tree, a deep
+monorepo path — all legitimate, per the finding) succeeded and then became
+permanently undeletable: `Delete` failed with the depth error every time, no
+partial destruction (the recursion errors on the way down, before any
+removal), and the artifact stayed listed and on disk forever.
+
+Reproduced first, as instructed, with `TestDeleteDeepArtifactTree`
+(`internal/store/store_test.go`): publish a tree 74 directories deep, then
+`Delete` it.
+
+```
+=== RUN   TestDeleteDeepArtifactTree
+    store_test.go:348: Delete must be able to remove what Publish created, got scratchpad: "d" exceeds the maximum artifact tree depth (64)
+--- FAIL: TestDeleteDeepArtifactTree (0.02s)
+```
+
+**Semantics chosen: make removal unbounded, not creation-bounded (the
+review's option 2, not option 1).** The review's own reasoning decided it:
+`removeTreeAt` never follows a reparse point or symlink on either platform
+(a strict/no-follow open on Windows, `AT_SYMLINK_NOFOLLOW` on Linux), so
+unlike `List`/`sizeWalkAt`'s project-tree descent — which needs the bound
+because an unbounded walk over attacker-reachable structure risks a
+symlink/reparse cycle — a no-follow removal carries none of that risk; a
+real directory tree cannot cycle. The bound could therefore only ever wedge
+an artifact the store itself created, never protect anything. Bounding
+creation instead (option 1) was rejected: the finding explicitly names
+`node_modules`/vendored-SDK/deep-monorepo publishes as legitimate reachable
+scenarios, so an artificial publish-time depth limit would reject real use
+rather than fix the actual bug. Dropped the `depth` parameter and hard
+error from `removeTreeAt` on both platforms; `List`'s and `sizeWalkAt`'s
+existing graceful (non-fatal, "just stop counting/discovering") bounds are
+untouched. `TestDeleteDeepArtifactTree` now passes, confirming the store
+can no longer create an artifact it refuses to delete.
+
+### M1 — `symlinkAt`'s post-claim reopen failure left a wedged empty directory
+
+`mkdirClaim` atomically claims the watch-link name; if the immediately
+following reopen (before the reparse tag is applied) failed, nothing cleaned
+up the just-claimed empty directory — ADR §6.6 rule 1's "both failure points
+leave the same wedged empty directory," and P4.3's self-heal test
+(`TestSymlinkAtSelfHealsOnFSCTLFailure`) injects its fault at the FSCTL step
+only, so it never exercised this branch.
+
+Fixed the same way `Publish` rolls back its own post-claim reopen failure
+(`store.go`'s `openDirAt`/`rmdirAt` pair): on reopen failure, `rmdirAt(parent,
+name)` before returning. `rmdirAt` refuses a non-empty directory and never
+follows a link, so the rollback cannot destroy content even if the name was
+substituted in the window.
+
+Added `TestSymlinkAtSelfHealsOnReopenFailure`
+(`watchlink_windows_test.go`), which hits this specific branch via a new
+`"symlink-reopen"` `runStoreOpHook` checkpoint fired between the claim and
+the reopen. The test blocks the reopen with a real competing handle opened
+`FILE_SHARE_READ|FILE_SHARE_DELETE` (deliberately withholding
+`FILE_SHARE_WRITE`), so the reopen's `FILE_GENERIC_WRITE` request genuinely
+collides (`STATUS_SHARING_VIOLATION`) — the "scanner/indexer/Explorer
+holding the new directory" scenario the finding names, not a faked error.
+The rollback's own request (`FILE_READ_ATTRIBUTES|DELETE`) does not collide
+with that same blocker (the blocker explicitly shares both), so the test
+proves the rollback ran while the blocker was still open, with no timing
+race and no privilege manipulation needed. Not run locally (Windows-only,
+no Windows machine in this environment — see the file header); relies on
+the CI gate.
+
+### M3 — six create dispositions relied on `OBJ_DONT_REPARSE` alone
+
+ADR §2.1 established `OBJ_DONT_REPARSE` as necessary but not sufficient —
+`A5.obj_dont_reparse_inert_for_unknown_tags` measured it as a no-op for a
+non-Microsoft tag on a machine with a filter driver servicing it (WCIFS,
+ProjFS, a vendor filter). `openStrictAt` already carries the fix
+(`FILE_OPEN_REPARSE_POINT` plus a tag read from the handle) for `FILE_OPEN`,
+but it was never applied to the package's six `FILE_CREATE`/`FILE_OPEN_IF`
+sites. Added `windows.FILE_OPEN_REPARSE_POINT` to all six (one code change
+covers two rows, since `symlinkAt` reaches its fault through `mkdirClaim`)
+and documented the discipline in `win32_windows.go`'s `noFollowAttrs`
+comment.
+
+Per-site pre-existing compensating control, and whether the gap this
+finding closes was defence in depth or a real hole:
+
+| Site | Compensating control before this fix | Verdict |
+|---|---|---|
+| `mkdirClaim` / `Publish`'s directory claim | `openDirAt`'s own strict open, one line later — fails, writes no content | Defence in depth |
+| `mkdirClaim` / `symlinkAt`'s watch-link claim | `symlinkAt`'s own post-claim reopen already passed `FILE_OPEN_REPARSE_POINT` (a `FILE_OPEN`, out of this finding's scope), so it never traversed either | Defence in depth (not called out as such by the review's impact section, but verified directly) |
+| `writeFileAt` | None — nothing reopens the write strictly afterward | **Real hole**: a serviced unknown tag inside a just-created, still-empty artifact directory could capture the write as an arbitrary file write at the driver's target |
+| `atomicWriteFileAt`'s temp file | None needed — `tmp` is an unguessable random name (`newAnnotationTempName`), not plantable in advance | Defence in depth |
+| `openRendezvousLockFile` | None — `checkLockIdentity` only detects identity *changing* between calls, never "did this open just traverse a reparse point" | **Real hole**: a serviced unknown tag could silently redirect the rendezvous outside the store, defeating the lock without error |
+| `openLockFileAt` | None, same shape as the rendezvous lock | **Real hole**: same silent-redirect defeat, per document |
+
+### ADR RW4 correction
+
+`RW4`'s row said "Mitigated — §7.4" unconditionally. That was false from
+when it was written until `matchName` landed in `e4b84a2` (this branch's
+own P3.13 F-2 fix) — only the `nameEquals` half (the `.annotations` guard)
+had shipped, so `defaultIgnores`' credential-ignore lines (`.env`, `.netrc`,
+`*.pem`, `.ssh/`) stayed case-sensitive and bypassable on Windows in the
+interim. Row now names both halves and records the interim window rather
+than implying continuous coverage. (Per this task's constraints, the ADR was
+touched for this row only.)
+
+### Low findings: fixed vs recorded
+
+Fixed (four, small and self-contained):
+
+- **L1** — `ntOpenAt`'s single-component guard let `"."`/`".."` through
+  (each is syntactically one component); now rejected explicitly, matching
+  Go's own `Deleteat`. Unreachable today (`validateName`/`validateSegment`
+  already reject both), so this closes the primitive's own last-line
+  defence rather than a live path.
+- **L2** — the F11 bound on `ntOpenAt`'s `NTUnicodeString` allowed
+  `nameBytes == 0xFFFE` through, which then made `MaximumLength`'s own
+  `uint16(len(u16)*2)` computation truncate to 0. Rebounded at `0xFFFD`;
+  `MaximumLength` now computed directly as `nameBytes+2`.
+- **L3** — `attrTagInfo`, `fileIDInfoRaw`, `reparseHeader`
+  (`win32_windows.go`) and `identity_windows.go`'s `fileIDInfo` now embed
+  `structs.HostLayout` (Go 1.23+), turning "these offsets match the Windows
+  headers" from a verified-by-inspection convention into a compiler-held
+  promise.
+- **L4** (minimum required) — `identity_windows.go`'s `skipWalkError` used
+  `os.IsNotExist`, the same non-Unwrap-aware predicate that already caused a
+  real bug in this tree (`annotations.go`'s `loadNotesRaw`). Switched to
+  `errors.Is(err, fs.ErrNotExist)`. A concurrently-landed sibling fix
+  (commit `9664a36`, P4.7 review finding P-3) brought
+  `identity_unix.go`'s `skipWalkError` to the same predicate and added
+  `fs.ErrPermission` handling, closing an equivalent boot-loop-shaped bug on
+  Linux — noted here rather than duplicated, since it was made by a
+  concurrent task against a different review on this same branch.
+
+Recorded, not fixed, each for a specific reason:
+
+- **L5** — audit instrumentation moved out of the production path (own
+  commit, `badca18`) rather than merely recorded, since it was small and the
+  review's suggested fix was exact.
+- **L6** — dead code deleted (own commit, `45c3cf8`) rather than recorded,
+  same reasoning.
+- **L7** — **not fixed, per the review's own scoping**: "shared code —
+  flagged for P3.13/P4.7 rather than owned here." `Delete`'s collapse of
+  every `openDirAt` failure into "artifact %s not found" (`store.go`) is
+  real and Windows widens the error space it swallows, but the review
+  explicitly assigns ownership elsewhere; touching shared `Delete` error
+  semantics here would risk stepping on that owner's in-flight work (P4.7
+  was, in fact, concurrently active on this branch during this task).
+  Left for P3.13/P4.7 to pick up, as the review specifies.
+
+### Verification
+
+```
+make test                                              # ok, all packages
+go test ./... -count=1                                 # ok, all packages
+go test ./internal/store -race -count=3                # ok
+go test ./internal/store -count=20                     # ok
+GOOS=windows GOARCH=amd64 go build ./cmd/...            # clean
+GOOS=windows GOARCH=arm64 go build ./cmd/...            # clean
+GOOS=windows go vet ./...                               # clean
+GOOS=windows GOARCH=386 go build ./...                  # fails, as expected (64-bit assertion)
+go test ./... -v -count=1 | grep -c '^--- SKIP'         # 0, unchanged on Linux
+```
+
+Passing test-name superset check against baseline commit `6976e4b` (the tip
+at the start of this task), via a disposable `git worktree` so the shared
+working tree was never touched: before — 142 `--- PASS`, 0 `--- SKIP`, 0
+`--- FAIL`; after — 144 `--- PASS`, 0 `--- SKIP`, 0 `--- FAIL`. `comm -23`
+against the sorted name sets: empty (nothing lost). Two new names
+(`TestDeleteDeepArtifactTree`, this task's M2 reproduction; and
+`TestDesiredDirsSkipsUnreadableEntryInsteadOfFailing`, from the concurrently
+landed P4.7 Linux-parity fix, commit `9664a36`).
+
+Seven commits: `fix(store): make artifact tree removal unbounded, not
+creation-agreeing` (M2), `fix(store): roll back symlinkAt's claim when the
+post-claim reopen fails` (M1), `fix(store): add FILE_OPEN_REPARSE_POINT to
+every create disposition` (M3), `docs(windows): correct ADR RW4's
+disposition and record the interim gap` (RW4), `fix(store): harden win32
+primitives per P3.14 red-team Lows (L1-L4)`, `fix(store): move
+namespace-removal audit instrumentation to test-only (L5)`, `fix(web):
+delete dead serveMarkdown (L6)`.
+
+**Concurrency note.** This task ran on the same branch and local checkout
+concurrently with another agent working the P4.7 semantic-parity review
+(commits `9664a36`, `2a1cb6f`, touching `internal/watch/identity_unix.go`,
+`internal/testutil/`, and docs/README/skill files). No file overlap with
+this task's commits; every `git add` here named exact files, never `-A`/`.`,
+specifically to avoid picking up the other agent's concurrent uncommitted
+changes.
