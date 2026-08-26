@@ -1780,3 +1780,276 @@ operation is idempotent when run twice, that uninstall leaves a pre-created
 `%USERPROFILE%\.scratchpad` with a marker file intact, Scheduled Task
 register/query/remove, an install path containing a space and a non-ASCII
 character (P5.5), and whether Windows PowerShell 5.1 works or only PowerShell 7.
+
+## Phase 4 — Windows Watch Links and Degraded Mode (P4.3/P4.4)
+
+### What is implemented
+
+**P4.3 gaps closed and verified with tests, not by reading:**
+
+1. **Same-target re-watch is a no-op, driven off `STATUS_REPARSE_POINT_ENCOUNTERED`.**
+   `TestTranslateClaimReparseStatusesAreExists` (`internal/store/watchlink_windows_test.go`)
+   tests `translateClaim` directly: both `STATUS_REPARSE_POINT_ENCOUNTERED`
+   and `STATUS_IO_REPARSE_TAG_NOT_HANDLED` map to `errExistsReparse` (which
+   wraps `errExists`), while `STATUS_OBJECT_NAME_COLLISION` maps to
+   `errExists` *without* the reparse wrapping and `STATUS_ACCESS_DENIED`
+   maps to neither — the negative controls that keep the first assertion
+   from being satisfied vacuously by "everything maps to errExists".
+   `TestWatch` (pre-existing, symlink flavour) and the new
+   `TestWatchOverExistingJunctionIsNoOp` (junction flavour) confirm the same
+   property end-to-end through the public `Watch` API.
+2. **A different-target collision is refused.** Pre-existing
+   `TestWatchCreateOnly`.
+3. **An unknown reparse tag under a watch name is refused, not silently
+   adopted.** New `TestWatchRefusesUnknownTagCollision`: `Watch` over a name
+   already occupied by a non-Microsoft reparse tag fails with an
+   "already exists" error, `Watches()` never reports it, and the entry's tag
+   is unchanged after the refused attempt (not upgraded, not replaced).
+4. **`Unwatch` removes only the link and never touches the target, for both
+   flavours.** Pre-existing `TestWatch`/`TestUnwatch` (symlink, via both
+   `Delete` and `Unwatch` — same `unlinkAt` code path) and
+   `TestWatchViaJunctionIsListedAndUnwatchable` (junction, via `Unwatch`).
+
+**ADR §6.6's two recorded gaps were already closed** by the time this task
+started — there is no separate `CreateJunctionAt` in `link_windows.go`:
+`symlinkAt` tries a directory symbolic link, then a junction, through the
+*same* reopened handle (which already requests `windows.DELETE`), and cleans
+up through that handle on any failure of either flavour's
+`DeviceIoControl` call. This task adds the test that was missing rather than
+code that was missing: `TestSymlinkAtSelfHealsOnFSCTLFailure` forces a
+synchronous FSCTL failure deterministically (an oversized target that
+`checkedNameLen` rejects before either flavour's `DeviceIoControl` call —
+no privilege manipulation needed, so it runs identically on every runner)
+and asserts no directory is left behind, and that the freed name is
+immediately usable again.
+
+**ADR §6.6 rule 3 (Delete widened to remove an interrupted watch's empty
+residue) was genuinely un-implemented** — confirmed by the pre-existing
+`TestTwoStepCrashResidueCurrentlyLeavesNameStuck`, whose own doc comment
+asked for exactly this and for the test to be updated, not silently
+deleted, once it landed. Implemented in `store.go`'s shared `Delete`: when
+the target is neither a link nor an artifact, `rmdirAt` is tried before
+refusing — it fails closed on anything non-empty
+(`errNotEmpty`/`ENOTEMPTY`/`STATUS_DIRECTORY_NOT_EMPTY`) and never follows a
+link, so this can only ever clear a name that carried nothing. Deliberately
+*not* given to `Unwatch`, preserving the create-only-for-agents asymmetry
+(`Unwatch` is agent-reachable; `Delete` is user-only) — the ADR's own
+stated reason for choosing `Delete` over `unwatch`, which is where the
+spike's own recommendation would have put it. `Watch`'s collision branch
+(`store.go`) now classifies the existing entry into distinct outcomes
+(different-target link / bare real directory / unrecognized reparse point)
+via a new platform-private `isNotALinkAt` predicate (`link_linux.go`:
+`errors.Is(err, unix.EINVAL)`; `link_windows.go`:
+`errors.Is(err, windows.ERROR_NOT_A_REPARSE_POINT)`), instead of one generic
+message — every existing-substring assertion in the CLI/store suites
+(`"already exists"`) was preserved by keeping that phrase in all three
+branches.
+
+The renamed/updated test is `TestTwoStepCrashResidueRecoversViaDelete`
+(`storefs_windows_attack_test.go`) — same setup, same "Watch still refuses
+the residue" and "Unwatch still refuses it" assertions, plus a new
+assertion that `Delete` now succeeds and the name is gone. This is a
+cross-platform behaviour change (RW19), so a shared, unconditional
+regression test was also added: `TestDeleteRemovesEmptyNonArtifactDirectory`
+(`store_test.go`) proves an empty non-artifact directory is removed by
+`Delete`, a *non-empty* one is refused (content survives), and `Unwatch`
+still refuses a bare directory either way.
+
+`errNoLinkPrivilege`'s message (`win32_windows.go`) was reworded: it
+previously read "...requires Developer Mode ... or elevated privilege",
+listing elevation as a co-equal alternative — which contradicts
+`docs/windows.md`'s own "do not run elevated" guidance and the spec's R19.
+It now names Developer Mode as the remediation, states that publish, list,
+delete, and notes are unaffected, and explicitly says running elevated is
+not the recommended fix.
+
+**P4.4 — the evidence gap, closed for real.** `testutil.WatchLinkCapable`/
+`RequireWatchLinks` only ever change what a *test* skips on; the CI
+degraded-mode job's `SCRATCHPAD_TEST_SYMLINKS=0` is the same kind of
+test-harness switch (and, note, is not even the same variable
+`WatchLinkCapable` reads — that's `SCRATCHPAD_TEST_WATCH_LINKS`, which the
+job does not set at all). The runner underneath stays elevated with
+Developer Mode on regardless, so nothing before this task ever exercised a
+genuinely privilege-incapable process. `internal/store/degraded_windows_test.go`
+ports `internal/winspike/privilege.go`'s `HasPrivilege`/`RemovePrivilege`
+(`SE_PRIVILEGE_REMOVED` on the process's own token — chosen there and here
+because `CreateSymbolicLinkW`/the reparse FSCTLs enable the privilege on
+demand, so merely disabling it would prove nothing) directly into
+`internal/store`'s own suite, using the same re-exec-self-as-a-child
+pattern as `internal/winspike/round2_test.go` and
+`devmode_test.go` — not imported (this package must not depend on
+`internal/winspike`, which is Phase 1 scaffolding), ported.
+
+`TestDegradedModeWithPrivilegeGenuinelyRevoked`'s child process removes the
+privilege, confirms the removal took (`hasPrivilege` reports `false`), then
+runs `Publish`/`List`/`SaveNotes`/`ResolveNote`/`WalkNotes`/`FormatReport`/
+`Delete` against the real `store` package — every one of them a real
+`t.Fatalf` if it fails, not a logged observation — and finally `Watch`,
+twice:
+
+- **Row 2** (privilege removed, Developer Mode left exactly as the runner
+  already has it — on): asserts the resulting link is a **directory
+  symbolic link**.
+- **Row 3** (privilege removed AND Developer Mode also turned off, via the
+  same registry toggle `internal/winspike/devmode_test.go` uses on
+  `AllowDevelopmentWithoutDevLicense`, deferred-restored): asserts the
+  resulting link is a **junction**.
+
+The first version of this test asserted row 3's outcome (junction) for a
+plain privilege-only removal, which is row 2 — the coordinator caught this
+mid-task (see the two commits below) before it shipped: GitHub Windows
+runners keep Developer Mode on, so `SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE`
+still succeeds with only the token privilege gone, and `symlinkAt` was
+correctly producing a symbolic link, not a junction. The fix was to the
+test's expectation, not to `symlinkAt`.
+
+### Measured, not reasoned: does watch actually work with the privilege revoked?
+
+**Yes — via a real directory symbolic link when Developer Mode is on, and
+via a real junction when it is also off, in the same measured run.** From
+run [32965152918](https://github.com/chaitanyaSoni96/scratchpad/actions/runs/32965152918),
+job `Windows amd64 native — degraded mode, no symlinks` (job 98165910188;
+the symlink-capable job's own run of the same test, job 98165910375,
+produced identical outcomes):
+
+```
+DEGRADED|token_before|held=true|err=<nil>
+DEGRADED|token_after|held=false
+DEGRADED|publish|ok
+DEGRADED|list|ok
+DEGRADED|notes|ok
+DEGRADED|delete|ok
+DEGRADED|devmode_before|value=1|present=true
+DEGRADED|watch|label=row2|outcome=succeeded|link=...\wsrc-row2|flavour_tag=0xA000000C|tagErr=<nil>
+DEGRADED|publish_after_watch|label=row2|ok
+DEGRADED|devmode_toggle|ok|value=0
+DEGRADED|watch|label=row3|outcome=succeeded|link=...\wsrc-row3|flavour_tag=0xA0000003|tagErr=<nil>
+DEGRADED|publish_after_watch|label=row3|ok
+DEGRADED|final_delete|ok
+DEGRADED|devmode_restored|value=1|err=<nil>
+```
+
+`0xA000000C` is `IO_REPARSE_TAG_SYMLINK`; `0xA0000003` is
+`IO_REPARSE_TAG_MOUNT_POINT`. So: **`errNoLinkPrivilege` was never actually
+reached in this measurement.** With the token privilege genuinely removed
+*and* Developer Mode genuinely off (row 3 — the one state the ADR's §6.6
+table says forces the junction fallback), `watch` still succeeded, because
+junction creation needs neither. This directly answers the task's own
+framing: **acceptance criterion 6 is satisfied by construction (the
+junction fallback is unconditional on this store's own namespace), not by
+error handling** — `errNoLinkPrivilege`'s corrected message (above) is
+still correct and still tested for its three required properties
+(`assertWatchFlavour`'s failure branch: names Developer Mode, does not
+present elevation as the default, verified against the literal string), but
+no test in this corpus — nor, per the ADR's own measured privilege table,
+any known real machine configuration — has actually triggered it. The
+`Publish`/`List`/`SaveNotes`/`ResolveNote`/`WalkNotes`/`FormatReport`/`Delete`
+sequence before the first watch attempt is acceptance criterion 6's other
+half, independent of which watch outcome follows: all seven reported `ok`
+with the privilege held nowhere in the process.
+
+### `docs/windows.md`
+
+Checked against the above and found accurate, not corrected: its privilege
+table ("Developer Mode on (or you hold the privilege) → symbolic link";
+"Developer Mode off, ordinary user → junction") conditions on Developer
+Mode, and that is exactly what rows 2 and 3 above measure — row 2 (DevMode
+on) produced a symlink, row 3 (DevMode off) produced a junction, both
+regardless of the token privilege. The prose "falls back to a junction on
+`ERROR_PRIVILEGE_NOT_HELD`" is a slight simplification of the actual
+mechanism (`symlinkAt` falls back on *any* failure of the symlink FSCTL, not
+only that one status), but not wrong in effect: in every reachable
+configuration the failure that triggers the fallback *is*
+`ERROR_PRIVILEGE_NOT_HELD`. One addition made: a short paragraph on the
+newly-true "delete it and retry" recovery for a bare-directory collision
+(ADR §6.6 rule 3), which was not documented at all before this task because
+it was not yet true.
+
+### Verification
+
+Local: `make test`; `go test ./... -count=1`; `go test ./internal/store
+-race -count=3`; `go test ./internal/store -count=20`; `GOOS=windows
+GOARCH={amd64,arm64} go build ./...`; `GOOS=windows go vet ./...`;
+`GOOS=windows GOARCH={amd64,arm64} go test -c` for `internal/store` — all
+clean. Linux skip count stayed 0.
+
+CI, two pushes in this range:
+
+- [32964551286](https://github.com/chaitanyaSoni96/scratchpad/actions/runs/32964551286)
+  (commit `2c97384`) — regression: `TestDegradedModeWithPrivilegeGenuinelyRevoked`
+  failed on the symlink-capable job, the degraded-mode job, and the
+  Windows race/repetition (P6.1) job, all for the identical reason (the
+  row-2/row-3 conflation above) — confirmed by grepping each job's raw log
+  independently before concluding it was one bug, not three.
+- [32965152918](https://github.com/chaitanyaSoni96/scratchpad/actions/runs/32965152918)
+  (commit `96fc25a`) — fixed. `Windows amd64 native — full suite,
+  symlink-capable`: **313 `--- PASS`, 0 `--- FAIL`, 0
+  `SKIP(symlink-capability)`** (grepped from the raw log, not the job
+  conclusion), all six packages `ok`. `Windows amd64 native — degraded
+  mode, no symlinks`: **286 `--- PASS`, 0 `--- FAIL`, 27
+  `SKIP(symlink-capability)`** (expected — the job's own non-vacuous
+  guard), all six packages `ok`. `Windows amd64 — race and repetition
+  (P6.1)`, `Linux — race and repetition (P6.1)`, `Linux amd64 — vet, test,
+  check-make, build`, both Windows cross-builds, Windows arm64 native
+  build, and Windows release archives all green. The two `Windows
+  installer verification (P5.1/P5.2/P5.5)` jobs failed in both runs, before
+  and after this task's own two commits, with an unrelated error ("Access
+  to the path 'C:\Users\runneradmin\AppData' is denied" inside
+  `install.ps1`'s non-admin verification) — this task never touched
+  `scripts/`, `Makefile`, or `.github/`, and a concurrent commit visible on
+  this branch during this task's work
+  ("ci: give the non-admin installer run its real profile environment")
+  indicates another agent was actively working that exact failure; recorded
+  here for the operator's visibility, not fixed, and not this task's
+  regression.
+
+### Recommendation on the two `continue-on-error` allowances
+
+**`windows-symlink-required` ("...full suite, symlink-capable... [allowed
+to fail until P3.11/P4]"): remove it.** Both P3.7–P3.10's and this task's
+own verification runs show the job green with a non-vacuous suite (313
+`--- PASS`, 0 `--- FAIL`, 0 `SKIP(symlink-capability)`, all packages `ok`),
+across two consecutive pushes including one that briefly broke it and was
+caught by the job itself. The one caveat, unrelated to store/link work: the
+job's overall conclusion still depends on whatever else runs in the same
+CI push (e.g. this task's own regression, or the currently-red installer
+jobs, would not by themselves need this job's allowance removed, but a
+reviewer flipping `continue-on-error` to `false` should re-run once more
+against a clean push to confirm the *job itself* — not the workflow run —
+is what's green).
+
+**`windows-degraded-test` ("...degraded mode, no symlinks... [allowed to
+fail until P4.4]"): remove it.** This is this task's own deliverable. The
+job is green with the same non-vacuous evidence (286 `--- PASS`, 0
+`--- FAIL`, 27 `SKIP(symlink-capability)` — the job's own guard confirms
+these are real, counted skips, not silent disappearance), and this task
+adds the one thing the job's `SCRATCHPAD_TEST_SYMLINKS=0` switch could never
+provide on its own: a real privilege-revoked run
+(`TestDegradedModeWithPrivilegeGenuinelyRevoked`) proving the degraded-mode
+claim the job's name makes, rather than only asserting that
+`RequireSymlinks`-gated tests skip.
+
+Neither recommendation accounts for branch protection on `main` (F12,
+carried since P3.11/P3.12's own report): "required" has no repository-level
+effect without a branch protection rule naming these checks, which is
+outside `internal/store`'s or this task's evidence.
+
+### Bugs found
+
+1. **`errNoLinkPrivilege`'s message contradicted `docs/windows.md`'s own
+   guidance** (listed "elevated privilege" as a co-equal alternative to
+   Developer Mode) — fixed, see above.
+2. **ADR §6.6 rule 3 was un-implemented**, leaving `Watch`'s own suggested
+   recovery ("delete it ... and retry") false for an interrupted two-step
+   link creation — fixed, see above. No security defect: the residue was
+   inert (an empty directory grants nothing), only a usability trap
+   (`A7.two_step_window`, spike-findings.md), so this was a functionality
+   gap, not a containment one.
+3. **This task's own first commit** shipped a test with an incorrect
+   assumption about the privilege/Developer-Mode relationship (row 2 vs.
+   row 3 above) — self-inflicted, caught by CI within one push, fixed in
+   the second commit, recorded here per instruction rather than quietly
+   amended away.
+
+No containment defect was found in `symlinkAt`, `Watch`, `Unwatch`, or
+`Delete`.
