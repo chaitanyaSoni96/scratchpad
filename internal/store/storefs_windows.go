@@ -52,13 +52,22 @@ func objectIDOf(fd int) (objectID, error) {
 // rootIdentityCache is the process-level last-seen root identity keyed on
 // the resolved root STRING (ADR §4.1, closing finding F9). R12 is overridden
 // to a per-operation pin (so t.Setenv(store.RootEnv, ...) keeps working —
-// each distinct root string gets its own cache entry), which means
-// verifyRoot() alone can only compare against a value recorded microseconds
-// earlier in the SAME operation — a case the handle chain already makes
-// harmless (F-b). This cache is what restores the cross-OPERATION property
-// R13 exists for: the same root string resolving to a DIFFERENT object
-// between two calls to openRootedFS is the "silently operating on the wrong
-// store" case R13 was written to catch.
+// each distinct root string gets its own cache entry), and this cache is
+// the WHOLE of R13's mechanism: the same root string resolving to a DIFFERENT
+// object between two calls to openRootedFS is the "silently operating on the
+// wrong store" case R13 was written to catch.
+//
+// Revision 1 of the ADR credited a per-operation re-read of the pinned
+// handle's identity (a rootedFS.verifyRoot method) with this, and §4.1 walked
+// that back: under a per-operation pin such a re-read can only compare against
+// a value recorded microseconds earlier in the SAME operation, which F-b
+// already makes harmless. P6.2's FD-3 then found the method had never had a
+// caller at all. It is deleted rather than wired up, because wiring it would
+// have been actively wrong rather than merely redundant: §4.1 says of a root
+// replaced mid-operation that "an operation that began against a live root,
+// holding a descriptor to it, completes against that object — that is F-b,
+// not a defect". The only thing the check could ever have done is fail an
+// operation the ADR itself calls correct.
 var (
 	rootIdentityMu    sync.Mutex
 	rootIdentityCache = map[string]objectID{}
@@ -250,25 +259,6 @@ func canonicalLookupName(dir, name string) string {
 		return name
 	}
 	return base
-}
-
-// verifyRoot re-reads FILE_ID_INFO on the pinned handle and compares it
-// against the identity recorded at pin time (R13). It distinguishes a
-// rename (handle follows the object, F-b) from a replacement (different
-// identity). This is a diagnostic within one operation, not a control — see
-// the ADR §4.1: because the name is never re-resolved, a replaced root
-// cannot redirect this operation regardless. Cross-operation replacement is
-// what the rootIdentityCache above catches.
-func (r *rootedFS) verifyRoot() error {
-	fid, err := fileIDOf(windows.Handle(r.root.Fd()))
-	if err != nil {
-		return err
-	}
-	id := objectID{vol: fid.VolumeSerialNumber, id: fid.FileID}
-	if id != r.id {
-		return fmt.Errorf("scratchpad: the store root %q was replaced during this operation (pinned %v, now %v)", r.path, r.id, id)
-	}
-	return nil
 }
 
 func dupFD(fd int) (int, error) {
@@ -668,7 +658,7 @@ func alreadyInsideRoot(target, root string) bool {
 }
 
 // ---------------------------------------------------------------------------
-// Classification (statAt/statSelf/statLinkTarget) and directory reads.
+// Classification (statAt/statSelf/classifyHandle) and directory reads.
 // ---------------------------------------------------------------------------
 
 // statAt is fstatat(parent, name, AT_SYMLINK_NOFOLLOW)'s Windows twin: it
@@ -715,21 +705,7 @@ func classifyHandle(h windows.Handle) (entryMeta, error) {
 	return m, nil
 }
 
-// statLinkTarget is statAt reduced to "is this a real directory, was the
-// answer obtained" — never follows, never takes a path. A reparse-tagged
-// entry answers isDir=false, ok=true: the fail-closed answer, which stops
-// descent. There is no path argument and no follow, so there is nothing to
-// redirect (ADR §3.2 resolves this the safe way against revision 1's two
-// conflicting descriptions of it).
-func statLinkTarget(parent int, name string) (isDir, ok bool) {
-	m, err := statAt(parent, name)
-	if err != nil {
-		return false, false
-	}
-	return m.IsDir, true
-}
-
-// linkTargetIsDir answers a DIFFERENT question than statLinkTarget: does the
+// linkTargetIsDir asks a narrow question classifyEntry does not: does the
 // link ENTRY ITSELF (already known, via classifyEntry, to carry an
 // allow-listed tag) present as directory-shaped, i.e. does
 // FILE_ATTRIBUTE_DIRECTORY read from the reparse point's own handle? A

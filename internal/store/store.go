@@ -695,14 +695,19 @@ func crossOrOpen(parent int, name string) (int, error) {
 	return -1, fmt.Errorf("%q is not a directory", name)
 }
 
-// ReadDirHandle, EntryIsDirAt and StatEntryAt are the three exported
-// helpers ADR §6.8 item 5 names for internal/web's four remaining
-// /proc/self/fd sites (docCount, buildCards/folderExtras, siblings,
-// hasRenderable in server.go) to pass ResolveFolder's already-pinned
-// *os.File through instead of re-deriving a path that has no Windows
-// analogue. That refactor is P4.6's, not done here — these are the
-// primitives it needs, added now so it does not also have to invent
-// platform mechanism.
+// ReadDirHandle and EntryIsDirAt are the exported helpers ADR §6.8 item 5
+// names for internal/web's former /proc/self/fd sites (docCount,
+// buildCards/folderExtras, siblings, hasRenderable in server.go), which pass
+// ResolveFolder's already-pinned *os.File through instead of re-deriving a
+// path that has no Windows analogue. P4.6 has since landed and wired both.
+//
+// §6.8 item 5 named a third, StatEntryAt(*os.File, string). P4.6 turned out
+// not to need it, and P6.2's FD-3 found it still had no caller. Deleted
+// rather than kept as spare capacity: an exported, untested path into statAt,
+// in the package where classification mistakes are the entire threat model,
+// is the same trap as the dead serveMarkdown P3.14's L6 removed from
+// internal/web — someone wires it up in good faith later. Eight lines to
+// reinstate from git history if a caller ever appears.
 func ReadDirHandle(dir *os.File) ([]os.DirEntry, error) { return readDirFD(int(dir.Fd())) }
 
 // EntryIsDirAt reports whether e (an entry of dir, as read by
@@ -712,18 +717,6 @@ func ReadDirHandle(dir *os.File) ([]os.DirEntry, error) { return readDirFD(int(d
 func EntryIsDirAt(dir *os.File, e os.DirEntry) bool {
 	m, explore := classifyEntry(int(dir.Fd()), e.Name())
 	return explore && (m.IsDir || m.IsLink)
-}
-
-// StatEntryAt is statAt(dir.Fd(), name) reduced to the fields
-// pageCard/docCount-style preview-weight accounting needs (§6.9 row 3),
-// without exposing the unexported entryMeta type across the package
-// boundary.
-func StatEntryAt(dir *os.File, name string) (isDir bool, size int64, modTime time.Time, err error) {
-	m, err := statAt(int(dir.Fd()), name)
-	if err != nil {
-		return false, 0, time.Time{}, err
-	}
-	return m.IsDir, m.Size, m.ModTime, nil
 }
 
 // ResolvePath walks URL path segments and splits them into the artifact and

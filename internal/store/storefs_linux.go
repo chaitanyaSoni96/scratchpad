@@ -159,21 +159,6 @@ func statAt(parent int, name string) (entryMeta, error) {
 	return m, nil
 }
 
-// statLinkTarget is statAt reduced to "is this a real directory, was the
-// answer obtained" — never follows. See store.go's classifyEntry, which is
-// the only caller: a symlink entry answers isDir=false here (Linux symlinks
-// carry no separate directory bit, unlike a Windows directory reparse
-// point), which is correct for statLinkTarget's contract and is why
-// classifyEntry, not statLinkTarget, is what decides whether to follow a
-// link entry once for listing purposes (crossWatchBoundary).
-func statLinkTarget(parent int, name string) (isDir, ok bool) {
-	m, err := statAt(parent, name)
-	if err != nil {
-		return false, false
-	}
-	return m.IsDir, true
-}
-
 // openRealDirAt is openDirAt under the ADR §3.2 name shared code uses so the
 // same call sites compile against either platform's strict primitive: on
 // Linux, O_NOFOLLOW already refuses every link at the final component, so

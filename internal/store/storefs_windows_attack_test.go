@@ -307,8 +307,10 @@ func makeJunctionAtPath(name, target string) error {
 // cross-operation detector: R13's diagnostic is a no-op WITHIN one operation
 // (the handle is already pinned, so F-b already makes a same-operation swap
 // harmless — see the tests above), and revision 1 overstated exactly this by
-// crediting verifyRoot() with catching a replacement BETWEEN operations. The
-// fix is the process-level rootIdentityCache keyed on the resolved root
+// crediting a per-operation identity re-read (rootedFS.verifyRoot) with
+// catching a replacement BETWEEN operations. That method never acquired a
+// caller and was deleted for P6.2's FD-3; this test is the whole of R13's
+// coverage. The fix is the process-level rootIdentityCache keyed on the root
 // STRING, exercised here directly rather than through two full Publish calls
 // (which each pin a NEW handle from openRootedFS — the cache is what makes
 // the SECOND one loud instead of silently accepting the new object).
