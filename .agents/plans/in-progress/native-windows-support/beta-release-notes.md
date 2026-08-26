@@ -160,10 +160,22 @@ previously accepted.
 
 ## Install
 
+Unzip the archive; `install.ps1` is at the top of it, beside the two `.exe`s
+(a release has no `scripts\` subdirectory — that is the git-checkout layout,
+which the same script also accepts).
+
 ```powershell
-.\scripts\install.ps1 install    # CLI + skill + a per-user logon Scheduled Task
-.\scripts\install.ps1 uninstall  # removes only what it installed
+.\install.ps1 install    # CLI + skill + a per-user logon Scheduled Task
+.\install.ps1 uninstall  # removes only what it installed
 ```
+
+The installer is the only script a user runs, it downloads nothing, and there
+is no remote bootstrap command. Because the script is unsigned and carries the
+download mark, the first run may need `Get-ChildItem -Recurse -File |
+Unblock-File` and a `-ExecutionPolicy Bypass` session — see
+[docs/windows.md](../../../../docs/windows.md). Re-running the installer over
+the top from a newer archive is the upgrade path; note that `all` does **not**
+replace `scratchpad-web.exe`, only `install`/`startup` do.
 
 Startup is a **per-user logon Scheduled Task**, not a Windows Service: a service
 would typically need elevation and run under a different profile than the

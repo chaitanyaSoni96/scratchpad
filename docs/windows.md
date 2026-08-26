@@ -21,22 +21,48 @@ many people keep source trees.
 
 ## Install
 
-Download the archive for your architecture, unzip it, and run the installer
-from the unzipped folder:
+Download `scratchpad_<version>_windows_<arch>.zip`, verify it (below), unzip
+it, and run the installer from the unzipped folder. `install.ps1` sits at the
+top of the archive next to the two `.exe`s — there is no `scripts\`
+subdirectory in a release:
 
 ```powershell
 # CLI only
-.\scripts\install.ps1 cli
+.\install.ps1 cli
 
 # CLI + agent skill + cleanup of obsolete MCP registrations
-.\scripts\install.ps1 all
+.\install.ps1 all
 
 # ...and register the web server to start at logon
-.\scripts\install.ps1 install
+.\install.ps1 install
 ```
 
+From a git checkout the same script lives at `scripts\install.ps1` and reads
+the binaries you built into `bin\`; it accepts either layout.
+
+Windows blocks unsigned scripts that carry the download mark, so the first run
+may fail with *"cannot be loaded"* or *"running scripts is disabled on this
+system"*. Clear the mark on the extracted files and run in a session that
+allows local scripts — no permanent policy change, no elevation:
+
+```powershell
+Get-ChildItem -Recurse -File | Unblock-File
+powershell -ExecutionPolicy Bypass -File .\install.ps1 install
+```
+
+Nothing else needs to run. The installer is the only script involved: it copies
+the two `.exe`s and `SKILL.md` out of the folder you unzipped and registers a
+Scheduled Task. It downloads nothing, and there is no remote bootstrap command
+— be suspicious of any instruction to pipe a URL into PowerShell.
+
 Binaries go to `%LOCALAPPDATA%\scratchpad\bin`. Override with `-BinDir`.
-Every operation is idempotent — re-running is how you upgrade.
+
+**Upgrading** is re-running the installer over the top from a newer archive;
+every operation is idempotent. Use the verb that covers what you have
+installed: `cli` replaces `scratchpad.exe` only, `all` adds the skill, and
+`install`/`startup` are the only verbs that stop the task and replace
+`scratchpad-web.exe`. Upgrading a machine that runs the web server with `all`
+alone leaves the old server binary in place.
 
 The installer runs under both Windows PowerShell 5.1 (the `powershell` that
 ships with Windows) and PowerShell 7 (`pwsh`) — CI verifies every operation
@@ -46,21 +72,28 @@ The installer adds that directory to your **user** PATH only if you pass
 `-AddToPath`; otherwise it prints the exact command to run yourself. It never
 edits the machine PATH.
 
-Verify the archive before installing:
+Verify the archive before unzipping it. `SHA256SUMS.txt` is published as a
+release asset next to the archives and lists one line per archive:
 
 ```powershell
-Get-FileHash .\scratchpad-windows-amd64.zip -Algorithm SHA256
-# compare against SHA256SUMS.txt from the release
+Get-FileHash .\scratchpad_<version>_windows_amd64.zip -Algorithm SHA256
+# compare the hash against the matching line in SHA256SUMS.txt
 ```
+
+`SHA256SUMS.txt` is not signed, so it proves the download was not corrupted or
+substituted in transit — not that the release itself is authentic. The
+binaries are unsigned too: SmartScreen and Defender will warn on first run,
+and that warning is expected rather than a sign of tampering. Code signing is
+out of scope for the beta.
 
 ## Running the web server
 
 ```powershell
-.\scripts\install.ps1 startup        # register a per-user logon Scheduled Task
-.\scripts\install.ps1 start          # start it now
-.\scripts\install.ps1 status         # is it registered, is it running
-.\scripts\install.ps1 stop
-.\scripts\install.ps1 remove-startup
+.\install.ps1 startup        # register a per-user logon Scheduled Task
+.\install.ps1 start          # start it now
+.\install.ps1 status         # is it registered, is it running
+.\install.ps1 stop
+.\install.ps1 remove-startup
 ```
 
 The task runs `scratchpad-web.exe --addr 127.0.0.1:8737` as **you**, at logon.
@@ -83,7 +116,7 @@ removes only what the installer created: the Scheduled Task, the binaries, the
 user-PATH entry and the installed skill copies.
 
 ```powershell
-.\scripts\install.ps1 uninstall
+.\install.ps1 uninstall
 ```
 
 Artifacts, notes and `.scratchpadignore` files are portable in both
@@ -233,7 +266,7 @@ is nothing to watch.
 
 ## LAN exposure
 
-Loopback is the default on every platform. `.\scripts\install.ps1 install -Lan`
+Loopback is the default on every platform. `.\install.ps1 install -Lan`
 (or running the binary with `--addr 0.0.0.0:8737`) opts into LAN exposure, and
 **the site has no authentication**: that exposes artifact
 contents plus the unauthenticated delete and notes-write endpoints to every

@@ -67,6 +67,10 @@ func main() {
 			{src: filepath.Join(*dist, "windows-"+arch, "scratchpad.exe"), dst: "scratchpad.exe", exe: true},
 			{src: filepath.Join(*dist, "windows-"+arch, "scratchpad-web.exe"), dst: "scratchpad-web.exe", exe: true},
 			{src: filepath.Join("scripts", "install.ps1"), dst: "install.ps1", optional: !*requireInstaller},
+			// The installer's `skill`, `all` and `install` verbs copy this
+			// file; without it in the archive those verbs — `all` is the
+			// default — fail for anyone installing from a release.
+			{src: filepath.Join("skill", "SKILL.md"), dst: "skill/SKILL.md"},
 			{src: "README.md", dst: "README.md"},
 			{src: "LICENSE", dst: "LICENSE"},
 			{src: filepath.Join("docs", "cli.md"), dst: "docs/cli.md"},

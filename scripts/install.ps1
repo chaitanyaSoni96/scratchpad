@@ -71,6 +71,17 @@ if ($env:OS -ne 'Windows_NT') {
     exit 1
 }
 
+# Two supported source layouts, and every payload lookup must accept both.
+#
+#   git checkout    <repo>\scripts\install.ps1, binaries in <repo>\bin,
+#                   skill at <repo>\skill\SKILL.md
+#   release archive <extracted>\install.ps1, binaries beside it,
+#                   skill at <extracted>\skill\SKILL.md
+#
+# Resolving only against $RepoDir (the checkout layout) made the shipped
+# installer unable to install from the shipped archive: $RepoDir would be the
+# *parent of the extracted folder*, so `cli` died with "not found ... build it
+# first". Look beside the script first, then fall back to the checkout layout.
 $RepoDir = Split-Path -Parent $PSScriptRoot
 $TaskName = 'scratchpad-web'
 $DefaultBinDir = Join-Path $env:LOCALAPPDATA 'scratchpad\bin'
@@ -166,10 +177,21 @@ function Invoke-WithRetry([scriptblock]$Body, [int]$Tries = 10) {
     }
 }
 
+# Returns the first candidate that exists as a file, or $null. Candidate order
+# encodes the layout preference documented at $RepoDir above.
+function Resolve-Payload([string[]]$Candidates) {
+    foreach ($c in $Candidates) {
+        if (Test-Path -LiteralPath $c -PathType Leaf) { return $c }
+    }
+    return $null
+}
+
 function Install-Binary([string]$Name) {
-    $src = Join-Path (Join-Path $RepoDir 'bin') $Name
-    if (-not (Test-Path -LiteralPath $src)) {
-        throw "$Name not found at $src -- build it first: go build -o bin/ ./cmd/..."
+    $archive = Join-Path $PSScriptRoot $Name
+    $checkout = Join-Path (Join-Path $RepoDir 'bin') $Name
+    $src = Resolve-Payload @($archive, $checkout)
+    if ($null -eq $src) {
+        throw "$Name not found. Looked in the release-archive layout ($archive) and the git-checkout layout ($checkout). From a checkout, build it first: go build -o bin/ ./cmd/..."
     }
     New-Item -ItemType Directory -Path $BinDir -Force | Out-Null
     $dst = Join-Path $BinDir $Name
@@ -199,9 +221,11 @@ function Install-Cli {
 # an edited skill/SKILL.md propagates, exactly like install.sh.
 
 function Install-Skill {
-    $src = Join-Path (Join-Path $RepoDir 'skill') 'SKILL.md'
-    if (-not (Test-Path -LiteralPath $src)) {
-        throw "skill source not found at $src"
+    $archive = Join-Path (Join-Path $PSScriptRoot 'skill') 'SKILL.md'
+    $checkout = Join-Path (Join-Path $RepoDir 'skill') 'SKILL.md'
+    $src = Resolve-Payload @($archive, $checkout)
+    if ($null -eq $src) {
+        throw "skill source not found. Looked in the release-archive layout ($archive) and the git-checkout layout ($checkout)."
     }
     $targets = @(
         (Join-Path $env:USERPROFILE '.claude\skills\scratchpad'),
