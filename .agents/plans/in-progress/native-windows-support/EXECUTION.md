@@ -3411,3 +3411,299 @@ upgrades which binary — `all` does **not** replace `scratchpad-web.exe`, only
    `mkrelease` and a native build job.
 5. **Unsigned-binary first-run behaviour** (SmartScreen/Defender) has not been
    observed on a real machine.
+---
+
+## P6.6 — Full release matrix
+
+Task: run the six cells the plan names (Linux vet/tests/build, container build,
+Windows amd64 native tests, Windows arm64 build/smoke test, archive tests,
+documentation link checks), find the cells that are weaker than they look, and
+report honestly rather than rebuild what CI already runs.
+
+Environment note: this session has no local Windows machine and no `pwsh` /
+`powershell` (checked: neither binary is on `$PATH`, and there is no
+passwordless `sudo` to install one). Every Windows-side cell is therefore
+verified by reading real CI run output, not by local execution — consistent
+with the branch's agreed verification environment (`EXECUTION.md`'s opening
+note). Linux and container cells were run locally on this machine.
+
+### Summary matrix
+
+| Cell | Status | Evidence |
+|---|---|---|
+| Linux vet/tests/build | **Covered** | Local run, this session (below); matches CI `linux-test`, green at every run cited |
+| Container build | **Covered — newly verified, never run on this branch before** | Local `make image` + manual smoke test, this session (below) |
+| Windows amd64 native tests | **Covered** | CI `windows-symlink-required` / `windows-degraded-test`, green at branch tip; one gating nuance recorded below |
+| Windows arm64 build/smoke test | **Build: covered. Smoke test: not covered.** | CI `windows-arm64-build` green; smoke-test feasibility researched, not run — see below |
+| Archive tests | **Covered as of this task — was not, at task start** | CI `windows-archive-install` (new job, both engines), green at run `33017420341`; local corroboration below; one residual gap (arm64 archive install) carried over from `reviews/P5.7-supply-chain-review.md` |
+| Documentation link checks | **Covered — run for the first time on this branch** | Custom link/frontmatter checker, this session (below) |
+
+### 1. Linux vet/tests/build
+
+Ran locally rather than trusted from memory, at commit `41aba92` (before this
+task's own changes landed) and spot-checked unaffected by everything that
+landed afterward (`git diff --stat` between `41aba92` and the final commit of
+this task touches no Go source, `Containerfile`, or `Makefile` target used
+here — only docs, the plan, `scripts/install.ps1`, `scripts/mkrelease.go`, and
+`.github/workflows/ci.yml`):
+
+```
+$ go vet ./...            # clean, no output
+$ go test ./... -count=1
+ok  	scratchpad/cmd/scratchpad
+ok  	scratchpad/cmd/scratchpad-web
+ok  	scratchpad/internal/store
+?   	scratchpad/internal/testutil	[no test files]
+ok  	scratchpad/internal/watch
+ok  	scratchpad/internal/web
+$ make build               # -> bin/scratchpad, bin/scratchpad-web
+$ scripts/check-make.sh
+check-make: ok
+```
+
+Matches CI job `Linux amd64 — vet, test, check-make, build`, green on every
+run this session touched, most recently run `33017420341` (commit `2a0a4f2`)
+and the branch-tip run for `b3e74f1`.
+
+### 2. Container build
+
+**Never verified on this branch before this task.** `Containerfile` builds a
+two-stage image (`golang:1.26` builder → `scratch` runtime holding the two
+static binaries); nothing in the Windows port touches it, but per the task
+brief "untouched therefore fine" is exactly the assumption this branch has
+punished repeatedly, so it was actually built and run.
+
+```
+$ make image     # podman build -t localhost/scratchpad:latest .
+Successfully tagged localhost/scratchpad:latest   # ~97s, cold cache
+```
+
+`make web` itself could not bind `127.0.0.1:8737` on this machine: a
+pre-existing **native** (systemd --user) `scratchpad-web` install — unrelated
+to this task, already running before this session started — already owns that
+port. Rather than stop the user's live instance, the equivalent `podman run`
+invocation from the `web` Makefile target was run by hand on an alternate
+loopback port (`127.0.0.1:18737`) against a scratch data directory, with the
+same `-v $HOME:$HOME:ro` mount `make web` uses. No `LAN=1` was used anywhere.
+
+Verified end to end, then torn down:
+
+- `GET /` → `200`, real HTML (htmx/idiomorph/SSE scaffold present).
+- Published an artifact via the host `scratchpad` CLI with
+  `SCRATCHPAD_ROOT` pointed at the container's mounted data dir, then fetched
+  it **through the container** — `200`, correct body. Proves the container
+  actually serves what the store publishes, not just that it starts.
+  ```
+  $ SCRATCHPAD_ROOT=<scratch> scratchpad publish -dir <src> -name containersmoke
+  $ curl http://127.0.0.1:18737/a/containersmoke/    # 200, body matches
+  ```
+- `scratchpad watch`'d a folder under `$HOME` (outside the store) and fetched
+  it through the container — `200`, correct body. Proves the read-only `$HOME`
+  mount and the symlink the store creates both resolve correctly from inside
+  the container, exercising the one deliberate symlink-boundary crossing the
+  store's containment model allows.
+- Cleanup: `unwatch`, removed the smoke source and data directories, `podman
+  rm -f` the smoke container. Confirmed afterward: no `scratchpad-web-smoke`
+  container remains (`podman ps -a`), and the only process on `:8737` is the
+  pre-existing native install, untouched throughout.
+
+### 3. Windows amd64 native tests
+
+Not re-derived — verified against real CI. Branch-tip-at-task-start run
+`33001970132` (commit `41aba92`) and every run through the final run for
+`b3e74f1` in this task show green for:
+
+- `Windows amd64 native — full suite, symlink-capable (windows-2025)`
+- `Windows amd64 native — degraded mode, no symlinks (windows-2025)`
+- `Windows amd64 — race and repetition (P6.1)`
+
+**Nuance worth recording, not a P6.6 defect:** `stress-windows` (the P6.1 race
+job above) still carries `continue-on-error: true` in `ci.yml` as of the
+branch tip — its own comment says *"Removing this allowance is a P6.1
+deliverable"* and that has not happened. A green result there does not
+currently gate the workflow; the checkbox-reconciliation table's "`P6.1`:
+`stress-linux` / `stress-windows` green" entry is true but doesn't surface
+that the Windows leg is still advisory. Flagging for whoever next touches
+P6.1, not fixing it here (it isn't this task's cell and touching `ci.yml` is
+explicitly off-limits this session).
+
+### 4. Windows arm64 build/smoke test
+
+**Build: covered.** `Windows arm64 native — build (windows-11-arm)` is green
+on every run this session touched.
+
+**Smoke test of the actual store/watch suite: not covered, and has never run
+on this architecture.** Feasibility, researched rather than assumed:
+
+- The `windows-11-arm` runner label is already in productive use (the build
+  job), so basic availability is proven.
+- Cost is not the blocker: GitHub-hosted Windows arm64 runners bill at the
+  same per-minute rate as Windows x64 (2-core) since the January 2026 GitHub
+  Actions pricing cut ($0.010/min either).
+- **Go's race detector does not support `windows/arm64` at all**, confirmed
+  against `internal/platform/supported.go`'s `RaceDetectorSupported`: the
+  `"windows"` case returns `goarch == "amd64"` with no arm64 branch. A
+  P6.1-style `-race` campaign can never run on this architecture with the
+  current Go toolchain, on any runner — this is a property of Go, not
+  something a CI change can work around. A plain `go test ./...` (+
+  `-count=N` repetition) job is technically buildable; `-race` parity with the
+  amd64 stress job is not, ever.
+- **Unverified and load-bearing:** whether `windows-11-arm` hosted runners
+  support directory symlink creation (Developer Mode /
+  `SeCreateSymbolicLinkPrivilege`) the same way `windows-2025` does. Both amd64
+  native jobs open with a mandatory symlink-capability probe before trusting
+  the suite's `SKIP(symlink-capability)` / `SKIP(8dot3-capability)`
+  assertions; nobody has run that probe on arm64. If capability differs, an
+  arm64 test job would need the same probe-and-assert structure as
+  `windows-degraded-test` and might only ever prove degraded-mode coverage.
+
+**Recommendation for the coordinator to sequence** (not applied — `ci.yml` is
+the P5.7 agent's file this session): add a `windows-arm64-native-test` job,
+`runs-on: windows-11-arm`, mirroring `windows-degraded-test`'s structure
+(symlink probe, `go vet ./...`, `go test ./... -v`, the same non-vacuous +
+capability-skip assertions) but with **no `-race` step**, since none exists
+for this platform. Until that job exists and runs at least once, arm64
+coverage is build-only.
+
+### 5. Archive tests
+
+This cell changed shape mid-task. At task start, `mkrelease.go`'s self-check
+only asserted the zip's "MZ" magic bytes — not that the archive could actually
+install. The P5.7 agent (running concurrently this session) found the shipped
+archive genuinely **could not install itself**: `install.ps1` resolved every
+payload against the git-checkout layout only, so from an extracted archive
+`cli` died with "not found", and `skill/SKILL.md` was never packaged at all —
+breaking `skill`, `all` (the default verb), and `install`. Root cause per that
+agent's own finding: `windows-installer` was 94/94 green on both engines while
+testing only the checkout layout, never an extracted archive — the reason this
+task's brief called this cell a formality that wasn't one.
+
+Fixed in `0fb8b8b` (`Resolve-Payload` tries the archive layout first, then the
+checkout layout; `mkrelease.go` now packages `skill/SKILL.md`) and closed with
+a new gating CI job in `212f597`/`3f42059`: `windows-archive-install` (matrix
+`pwsh`/`powershell`). It extracts a **real packaged zip** into a sandbox
+directory with no `bin\`/`skill\` beside it — so the checkout-layout fallback
+structurally cannot fire — and drives
+`cli → skill → all → uninstall → uninstall (idempotent) → cli (reinstall)`
+through it: executes the shipped `scratchpad.exe` (`list`, asserting exit 0,
+not merely that the file copied), asserts `SKILL.md` lands under both
+`~/.claude` and `~/.pi`, asserts an overridden `SCRATCHPAD_ROOT` marker
+(space + non-ASCII in the path) survives uninstall byte-identical, and
+re-derives every checksum with `Get-FileHash` — the literal command
+`docs/windows.md` tells users to run.
+
+The job's first run (`33017156923`, commit `212f597`) went red on **both**
+engines — not an install.ps1 regression but two bugs in the new harness
+itself (`Invoke-Installer([string[]]$Args)` collided with PowerShell's
+automatic `$Args`, silently binding an empty array so every call ran a bare
+`install.ps1` — default verb, default `BinDir` — while still exiting 0; and
+`& $exe list` when `$exe` doesn't exist raises a PowerShell error rather than
+setting a native exit code, leaving `$LASTEXITCODE` stale). Both are the
+branch's recurring vacuous-pass shape, fixed in `3f42059`. Worth recording:
+even the broken run was informative — the commit message for the fix notes
+the accidental bare `install.ps1` call still proved the archive-layout fix
+itself works, installing `scratchpad.exe` and both `SKILL.md` copies from the
+extracted archive with no `bin\`/`skill\` beside it.
+
+**Green run — this cell's primary evidence: `33017420341`** (commit `2a0a4f2`) —
+`Windows install from the release ARCHIVE - pwsh (P5.7)` and
+`Windows install from the release ARCHIVE - powershell (P5.7)` both success,
+**24/24 install-block assertions and 8/8 checksum-block assertions passing on
+each engine** (both blocks fail below a minimum count, so "0 failures" cannot
+mean "0 checks ran"). Re-confirmed at branch tip (`b3e74f1`, run `33017854855`,
+all jobs green including both `windows-archive-install` legs). This CI job —
+not the local corroboration below — is what makes this cell "covered": it is
+the only real execution of `install.ps1` against a genuinely extracted
+archive that exists anywhere in this task.
+
+The checksum half of that job matters for a second reason, found by the P5.7
+agent while this cell was in flight: `sha256sum -c SHA256SUMS.txt` (what
+`windows-artifacts`/`windows-archive-install` originally ran) only verifies
+the files the sums file **names** — it does not notice an extra `dist/*.zip`
+that got uploaded by the same glob but has no checksum line at all, which the
+agent demonstrated locally by duplicating an archive under a second name and
+watching `-c` still pass. Both packaging jobs now assert the reverse direction
+too (every archive that exists has a covered checksum line), which is the
+`Get-FileHash`-driven checksum block cited above. This cell's "archive
+contents are verified" claim rests on that **both-directions** assertion, not
+on the older one-directional `sha256sum -c` check alone.
+
+Local corroboration (this environment has no `pwsh`/Windows, so the installer
+itself could not be executed here — the CI job above is the only real
+execution evidence):
+
+```
+$ make clean-dist && make release-windows
+$ cd dist && sha256sum -c SHA256SUMS.txt        # both archives OK
+$ unzip -l scratchpad_<version>_windows_amd64.zip   # 8 entries incl. skill/SKILL.md
+$ file windows-amd64/scratchpad.exe windows-amd64/scratchpad-web.exe
+...: PE32+ executable for MS Windows 10.00 (console), x86-64, 8 sections
+$ file windows-arm64/scratchpad.exe windows-arm64/scratchpad-web.exe
+...: PE32+ executable for MS Windows 10.00 (console), ARM64, 6 sections
+$ diff <extracted skill/SKILL.md> skill/SKILL.md   # identical
+```
+
+`file` confirming the **PE machine type matches the claimed architecture per
+archive** (x86-64 in the amd64 zip, ARM64 in the arm64 zip) is stronger than
+`mkrelease.go`'s own self-check, which only asserts the "MZ" magic — it would
+not catch an amd64 binary accidentally shipped inside the arm64 archive. This
+gap in the self-check was not investigated further (out of scope: `ci.yml`
+territory, and no evidence it has ever misfired), but is worth naming since it
+sits directly in this cell.
+
+**Documentation cross-check against `beta-release-notes.md`**, run before and
+after the fixes above: found the notes' "Verifying a download" section still
+told users to hash `scratchpad-windows-amd64.zip`, while `mkrelease.go` names
+archives `scratchpad_<version>_windows_<arch>.zip` — a user following the
+published instruction literally gets "file not found". This is the same
+finding as `reviews/P5.7-supply-chain-review.md`'s S7, found independently by
+this cell's "check the shipped artefact, not the code describing it"
+methodology; the coordinator fixed it live in `2a0a4f2` while this task was in
+flight and credited it as a P6.6 finding in the commit message. Re-ran the
+link checker (§6) after the fix: clean.
+
+**One residual gap, not this task's to close:** per
+`reviews/P5.7-supply-chain-review.md`'s "What I could not verify" item 5, the
+new `windows-archive-install` job extracts and installs the **amd64** archive
+only — the arm64 archive gets PE-magic verification and a native build, never
+an install, matching this record's own §4 finding that `windows-11-arm` is
+build-only everywhere in this workflow. Also per that review's item 3: the
+tag-gated `release` job itself has never executed (no `v*` tag pushed on this
+branch yet) — everything about it is verified by reading the workflow and
+local reproduction of its two fixed injection/uncovered-archive holes, not by
+a real run.
+
+### 6. Documentation link checks
+
+**Never run on this branch before this task.** Wrote a small checker (Python,
+scratch-only, not committed) covering every file the task named: `README.md`,
+`docs/cli.md`, `docs/ignore-rules.md`, `docs/internals.md`, `docs/notes.md`,
+`docs/windows.md`, `skill/SKILL.md`, the ADR
+(`.agents/ADRs/2026-08-26-windows-rooted-store-backend.md`), and every `.md`
+file directly under `.agents/plans/in-progress/native-windows-support/` plus
+its `reviews/` subdirectory (18 files total). It resolves three link forms:
+markdown `[text](url)` (including `#anchor` targets, checked against the
+target file's actual headings), `<https://...>` autolinks, and YAML
+frontmatter `links: [...]` / `links:\n  - ...` arrays (several files in this
+plan directory, and the ADR, use the frontmatter form and a naive checker
+would miss them).
+
+Result: **145 links checked, 0 broken.** All 13 distinct external
+`https://github.com/.../actions/runs/...` permalinks returned `200`.
+
+**Confirmed the known issue exactly as described in the task brief:** 9 links
+from the ADR point into `.agents/plans/in-progress/native-windows-support/` —
+7 in its YAML frontmatter `links:` list (`native-windows-support.md`,
+`spike-findings.md`, `threat-model-windows.md`, `win32-primitive-survey.md`,
+`platform-api-inventory.md`, `reviews/P2.7-boundary-review.md`,
+`reviews/P1.7-red-team.md`) plus 2 inline markdown links in the ADR body (to
+`reviews/P1.7-red-team.md` and `spike-findings.md`, duplicating two of the
+frontmatter entries). All 9 resolve today; all 9 will break when the plan
+directory moves to `completed/`. **Not fixed** — the coordinator stated they
+are handling this at plan-move time.
+
+Every other cross-reference in the plan directory (reviews linking to each
+other, to `EXECUTION.md`, to `native-windows-support.md`, to the spec, to the
+ADR) resolves correctly and will continue to, since those stay together as a
+unit when the plan moves.
+

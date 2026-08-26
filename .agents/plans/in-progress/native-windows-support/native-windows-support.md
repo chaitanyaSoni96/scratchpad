@@ -280,7 +280,7 @@ acceptance criteria in the spec are satisfied or explicitly deferred in an ADR.
 - [x] **P6.5 [CS] Update agent contract.** Update `skill/SKILL.md` for PowerShell
   syntax and Windows watch behavior, then run the repository's skill install
   process where appropriate. Keep CLI flags and create-only semantics aligned.
-- [ ] **P6.6 [CX] Run full release matrix.** Linux vet/tests/build, container build,
+- [x] **P6.6 [CX] Run full release matrix.** Linux vet/tests/build, container build,
   Windows amd64 native tests, Windows arm64 build/smoke test, archive tests, and
   documentation link checks.
 - [x] **P6.7 [CO] Prepare beta release notes.** State supported Windows versions,
@@ -365,6 +365,7 @@ and CI evidence, not from memory. Evidence per phase:
 | P4.1–P4.7 | Native watch/web shipped; `reviews/P4.7-semantic-parity.md` and its four remediation records (P-1a/P-2/P-3/P-4/P-5/P-6/P-7/P-8) |
 | P5.1–P5.6 | `scripts/install.ps1` + `scripts/verify-install.ps1`, `windows-installer` matrix green on **both** engines at 94/94 (run `32994820274`); `EXECUTION.md`'s P5.1/P5.2/P5.5 record |
 | P5.7 | `reviews/P5.7-supply-chain-review.md` — FAIL AT ENTRY then PASS; the shipped archive could not install itself (fixed `0fb8b8b`), `windows-archive-install` added as a gating job proving install/upgrade/uninstall/reinstall from an extracted archive on both engines (24/24 each) plus `Get-FileHash` against `SHA256SUMS.txt` (8/8 each), all 23 actions SHA-pinned (F8 closed), three release-path holes closed; run `33017420341` |
+| P6.6 | `EXECUTION.md`'s P6.6 record — cell-by-cell: Linux, container build, Windows amd64 native, and doc links all locally/CI-verified covered; archive tests covered by `windows-archive-install` (run `33017854855`); Windows arm64 build-covered but smoke-test **not** covered (feasibility recorded, blocked on an unverified symlink probe and Go's lack of `-race` support on `windows/arm64`) |
 | P6.1 | `stress-linux` / `stress-windows` green (`-race`, `-count=20`) |
 | P6.2 | `reviews/P6.2-threat-model-audit.md` |
 | P6.3 | `reviews/P6.3-independent-code-review.md` |
@@ -381,8 +382,9 @@ Three caveats that a tick would otherwise hide:
 - **"CLI, README, internals, and skill documentation agree" is left unticked**
   deliberately. The repository copies agree, but `make install-skill` has not
   been re-run, so the copies in `~/.claude/skills` and `~/.pi/agent/skills` are
-  stale — and `CLAUDE.md` requires that re-run. The documentation link check is
-  part of P6.6, still in flight.
+  stale — and `CLAUDE.md` requires that re-run. P6.6 ran the documentation link
+  check (145 links, 0 broken); the re-run this item is waiting on is `make
+  install-skill` itself, not the link check.
 - **P5.7 is now ticked on its own remediation, not on what it found.** The
   review entered on a release archive that could not install itself and a
   94/94-green installer job that had only ever tested the git-checkout layout.
@@ -391,8 +393,16 @@ Three caveats that a tick would otherwise hide:
   any commit producing draft assets), and five things could not be verified —
   most importantly, **the tagged-release path has never executed.** See the
   review's "Could not verify" section before P6.8.
-- **P6.6 is running now**; **P6.8 is the human gate** and is not the agent's to
-  tick.
+- **P6.6 is ticked for running the matrix and reporting on it honestly, not for
+  every cell coming back green-and-complete.** Four cells are fully covered
+  (Linux vet/tests/build, container build — verified for the first time on this
+  branch, Windows amd64 native, documentation link checks). Archive tests went
+  from a formality to a real gate mid-task (see P5.7's row above) and are now
+  covered by `windows-archive-install`, run `33017854855`. **Windows arm64 is
+  build-covered only** — no smoke/full-suite run has ever executed on that
+  architecture, and Go's race detector cannot run there at all
+  (`windows/arm64` is unsupported); EXECUTION.md's P6.6 record names the CI job
+  this would take. **P6.8 is the human gate** and is not the agent's to tick.
 
 Review-checklist items were each re-verified this session rather than assumed:
 no untagged shared file imports `x/sys/unix` (the only match was a comment at
