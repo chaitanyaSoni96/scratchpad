@@ -3230,3 +3230,184 @@ dependency, not by grep alone); the ~30 remaining citations in
 `win32_windows.go`'s header now says where the evidence went and what replaced
 *"where this file disagrees with the prototype, the prototype wins"* as the
 tie-breaker, since that instruction no longer had a referent.
+
+## P5.7 — Supply-chain and lifecycle review
+
+Report: [reviews/P5.7-supply-chain-review.md](reviews/P5.7-supply-chain-review.md).
+Verdict: **FAIL AT ENTRY, then PASS after remediation.** Thirteen findings
+(S1–S13); ten fixed in this task, three recorded and not fixed (S9, S11, S12).
+
+**Verification run of record:
+[`33017420341`](https://github.com/chaitanyaSoni96/scratchpad/actions/runs/33017420341)
+at `2a0a4f2` — every job green.** The two new `windows-archive-install` legs
+report `8 passed, 0 failed` (checksums) and `24 passed, 0 failed` (archive
+install) on each engine: jobs `98339218268` (pwsh 7) and `98339218259`
+(Windows PowerShell 5.1).
+
+### The headline: the shipped archive could not install itself
+
+`install.ps1` resolved every payload against `$RepoDir = Split-Path -Parent
+$PSScriptRoot`, which is correct for `<repo>\scripts\install.ps1` and wrong for
+a release, where `install.ps1` sits at the **archive root** — making `$RepoDir`
+the parent of the *extracted folder*. `cli` told a user who had just downloaded
+a binary release to `go build` it from source. Independently, `skill/SKILL.md`
+was never packaged at all, so `skill`, `all` (**the default verb**) and
+`install` had no source to copy. A user following `beta-release-notes.md`
+verbatim hit this on their first command.
+
+Fixed in `0fb8b8b`: `Resolve-Payload` tries the archive layout first and the
+checkout layout second, error messages name both searched paths, and
+`mkrelease.go` adds `skill/SKILL.md` to the archive. `install.ps1` is still
+pure ASCII (re-checked — 5.1 support depends on it).
+
+**Why nothing caught it, which matters more than the bug.** `windows-installer`
+builds into the checkout's `bin/` and runs `install.ps1` in place, where both
+layouts' paths coincide. It recorded `94 passed, 0 failed` per engine (run
+`32994820274`) while the shipped artefact was unusable. Phase 5's exit evidence
+says "clean-VM install/update/uninstall transcript"; what existed was a
+clean-VM install from a *source tree*. Same shape as this branch's other
+catches: owned, green, pointed at the wrong artefact.
+
+Closed by the new gating job `windows-archive-install` (matrix pwsh ×
+powershell): package → extract into a scratch dir → `cli` → run the installed
+exe → `skill` → `all` over the top → `uninstall` → `uninstall` again →
+reinstall. The extraction parent is asserted to hold no `bin\` and no `skill\`,
+so a pass cannot come from the checkout fallback firing. Cost: two
+`windows-2025` legs at ~5 min each. The `release` job now `needs` it.
+
+### The red run at `212f597` was the harness, and the log says so directly
+
+`FAIL cli installed scratchpad.exe into -BinDir` plus a four-failure cascade.
+The comfortable reading is "harness bug"; recording the disambiguation because
+the branch has twice been bitten by assuming it. The first invocation's own
+output:
+
+```
+--> pwsh install.ps1
+      cli: installed scratchpad.exe at C:\Users\runneradmin\AppData\Local\scratchpad\bin\scratchpad.exe
+      skill: installed at C:\Users\runneradmin\.claude\skills\scratchpad\SKILL.md
+```
+
+The installer **found and copied both payloads out of the extracted archive** —
+`Resolve-Payload` worked. Nothing follows `install.ps1` on the `-->` line: my
+helper's parameter was named `$Args`, a PowerShell automatic variable, so the
+array bound empty and every call ran a bare `install.ps1` (default verb `all`,
+default `-BinDir`). The assertions then looked in a `-BinDir` that was never
+passed. The accident is a *stronger* proof than the test I wrote: a bare
+`install.ps1` is `all`, precisely the verb that had no source at all before
+this task.
+
+Two assertions in that run passed **vacuously** — "uninstall removed the
+binary" (never there) and "the installed scratchpad.exe runs" (`& $exe` on a
+missing path is a PowerShell error, not a native exit code, so `$LASTEXITCODE`
+kept the previous `0`). `3f42059` poisons `$LASTEXITCODE` with a sentinel
+before every launch. The **minimum-assertion-count guard** is what made this a
+legible failure rather than a partial green (`only 19 assertions ran`); it is
+the same anti-vacuity idea as the symlink job's zero-skip and
+no-result-lines assertions, and both blocks in the new job carry one.
+
+### Release-path holes, each reproduced before being closed
+
+- **Tag-name command injection (S3).** `git check-ref-format` accepts `;`,
+  `$`, `` ` ``, `|`, `&` in a tag name — checked, each one. `RELEASE_TAG` flows
+  into `make VERSION="$RELEASE_TAG"`, whose recipe expands `$(VERSION)`
+  **unquoted** into `/bin/sh`. Reproduced against a copy of that recipe: a tag
+  named `v1.0;<command>;` ran `<command>`, inside the one job holding
+  `contents: write` and a `GH_TOKEN`. `212f597` rejects any tag not matching
+  `^v[0-9][0-9A-Za-z.+-]*$` before a shell sees it, and validates
+  `windows-artifacts`' `git describe` output the same way. *Follow-up not taken
+  (Makefile is shared with P6.6): quote `-version "$(VERSION)"` there too.*
+- **Uncovered archives (S5).** `sha256sum -c` only checks files the sums file
+  names, and both jobs upload `dist/*.zip` by glob while `make release-windows`
+  never cleans `dist/`. Demonstrated by copying an archive under a second name:
+  `-c` passed clean. Both jobs now assert coverage in the reverse direction.
+- **Silent asset swap (S6).** `gh release view` succeeds for a *published*
+  release too, so a re-run swapped assets under a live release with no human in
+  the loop. Now refuses anything that is not still a draft.
+- **F8, closed: all 23 `uses:` SHA-pinned.** `actions/checkout`
+  `11d5960a…` (v4.4.0), `actions/setup-go` `40f1582b…` (v5.6.0),
+  `actions/upload-artifact` `ea165f8d…` (v4.6.2) — each the commit its major
+  tag pointed at, so semantics-preserving, not an upgrade. Rationale and the
+  one-line `gh api` bump recipe are in the workflow header.
+
+### The three gate questions
+
+1. **No script execution beyond the visible installer — PASS**
+   (confirmed-by-execution). The archive is exactly nine entries and
+   `mkrelease.go` re-opens each zip and fails on any unexpected name.
+   `install.ps1` contains **no** network primitive and no `Invoke-Expression`.
+   Named for completeness: it `Add-Type`s an inline `SendMessageTimeout`
+   P/Invoke for the PATH broadcast, and `drop-mcp` (part of the default `all`)
+   runs `claude mcp remove` if a `claude` command is already on PATH.
+2. **Checksums published — PASS** (confirmed-by-execution). `SHA256SUMS.txt`
+   covers every archive, is re-verified in both directions, ships as a release
+   asset, and the new job re-derives every hash with `Get-FileHash` — verbatim
+   the command `docs/windows.md` gives users. Now documented as **unsigned**:
+   integrity of transfer, not authenticity of release.
+3. **Uninstall non-destructive — PASS** (confirmed-by-reading, execution
+   corroborated). The marker evidence is sound but narrower than the claim: a
+   byte-identical marker proves one file survived, not that nothing else was
+   touched. The claim holds on the code — `Uninstall-All` has no path that can
+   reach `$DataRoot`; it touches `$BinDir`, the default bin parent only when
+   `-BinDir` was not overridden, the HKCU PATH value, and the two skill
+   directories. Two qualifications recorded: it removes those skill directories
+   **recursively** (S11), and an uninstall with a different `-BinDir` than the
+   install used leaves the old binaries and PATH entry behind.
+
+### Documentation defects — the verification step itself did not work
+
+`docs/windows.md` and `beta-release-notes.md` told users to run
+`.\scripts\install.ps1` (no `scripts\` exists in a release) and to hash
+`.\scratchpad-windows-amd64.zip` (archives are
+`scratchpad_<version>_windows_<arch>.zip`). The second is the *checksum
+instruction*: copy-pasting the documented verification step gave "file not
+found", which teaches users the verification is broken and to skip it. Fixed in
+`0fb8b8b` and, for the notes' "Verifying a download" section, in P6.6's
+`2a0a4f2`. `docs/windows.md` also now documents the Mark-of-the-Web /
+execution-policy wall (`Unblock-File` + a `-ExecutionPolicy Bypass` session),
+states that the installer downloads nothing and that any "pipe a URL into
+PowerShell" instruction should be treated as suspect, and names which verb
+upgrades which binary — `all` does **not** replace `scratchpad-web.exe`, only
+`install`/`startup` do.
+
+### Not fixed, recorded
+
+- **S9 — vendored third-party JS has no recorded provenance.**
+  `internal/web/assets/{htmx.min.js, idiomorph-ext.min.js, sse.js}` are
+  `go:embed`ded and served to every browser, with no upstream URL, version or
+  hash anywhere in the repo. Go modules are fine by contrast (3 direct deps, a
+  6-line `go.sum`, `go mod tidy -diff` gating drift). Partially verified:
+  `htmx.min.js` **is byte-identical to upstream `htmx.org@2.0.10`**
+  (`71ea6718…`, fetched and hashed). The other two are **UNVERIFIED** — no
+  version string, and a dozen plausible `idiomorph` / `htmx-ext-sse` releases
+  did not match. Not evidence of tampering; evidence that provenance cannot be
+  established from the repo. Someone who knows which build these came from
+  should write it down.
+- **S11 — uninstall removes the two skill directories recursively**, so
+  anything a user put beside `SKILL.md` goes with them.
+- **S12 — a `v*` tag on any commit produces draft assets.** Bounded (draft,
+  human publish, rebuilt from the tagged commit, now `needs` the archive job),
+  but no ancestry check. One line if the operator wants it:
+  `git merge-base --is-ancestor "$RELEASE_TAG" origin/main`. The related
+  structural gap is unchanged and not an agent's to close: **`main` still has
+  no branch protection rule**, so every "gating" job here is advisory at the
+  repository level.
+
+### Could not verify — read this before P6.8
+
+1. **Mark-of-the-Web / default execution policy.** The documented
+   `Unblock-File` + `-ExecutionPolicy Bypass` sequence is review-verified only;
+   the archive job passes `Bypass` explicitly, so CI proves the installer works
+   *once you are allowed to run it*, not that the unblock sequence is what a
+   real download needs. Add it to the owed pre-beta manual check.
+2. **`idiomorph-ext.min.js` and `sse.js` provenance** (S9).
+3. **The tagged-release path has never executed.** No `v*` tag exists on this
+   branch, so the `release` job — tag guard, draft check, both-directions
+   checksums, `-require-installer`, `--verify-tag` — is confirmed by reading
+   plus local reproduction, never by running. **Cut a throwaway pre-release tag
+   first.**
+4. **arm64 archives are built and checksummed but never installed.** The
+   archive job extracts amd64 only; arm64 gets PE-magic verification in
+   `mkrelease` and a native build job.
+5. **Unsigned-binary first-run behaviour** (SmartScreen/Defender) has not been
+   observed on a real machine.

@@ -249,7 +249,7 @@ Windows VM can install, run, update, and uninstall without touching user data.
   `SCRATCHPAD_ROOT`.
 - [x] **P5.6 [CX] Add CI artifact retention.** Upload binaries and test logs on
   pull requests; produce release assets only for tagged builds.
-- [ ] **P5.7 [CO review] Supply-chain and lifecycle review.** Verify downloaded
+- [x] **P5.7 [CO review] Supply-chain and lifecycle review.** Verify downloaded
   binaries need no arbitrary script execution beyond the visible installer,
   checksums are published, and uninstall is non-destructive.
 
@@ -364,6 +364,7 @@ and CI evidence, not from memory. Evidence per phase:
 | P3.1–P3.14 | Windows store/annotation backends shipped; `reviews/P3.13-security-invariants.md`, `reviews/P3.14-implementation-red-team.md`, and the P3.14 remediation record in `EXECUTION.md` |
 | P4.1–P4.7 | Native watch/web shipped; `reviews/P4.7-semantic-parity.md` and its four remediation records (P-1a/P-2/P-3/P-4/P-5/P-6/P-7/P-8) |
 | P5.1–P5.6 | `scripts/install.ps1` + `scripts/verify-install.ps1`, `windows-installer` matrix green on **both** engines at 94/94 (run `32994820274`); `EXECUTION.md`'s P5.1/P5.2/P5.5 record |
+| P5.7 | `reviews/P5.7-supply-chain-review.md` — FAIL AT ENTRY then PASS; the shipped archive could not install itself (fixed `0fb8b8b`), `windows-archive-install` added as a gating job proving install/upgrade/uninstall/reinstall from an extracted archive on both engines (24/24 each) plus `Get-FileHash` against `SHA256SUMS.txt` (8/8 each), all 23 actions SHA-pinned (F8 closed), three release-path holes closed; run `33017420341` |
 | P6.1 | `stress-linux` / `stress-windows` green (`-race`, `-count=20`) |
 | P6.2 | `reviews/P6.2-threat-model-audit.md` |
 | P6.3 | `reviews/P6.3-independent-code-review.md` |
@@ -382,8 +383,16 @@ Three caveats that a tick would otherwise hide:
   been re-run, so the copies in `~/.claude/skills` and `~/.pi/agent/skills` are
   stale — and `CLAUDE.md` requires that re-run. The documentation link check is
   part of P6.6, still in flight.
-- **P5.7 and P6.6 are genuinely unstarted** and are running now; **P6.8 is the
-  human gate** and is not the agent's to tick.
+- **P5.7 is now ticked on its own remediation, not on what it found.** The
+  review entered on a release archive that could not install itself and a
+  94/94-green installer job that had only ever tested the git-checkout layout.
+  Three findings are recorded and deliberately **not** fixed (vendored-JS
+  provenance, recursive skill-directory removal on uninstall, and a `v*` tag on
+  any commit producing draft assets), and five things could not be verified —
+  most importantly, **the tagged-release path has never executed.** See the
+  review's "Could not verify" section before P6.8.
+- **P6.6 is running now**; **P6.8 is the human gate** and is not the agent's to
+  tick.
 
 Review-checklist items were each re-verified this session rather than assumed:
 no untagged shared file imports `x/sys/unix` (the only match was a comment at
