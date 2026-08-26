@@ -18,6 +18,63 @@ package store
 // from the pinned handle on Windows). Asserting them together is what proves
 // the port did not quietly drop one.
 
+// FALSIFICATION RECORD. Every test in this file and its two platform halves
+// was run against a deliberately broken implementation before being trusted,
+// because a migrated test that passes while asserting nothing is worse than
+// the prototype coverage it replaces. Recorded here rather than in a commit
+// message alone: the evidence is the point, and a year from now this file is
+// where a reader will be standing.
+//
+// Falsified locally on Linux (each breakage reverted immediately after):
+//
+//	TestRootMustBeADirectory          drop O_DIRECTORY from openRootedFS
+//	                                  -> "openRootedFS accepted a regular file as the store root"
+//	TestRootMustNotBeALink            drop O_NOFOLLOW from openRootedFS
+//	                                  -> "openRootedFS accepted a symlink as the store root"
+//	TestDeleteIgnoresProjectSwap...   replace the handle-anchored removeTreeAt(parent, name)
+//	                                  with a path-based os.RemoveAll(filepath.Join(root, project, name))
+//	                                  -> "Delete did not remove the artifact from the pinned
+//	                                     (renamed-away) directory", and with that assertion
+//	                                     temporarily removed, the containment half fired too:
+//	                                     "Delete followed the swapped ancestor into the external tree"
+//	TestReadDirFDRestartsPerCall      drop readDirFD's unix.Seek(dup, 0, SEEK_SET)
+//	                                  -> "readDirFD call 2 returned 0 entries ([]), want 3"
+//
+// Falsified on real Windows by CI run 32999441103 (commit 120838f on the
+// scratch branch tmp/falsify-ac5, pushed for this purpose and deleted after;
+// it tripped the repository's automated security review, as a branch carrying
+// deliberately weakened containment guards should):
+//
+//	breakage A - the store-root guard made MODE-shaped instead of TAG-shaped,
+//	             i.e. at.isReparse() && at.ReparseTag == IO_REPARSE_TAG_SYMLINK:
+//	  TestRootMustNotBeAReparsePoint/junction
+//	    -> "openRootedFS accepted a junction reparse point as the store root"
+//	  TestRootMustNotBeAReparsePoint/unknown-tag
+//	    -> "openRootedFS accepted a unknown-tag reparse point as the store root"
+//	  Both flavours caught, which is the property: a mode-shaped guard misses
+//	  BOTH, and the unknown-tag one is invisible to os.Lstat's mode bits
+//	  entirely (plain ModeDir - RR1's second vector, ADR 5.2).
+//
+//	breakage B - annotationFS.openDir made to FOLLOW reparse points (a raw
+//	             ntOpenAt with neither FILE_OPEN_REPARSE_POINT nor OBJ_DONT_REPARSE):
+//	  TestAnnotationJunctionComponentsRejected failed on all four verbs
+//	    -> "LoadNotes/SaveNotes/DeleteNotes/WalkNotes accepted a junction
+//	       annotation component"
+//	  and, the payoff, on the leak check:
+//	    -> "the annotation backend wrote through the junction: [- index.html.json]"
+//	  i.e. the broken build performed the actual escape the test exists to
+//	  prevent, writing a sidecar into the external tree. The pre-existing
+//	  TestAnnotationSymlinkComponentsRejected failed under the same breakage,
+//	  so both link flavours discriminate.
+//
+// One test is not falsified by breaking production code because it carries the
+// A/B control inside itself: TestOpenDocumentGrantsFileShareDelete opens the
+// same file first with os.Open and REQUIRES the delete to be vetoed, then
+// through OpenDocument and requires it to succeed. Both halves executed on run
+// 32998775246. If the store's handle ever stops granting FILE_SHARE_DELETE the
+// second half fails; if Go's os.Open ever stops vetoing, the control self-skips
+// with an explicit marker rather than passing vacuously.
+
 import (
 	"os"
 	"path/filepath"

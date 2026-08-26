@@ -3080,3 +3080,88 @@ been green together with this task's own commits before. This closes out
 the P-5 / P6.3 F2 / gating-catch chain: every claim this task made about
 Windows behaviour in this session is now backed by a real, green,
 gating-enforced run, not reasoning or cross-compilation alone.
+
+---
+
+## AC5 coverage half — migrating the `internal/winspike`-only assertions
+
+Owner: the `internal/store` lane. Plan: P6.2 §11.4 items 1–6. Commits `d5ccfc5`, `227bcf9`
+and this one.
+
+ADR §11.1 has carried the migration inventory since revision 2, with owners
+(P3.11/P3.12, verified by P3.13) and a gate: *"this table must be green before
+`internal/winspike` is removed."* P6.2 found the gate had never been evaluated
+by anyone, and that the table omits two of the three AC5 cells outright — so
+`A6.parent_replaced` was a scheduling failure and `MX.root_file` /
+`MX.root_reparse.*` were never planned at all. Seven tests now close items 1–6.
+
+**Items 1–3 are the AC5 cells.** `TestRootMustBeADirectory` and
+`TestRootMustNotBeALink` (shared) plus `TestRootMustNotBeAReparsePoint`
+(Windows) cover Root/file and Root/link-or-reparse-point;
+`TestDeleteIgnoresProjectSwapAfterParentPinned` (shared) covers
+Delete/parent-replaced. Items 4–6 close the adjacent debt P6.2 listed beside
+them: the junction flavour of the annotation-component refusal, the document
+half of `P13.go_share_mode`, and `M16`.
+
+`A5.unknown_tag_removed` was **not** migrated, per P6.2's warning: the prototype
+asserts `RemoveTreeAt` *removes* an unrecognised tag, while the product
+*refuses* it at `Delete`'s top-level dispatch. Copying it would have asserted
+the opposite of shipped behaviour; `TestUnknownTagEntryIsInvisibleAndInert`
+already pins the refusal, correctly inverted. The `removeTreeAt` layer one step
+down does unlink such an entry, and `TestRemoveTreeAtLeavesUnknownTagTargetIntact`
+covers that — the two are different layers and the ADR's old wording conflated
+them (FD-2).
+
+`internal/winspike` is deliberately **not** deleted. Five of its properties are
+facts about Windows and Go rather than properties of our code (P6.2 §11.5) and
+must change category — to recorded measurements quoted in the ADR with run ids —
+before the package goes. Migrating the tests and deleting the package are two
+separate steps.
+
+### Falsification, quoted
+
+Every migrated test was run against a deliberately broken implementation before
+being trusted. The full record lives in `spikemigration_test.go`'s header, where
+a future reader of the tests will be standing; the summary:
+
+**Locally, on Linux** (each breakage reverted immediately):
+
+| Test | Broken guard | Observed failure |
+|---|---|---|
+| `TestRootMustBeADirectory` | `O_DIRECTORY` dropped from `openRootedFS` | *openRootedFS accepted a regular file as the store root* |
+| `TestRootMustNotBeALink` | `O_NOFOLLOW` dropped from `openRootedFS` | *openRootedFS accepted a symlink as the store root* |
+| `TestDeleteIgnoresProjectSwapAfterParentPinned` | handle-anchored `removeTreeAt(parent, name)` replaced by path-based `os.RemoveAll(filepath.Join(root, project, name))` | *Delete did not remove the artifact from the pinned (renamed-away) directory*; with that assertion temporarily removed the containment half fired too — *Delete followed the swapped ancestor into the external tree* |
+| `TestReadDirFDRestartsPerCall` | `readDirFD`'s `unix.Seek(dup, 0, SEEK_SET)` dropped | *readDirFD call 2 returned 0 entries ([]), want 3* |
+
+**On real Windows, CI run `32999441103`** (commit `120838f`, scratch branch
+`tmp/falsify-ac5`, pushed for this purpose and deleted after — it tripped the
+repository's automated security review with two HIGH path-traversal findings,
+which is the correct response to a branch carrying deliberately weakened
+containment guards, and both were verified and dismissed):
+
+| Breakage | Test | Observed failure |
+|---|---|---|
+| **A** — the store-root guard made **mode**-shaped instead of **tag**-shaped (`at.isReparse() && at.ReparseTag == IO_REPARSE_TAG_SYMLINK`) | `TestRootMustNotBeAReparsePoint/junction` | *openRootedFS accepted a junction reparse point as the store root* |
+| **A** | `TestRootMustNotBeAReparsePoint/unknown-tag` | *openRootedFS accepted a unknown-tag reparse point as the store root* |
+| **B** — `annotationFS.openDir` made to **follow** reparse points (raw `ntOpenAt`, neither `FILE_OPEN_REPARSE_POINT` nor `OBJ_DONT_REPARSE`) | `TestAnnotationJunctionComponentsRejected` | all four verbs: *LoadNotes / SaveNotes / DeleteNotes / WalkNotes accepted a junction annotation component* — and the payoff, *the annotation backend wrote through the junction: [- index.html.json]* |
+| **B** | `TestAnnotationSymlinkComponentsRejected` (pre-existing) | *LoadNotes accepted annotation symlink component* |
+
+Breakage A catching **both** flavours is the property under test: a mode-shaped
+guard misses both, and the unknown-tag one is invisible to `os.Lstat`'s mode
+bits entirely (plain `ModeDir` — RR1's second vector, ADR §5.2). Breakage B is
+the more forceful result: the broken build performed the *actual escape*,
+writing a note sidecar into the external tree through the junction.
+
+`TestOpenDocumentGrantsFileShareDelete` is the one test not falsified by
+breaking production code, because it carries the A/B control inside itself: it
+opens the same file first with `os.Open` and **requires** the delete to be
+vetoed, then through `OpenDocument` and requires it to succeed. Both halves
+executed on run `32998775246`. If the store's handle stops granting
+`FILE_SHARE_DELETE` the second half fails; if Go's `os.Open` stops vetoing, the
+control self-skips with an explicit marker rather than passing vacuously.
+
+**Verification.** All seven tests ran and passed on real Windows in run
+`32998775246`, job *Windows amd64 native — full suite, symlink-capable*, with
+no skips. They are gated on `testutil.RequireWatchLinks`, which emits the same
+`SKIP(symlink-capability)` marker that job asserts as zero — so they cannot
+silently retire if a runner image loses the capability.
