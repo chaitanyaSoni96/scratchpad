@@ -2968,3 +2968,97 @@ GOARCH=amd64 go build ./...`/`go vet ./...`/`go test -c ./internal/watch`;
 `GOOS=windows GOARCH=arm64 go build ./...`; Linux skip count unchanged at
 0 — all pass/clean. Real Windows CI for this commit: not yet obtained (see
 "Verification status" above; the same GitHub Actions backlog applies).
+
+### Gating catch — `TestDesiredDirsSkipsUnservicedReparseTagInsteadOfFailing`, and a correction to the attribution
+
+The first real Windows CI result for this task's work (run `32993449212`,
+commit `7cd3306` — the P-5 + F2 commits plus one more agent's unrelated
+push) came back red in three jobs, all with the identical failure:
+
+```
+reparse_windows_test.go:119: open C:\Users\RUNNER~1\...\001\tagged:
+    The file cannot be accessed by the system.
+```
+
+The operator's bisection reasoning — only `afc3a66`, `c035304`, `6ebed74`,
+`1ccfc88` and `bfe5392` separate the last known-success run from this one,
+and only `1ccfc88` touches `internal/watch` — was sound *reasoning*, but
+its premise turned out false: **the test was already failing at `bfadf46`
+(commit `afc3a66`, run `32992746359`), not passing.** Pulling that run's own
+job log (`Windows amd64 native — full suite, symlink-capable`) confirms
+the exact same failure, same line, same message, timestamped during that
+run. It stayed invisible only because that job still carried
+`[allowed to fail until P3.11/P4]` at that commit — `c035304`, which made
+the two native Windows jobs gating, landed *after* `bfadf46` but *before*
+this task's `1ccfc88`/`bfe5392` pushes ran against it. So this task's push
+was not the first to exercise the bug; it was the first to be judged by a
+gate that would fail on it. Correcting the record because getting
+attribution right matters more than getting a fast answer: **the defect is
+`afc3a66`'s (P-5), not `1ccfc88`'s (F2).** F2 changed nothing relevant here
+— confirmed by diffing the two commits directly, which shows `finalPathDOS`'s
+`\\?\` prefix-stripping is the only functional change, and the failing line
+runs entirely inside `canonicalDir`'s CreateFile step, upstream of anything
+`finalPathDOS` touches.
+
+**What actually happened.** `TestDesiredDirsSkipsUnservicedReparseTagInsteadOfFailing`
+plants a directory (`tagged`) with a reparse tag no filter driver claims,
+and checks that `desiredDirs` skips it rather than failing — and it does:
+the job log shows desiredDirs' own skip message
+(`scratchpad: watch: skipping unreadable or unclassifiable directory
+"...\tagged": open ...: The file cannot be accessed by the system.`)
+firing exactly as designed. The test then goes on to compute what key
+`tagged` *would* have gotten, purely to prove that key is absent from the
+result, by calling `canonicalDir(tagged)` directly and treating any error
+from that call as a hard test failure (`t.Fatal(err)`) — a leftover
+assumption from when Windows' `canonicalDir` was `filepath.EvalSymlinks`,
+which never opens its target at all for a non-`ModeSymlink` entry like a
+reparse-tagged directory, and so always succeeded here. `afc3a66` replaced
+that with a handle-based `canonicalDir` that opens the path itself, the
+same way `openWatchDir` does — so it now correctly, expectedly, cannot open
+`tagged` either, and the test's own assumption that it always can broke
+silently the moment P-5 landed. The behaviour under test was right the
+whole time; only the test's own assertion tool was wrong to assume success.
+
+**Fix** (`internal/watch/reparse_windows_test.go`): the `tagged`-absence
+check now treats `canonicalDir(tagged)` failing as sufficient proof on its
+own — it is the exact same function called on the exact same path
+`desiredDirs`' walk used, moments apart in the same process, so an error
+here means the walk hit the identical error and `skipEntry` swallowed it,
+which `desiredDirs(root)` returning no error already established. If
+`canonicalDir` ever *does* succeed here again (a future Go/Windows change,
+or a different reparse-tag handling policy), the code still positively
+checks `dirs` for that key, so the assertion loses no strength in either
+outcome — this is not a relaxation of what the test proves, only a fix to
+how it proves it. No other test in the package assumes `canonicalDir`
+succeeds on a path it cannot actually open (checked directly: every other
+`canonicalDir(...)` call site in `*_test.go` targets a real, openable
+directory, junction or symlink target).
+
+**On local coverage.** The operator asked for whatever coverage would have
+caught this locally rather than on a runner, if that's possible at all. It
+is not, for this specific defect class: reproducing it requires setting a
+real, unserviced NTFS reparse tag via `FSCTL_SET_REPARSE_POINT` and then
+observing a real `CreateFile` failure translate through the Win32 error
+path — both Windows-only, with no meaningful Linux analogue, on a package
+that is itself only buildable/testable for Windows behaviour on a Windows
+host or (for compilation only) via `GOOS=windows` cross-compilation, which
+was already run against this exact change and could not have caught a
+runtime-only assertion failure. This is the same shape as several other
+findings in this plan (`spike-findings.md`'s M1: "SMB / UNC: no share
+available in CI") — some things in this codebase are only verifiable on
+real Windows CI, and that is a property of the platform, not a gap in this
+task's process.
+
+**On the gate itself.** This is worth stating plainly, since it is the
+strongest evidence available either way: the two native Windows jobs went
+gating in `c035304`, and roughly twenty minutes later they caught a real,
+previously-invisible defect on the very first commit judged against them
+— one that had been silently red for hours before that, masked by
+`continue-on-error`. Removing that allowance was the right call.
+
+**Verification.** `GOOS=windows GOARCH=amd64 go test -c ./internal/watch`
+(compiles); `GOOS=windows GOARCH=amd64 go vet ./...`; `GOOS=windows
+GOARCH=arm64 go build ./...`; `go build ./...` and `go test ./... -count=1`
+on Linux — all clean/pass. The specific assertion this fixes cannot be
+exercised outside real Windows CI (see above); that run is what will
+actually confirm this, and this entry should be updated with its result.

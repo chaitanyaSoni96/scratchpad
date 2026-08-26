@@ -114,12 +114,38 @@ func TestDesiredDirsSkipsUnservicedReparseTagInsteadOfFailing(t *testing.T) {
 	if _, ok := dirs[okCanonical]; !ok {
 		t.Fatal("sibling directory missing from the desired watch set — one bad entry must not take others down with it")
 	}
-	taggedCanonical, err := canonicalDir(tagged)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, ok := dirs[taggedCanonical]; ok {
-		t.Fatal("the unserviced reparse-tagged directory should have been skipped, not watched")
+	// canonicalDir(tagged) is now EXPECTED to fail here too
+	// (identity_windows.go, P-5): it opens the path itself, following
+	// reparse points the same way openWatchDir does, so an
+	// unserviced-tag directory CreateFile cannot open is exactly as
+	// unopenable through canonicalDir as it is through the walk that
+	// already skipped it above (see the "skipping unreadable or
+	// unclassifiable directory" log line desiredDirs itself produced).
+	// There is no meaningful identity to report for an object the OS
+	// refuses to open at all, and that failure is sufficient proof on
+	// its own that dirs cannot contain an entry for "tagged": this is
+	// the exact same function called on the exact same path desiredDirs'
+	// walk used, in the same process, moments apart, so an error here
+	// means the walk hit the identical error and skipEntry swallowed it
+	// -- which desiredDirs(root) returning no error above already
+	// confirms happened.
+	//
+	// Before P-5, Windows' canonicalDir was filepath.EvalSymlinks, which
+	// never opens its target at all for a non-ModeSymlink entry like a
+	// reparse-tagged directory -- so it used to succeed here, and this
+	// block used to assume that unconditionally (t.Fatal on any error).
+	// That assumption broke, silently, the moment P-5 landed a
+	// handle-based canonicalDir (afc3a66): this exact line started
+	// failing in real Windows CI at that commit, but stayed invisible
+	// because the two native Windows jobs were not yet gating
+	// (EXECUTION.md's P-5/F2 sections have the full account). The
+	// behaviour under test -- desiredDirs skipping the tagged directory
+	// -- was correct the whole time; only this assertion's own tool was
+	// wrong to assume canonicalDir always succeeds.
+	if taggedCanonical, err := canonicalDir(tagged); err == nil {
+		if _, ok := dirs[taggedCanonical]; ok {
+			t.Fatal("the unserviced reparse-tagged directory should have been skipped, not watched")
+		}
 	}
 }
 
