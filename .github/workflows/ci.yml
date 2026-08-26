@@ -341,9 +341,17 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - name: go test -race
+      # -race needs cgo and a C toolchain, so this ONE step overrides the
+      # job's CGO_ENABLED=0. The runner image ships mingw-w64 gcc; the step
+      # prints the compiler it found so a missing toolchain is legible in
+      # the log rather than surfacing as an opaque link error.
+      - name: go test -race (cgo required)
         shell: pwsh
-        run: go test -race ./internal/store ./internal/watch ./internal/web
+        env:
+          CGO_ENABLED: 1
+        run: |
+          gcc --version
+          go test -race ./internal/store ./internal/watch ./internal/web
       - name: store, 20 runs
         shell: pwsh
         run: go test ./internal/store -count=20
