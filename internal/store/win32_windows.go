@@ -6,6 +6,13 @@
 // correctness, guarded by a runtime check rather than trusted as a comment
 // (P3.1's F11 checklist: the prototype had three unchecked uint16
 // truncations, all fixed here as returned errors instead of silent overflow).
+// The hand-rolled structs (attrTagInfo, fileIDInfoRaw, reparseHeader, and
+// internal/watch/identity_windows.go's fileIDInfo) each embed structs.
+// HostLayout (P3.14 red-team L3): the offsets have always matched the
+// Windows headers on amd64/arm64 under Go's current layout rules, but that
+// marker is what Go 1.23+ added to make host-native layout a promise the
+// compiler/vet can hold this package to, rather than a convention a future
+// field reorder could silently violate.
 //
 // This file is the mechanism layer only: ntOpenAt, attribute/identity reads,
 // reparse buffer encode/decode, and the rename buffer builder. Policy
@@ -22,6 +29,7 @@ import (
 	"io/fs"
 	"runtime"
 	"strings"
+	"structs"
 	"syscall"
 	"unsafe"
 
@@ -125,7 +133,16 @@ const noFollowAttrs = windows.OBJ_CASE_INSENSITIVE | windows.OBJ_DONT_REPARSE
 // no walk ever handing the kernel more than one component of attacker-
 // reachable structure at a time.
 func ntOpenAt(parent windows.Handle, name string, access, disposition, options, objAttrs, fileAttrs uint32) (windows.Handle, error) {
-	if name == "" || strings.ContainsAny(name, `\/`) {
+	// L1 (P3.14 red-team): "." and ".." are each syntactically ONE path
+	// component, so the ContainsAny check alone lets them through — and ".."
+	// resolved against an OBJECT_ATTRIBUTES.RootDirectory anchor walks UP,
+	// out of containment, the one direction this whole design exists to
+	// prevent. Not currently reachable (validateName/validateSegment both
+	// reject "." and ".." before any caller gets here, and os.DirEntry.Name()
+	// never yields either), so this is defence in depth in the primitive that
+	// is supposed to be the last line — matching Go's own Deleteat, which
+	// special-cases name == "." for the same reason.
+	if name == "" || name == "." || name == ".." || strings.ContainsAny(name, `\/`) {
 		return windows.InvalidHandle, fmt.Errorf("scratchpad: ntOpenAt requires a single path component, got %q", name)
 	}
 	u16, err := windows.UTF16FromString(name)
@@ -133,7 +150,14 @@ func ntOpenAt(parent windows.Handle, name string, access, disposition, options, 
 		return windows.InvalidHandle, err
 	}
 	nameBytes := (len(u16) - 1) * 2
-	if nameBytes < 0 || nameBytes > 0xFFFF {
+	// L2 (P3.14 red-team): bounded at 0xFFFD, not 0xFFFF. MaximumLength
+	// carries the NUL terminator (nameBytes+2), so nameBytes==0xFFFE would
+	// pass an ">0xFFFF" bound and then uint16(nameBytes+2) truncates to 0 —
+	// a NTUnicodeString claiming 65534 bytes of content in a 0-byte buffer.
+	// Unreachable in practice (names are <=100/255 chars), but this bound is
+	// explicitly defensive, so it is sized to make MaximumLength's own
+	// truncation impossible rather than merely Length's (the F11 fix below).
+	if nameBytes < 0 || nameBytes > 0xFFFD {
 		// F11: the prototype computed NTUnicodeString.Length as an
 		// unchecked uint16 truncation of this value. A name this long
 		// cannot be produced by validateName/validateSegment, but ntOpenAt
@@ -143,7 +167,7 @@ func ntOpenAt(parent windows.Handle, name string, access, disposition, options, 
 	}
 	us := windows.NTUnicodeString{
 		Length:        uint16(nameBytes),
-		MaximumLength: uint16(len(u16) * 2),
+		MaximumLength: uint16(nameBytes + 2), // +2 for the NUL terminator; cannot overflow uint16 given the bound above
 		Buffer:        &u16[0],
 	}
 	oa := windows.OBJECT_ATTRIBUTES{
@@ -183,6 +207,7 @@ func ntOpenAt(parent windows.Handle, name string, access, disposition, options, 
 // The tag — never fs.FileMode, never FILE_ATTRIBUTE_REPARSE_POINT alone —
 // is the authoritative classification (R4/R5, ADR §2.1/§5).
 type attrTagInfo struct {
+	_              structs.HostLayout // L3 (P3.14 red-team): promise host-native layout, not just today's convention
 	FileAttributes uint32
 	ReparseTag     uint32
 }
@@ -205,6 +230,7 @@ func attrTagOf(h windows.Handle) (attrTagInfo, error) {
 // this — not windows.ByHandleFileInformation.FileIndex{High,Low} — is what
 // objectID is built from.
 type fileIDInfoRaw struct {
+	_                  structs.HostLayout // L3 (P3.14 red-team): promise host-native layout, not just today's convention
 	VolumeSerialNumber uint64
 	FileID             [16]byte
 }
@@ -231,6 +257,7 @@ func dupHandle(h windows.Handle) (windows.Handle, error) {
 // ---------------------------------------------------------------------------
 
 type reparseHeader struct {
+	_                 structs.HostLayout // L3 (P3.14 red-team): promise host-native layout, not just today's convention
 	ReparseTag        uint32
 	ReparseDataLength uint16
 	Reserved          uint16

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io/fs"
 	"os"
+	"structs"
 	"syscall"
 	"unsafe"
 
@@ -41,6 +42,7 @@ type dirIdentity struct {
 // helper for a single 24-byte read — see the P4 report for the fuller
 // reasoning and what would change if a shared helper is preferred later.
 type fileIDInfo struct {
+	_                  structs.HostLayout // L3 (P3.14 red-team): promise host-native layout, not just today's convention
 	VolumeSerialNumber uint64
 	FileID             [16]byte
 }
@@ -123,8 +125,17 @@ func openWatchDir(path string) (*os.File, error) {
 //
 // The skip set, and why each member belongs in it:
 //
-//   - os.IsNotExist: the entry disappeared between being listed and being
-//     opened. Identical to Linux's existing (and unchanged) behaviour.
+//   - errors.Is(err, fs.ErrNotExist): the entry disappeared between being
+//     listed and being opened. Identical to Linux's existing (and unchanged)
+//     behaviour. Deliberately errors.Is, not os.IsNotExist (P3.14 red-team
+//     L4): os.IsNotExist does not walk an Unwrap chain, which is exactly the
+//     defect annotations.go's loadNotesRaw documents at length after it bit
+//     that function on Windows — it happens to work here today only because
+//     every error actually reaching this function is a bare syscall.Errno or
+//     *os.PathError, both of which os.IsNotExist also handles, and stops
+//     working the moment anything wrapped (a *winError, a future
+//     fmt.Errorf("%w")) reaches it. errors.Is is what the very next check
+//     already uses.
 //   - fs.ErrPermission: an ACL the server's account cannot read. Not a
 //     platform-specific finding, but grouped here because Windows's default
 //     ACL surface makes it far more likely to be hit by an ordinary,
@@ -156,7 +167,7 @@ func openWatchDir(path string) (*os.File, error) {
 //     GitHub Actions runner, so this branch is unverified by CI and is a
 //     documented exclusion, not a tested one — see the P4 report.
 func skipWalkError(err error) bool {
-	if os.IsNotExist(err) {
+	if errors.Is(err, fs.ErrNotExist) {
 		return true
 	}
 	if errors.Is(err, fs.ErrPermission) {
