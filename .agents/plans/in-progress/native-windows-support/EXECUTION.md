@@ -929,5 +929,20 @@ separators, and `filepath` vs `path` confusion:
   `internal/web` failures on both native jobs were confirmed to be
   `TestListFragmentBrowsesWatchWithoutFollowingNestedLinks` and
   `TestListFragmentAppliesFolderIgnoreRules`, matching Phase 3's trace.
-- [Fill in after push: run ID where `internal/web` reports `ok` on both
-  native Windows jobs.]
+- `32932302339` (commit `3b69d43`, this task's push) — `scratchpad/internal/web`
+  reports **`ok`** on both native jobs (`Windows amd64 native — full suite,
+  symlink-capable` and `Windows amd64 native — degraded mode, no symlinks`),
+  confirmed by grepping the raw log for the package line, not the job's
+  overall conclusion. Both jobs still report an overall `failure` because
+  `scratchpad/internal/watch` still `FAIL`s there — that is P4.1/P4.2's
+  concurrent stub, explicitly out of this task's scope, and unrelated to
+  `internal/web`. Both native jobs remain `continue-on-error`
+  (`[allowed to fail until P3.11/P4]` / `[allowed to fail until P4.4]`),
+  untouched by this task. Windows arm64 native build and both Windows
+  cross-builds (amd64/arm64) passed, as did the Linux job
+  (`vet`/`test`/`check-make`/`build`, `internal/web` again `ok`). Local gates
+  before push (`make test`; `go test ./... -count=1`; `go test internal/web
+  -race -count=3`; `GOOS=windows GOARCH={amd64,arm64} go build ./...`;
+  `GOOS=windows go vet ./...`) were clean; Linux skip count stayed at 0; the
+  passing `internal/web` test-name set (24 tests) is unchanged from before
+  this task — none renamed, skipped, or removed.
