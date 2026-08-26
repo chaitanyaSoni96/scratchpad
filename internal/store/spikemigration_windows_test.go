@@ -86,7 +86,7 @@ func TestRootMustNotBeAReparsePoint(t *testing.T) {
 			wantTag: "MOUNT_POINT",
 		},
 		{
-			name: "unknown-tag directory",
+			name: "unknown-tag",
 			plant: func(t *testing.T, path string) {
 				if err := makeUnknownTagReparseAt(int(staging), filepath.Base(path), nonMicrosoftTag); err != nil {
 					t.Fatal(err)
@@ -105,13 +105,13 @@ func TestRootMustNotBeAReparsePoint(t *testing.T) {
 			rfs, err := openRootedFS(false)
 			if err == nil {
 				rfs.close()
-				t.Fatalf("openRootedFS accepted a %s as the store root", tc.name)
+				t.Fatalf("openRootedFS accepted a %s reparse point as the store root", tc.name)
 			}
 			// Refused ON THE TAG: the message names the tag that was read from
 			// the handle. A mode-based guard could not produce this string, and
 			// for the unknown-tag case could not have refused at all.
 			if !strings.Contains(err.Error(), tc.wantTag) {
-				t.Errorf("openRootedFS refused a %s but did not name its tag %s: %v", tc.name, tc.wantTag, err)
+				t.Errorf("openRootedFS refused a %s but did not name the tag %s it read from the handle: %v", tc.name, tc.wantTag, err)
 			}
 			if !strings.Contains(err.Error(), "reparse point") {
 				t.Errorf("openRootedFS refusal does not read as a reparse-point refusal: %v", err)
