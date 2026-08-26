@@ -2567,7 +2567,9 @@ First surfaced as a `SECURITY-FAIL` on `A5.unknown_tag_refused` in **run 7**
 commit `6f8b5c3`); corrected in run 8 and unchanged through run 9. Verbatim:
 
 > "for a NON-MICROSOFT tag the WITH-flag and WITHOUT-flag opens return the SAME
-> status… `OBJ_DONT_REPARSE` therefore does NOTHING for an unknown tag… On a
+> status (`STATUS_IO_REPARSE_TAG_NOT_HANDLED`, `0xC0000279`), whereas for the
+> junction they differ (refused vs traverses)… `OBJ_DONT_REPARSE` therefore
+> does NOTHING for an unknown tag… On a
 > machine that HAS the driver — Windows Containers (WCI\*), VFS-for-Git
 > (PROJFS\*), a vendor filter — the same open would be SERVICED and the walk
 > would traverse. R3 stated as 'OBJ_DONT_REPARSE on every component' is
@@ -2582,6 +2584,14 @@ a test asserting the other answer would fail on CI.
 same handle, rather than trusting `OBJ_DONT_REPARSE`. Without this line a reader
 sees `noFollowAttrs` carrying `OBJ_DONT_REPARSE` and may reasonably conclude the
 flag is the control. **It is not. The tag read is.**
+
+The junction half of that quote is the **control arm** and must not be trimmed
+again: it is what shows the probe *could* detect a difference between the
+with-flag and without-flag opens and did not for the unknown tag, rather than
+being insensitive to begin with. An inertness claim without its control is an
+assertion, not a measurement. (Restored after P6.3's pre-deletion gate walk
+found it elided — the clause was recoverable from run 7's log at the time, but
+`internal/winspike` is gone and the logs age out; see the retention note above.)
 
 ---
 
