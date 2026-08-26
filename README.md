@@ -2,7 +2,8 @@
 
 Self-hosted artifact hosting for coding agents. Agents publish html/css/js
 artifacts with the `scratchpad` CLI; every artifact folder under
-`~/.scratchpad` is served instantly on an auto-refreshing htmx site.
+`~/.scratchpad` (`%USERPROFILE%\.scratchpad` on Windows) is served instantly
+on an auto-refreshing htmx site.
 
 ![The scratchpad home page: live artifact previews alongside a watched folder, a multi-page collection, project folders, and open-note badges](docs/screenshots/index.png)
 
@@ -44,6 +45,16 @@ the moment anything is published. `make install` runs it natively under
 Both deployments bind loopback by default. `make install LAN=1` is the native
 LAN equivalent; LAN mode exposes artifact contents and unauthenticated delete
 and notes-write endpoints to every host that can reach port 8737.
+
+On **Windows** there is no container and no WSL — `scratchpad.exe` and
+`scratchpad-web.exe` are native binaries, installed and started from
+PowerShell without administrator rights:
+
+```powershell
+.\scripts\install.ps1 install   # CLI + skill + a per-user logon Scheduled Task
+```
+
+Windows support is beta and NTFS-only. See [docs/windows.md](docs/windows.md).
 
 ## Connect your agents
 
@@ -93,5 +104,7 @@ the note.
   API, anchoring
 - [docs/ignore-rules.md](docs/ignore-rules.md) — `.scratchpadignore` and what
   is hidden by default
+- [docs/windows.md](docs/windows.md) — native Windows: install, startup,
+  watch links, supported filesystems, troubleshooting
 - [docs/internals.md](docs/internals.md) — layout, security model,
   deployment, env vars

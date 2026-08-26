@@ -56,7 +56,8 @@ must match `^[a-zA-Z0-9][a-zA-Z0-9._-]{0,99}$`. One bad filename
 folder. Also rejected: a reserved Windows device basename — `CON`, `PRN`,
 `AUX`, `NUL`, `COM0`-`COM9`, `LPT0`-`LPT9`, case-insensitive and regardless of
 extension (`nul.html`, `Com1.tar.gz`) — and a name ending in a trailing dot
-or space. This keeps a store created on Linux movable to a Windows machine;
+or space. This keeps a store created on Linux movable to a Windows machine
+(see [windows.md](windows.md));
 it applies only to names being created (publish, watch), never to looking up
 or deleting an entry a watched repository already named itself.
 

@@ -5,7 +5,8 @@ description: Host html/css/js artifacts (demos, dashboards, reports, visualizati
 
 # scratchpad
 
-Any folder under `~/.scratchpad` (override: `SCRATCHPAD_ROOT`) that directly
+Any folder under `~/.scratchpad` — `%USERPROFILE%\.scratchpad` on Windows,
+override: `SCRATCHPAD_ROOT` — that directly
 contains an `.html` file is served at `http://localhost:8737/a/<path>/`
 (override: `SCRATCHPAD_URL`). The site refreshes as files change; `.md` files
 render as styled pages. The server is loopback-only by default; `make web LAN=1`
@@ -17,6 +18,14 @@ and notes-write endpoints, and should be used only on a trusted network.
 ```bash
 mkdir -p .scratchpad                          # gitignore it unless the user wants it committed
 scratchpad watch .scratchpad -name <project>  # -name required: ".scratchpad" is not a valid name
+```
+
+On Windows the same two steps in PowerShell — the CLI flags are identical,
+only the shell differs:
+
+```powershell
+New-Item -ItemType Directory -Force .scratchpad | Out-Null
+scratchpad watch .scratchpad -name <project>
 ```
 
 Both lines are safe to repeat — re-watching the same folder under the same
@@ -74,7 +83,8 @@ erasing and reopening are the user's, in the web UI.
 ## Rules
 
 - Always report the artifact URL. A warning on stderr means the files are in
-  place but the host is down — tell the user to run `make web`.
+  place but the host is down — tell the user to run `make web` (on Windows:
+  `.\scripts\install.ps1 start`, or run `scratchpad-web.exe` in the foreground).
 - Keep artifacts self-contained, with relative links. Card previews run in an
   opaque-origin sandbox: a `fetch()` of a sibling file fails there (it works
   in the viewer and a direct tab), and an entry page over 1 MiB draws a
@@ -91,3 +101,13 @@ erasing and reopening are the user's, in the web UI.
 - A watch link is the only symlink boundary the site follows. Do not rely on
   nested symlinks inside a watched tree: they are not browsed or listed, and
   publish/delete/unwatch refuse symlinked project ancestors.
+- On Windows the store is `%USERPROFILE%\.scratchpad` and the watch link is a
+  reparse point: a directory symbolic link when the user has Developer Mode on,
+  otherwise a junction. `watch` picks automatically and needs no elevation, so
+  do not tell the user to enable Developer Mode or run as administrator. If
+  `watch` does fail, publish still works — fall back to `publish` and say so
+  rather than stopping. Use forward slashes in `-project` paths on every
+  platform; they are store paths, not native paths.
+- Windows quoting differs, not the flags. In PowerShell use `Get-Content x.html
+  | scratchpad publish -name hello -html -` rather than `cat`, and quote any
+  path containing a space.

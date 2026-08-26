@@ -32,6 +32,42 @@ that writes a folder there publishes an artifact.
   through untouched. `notes.go` is the review-notes HTTP surface
   ([notes.md](notes.md)).
 
+## Platform split
+
+Domain policy lives in untagged files; only operating-system **mechanism** is
+selected by build tag. There is deliberately no filesystem interface or VFS —
+it would obscure exactly the properties the security model depends on.
+
+```
+internal/store/
+  store.go, annotations.go, names.go   shared policy
+  storefs_linux.go / _windows.go       handle-relative store mechanism
+  annotationfs_linux.go / _windows.go  handle-relative annotation mechanism
+  link_linux.go / _windows.go          link create/read/classify/remove
+  names_linux.go / _windows.go         lookup-segment rules
+  win32_windows.go                     handle wrapper, NTSTATUS translation
+internal/watch/
+  watch.go                             shared reconciliation and debounce
+  identity_unix.go / identity_windows.go   directory identity
+```
+
+Both backends are handle-anchored: a mutation is issued against a directory
+handle pinned *before* the check that authorised it, so renaming or
+substituting an ancestor cannot redirect it. Linux uses `openat`/`O_NOFOLLOW`;
+Windows uses `NtCreateFile` with `OBJECT_ATTRIBUTES.RootDirectory` plus a
+`FILE_ATTRIBUTE_TAG_INFO` read from the same handle. On Windows,
+`OBJ_DONT_REPARSE` alone is **not** sufficient — it is inert for
+non-Microsoft reparse tags, where the refusal comes from no filter driver
+claiming the tag rather than from containment. Path prefix comparison is not
+used for containment anywhere: 8.3 short names alone make it unsound.
+
+Neither platform re-derives a path from a pinned handle. Linux used to, via
+`/proc/self/fd/N`; that has no Windows analogue and is gone from both.
+
+See [windows.md](windows.md) for user-facing Windows behaviour and
+`.agents/ADRs/2026-08-26-windows-rooted-store-backend.md` for the design and
+its measured evidence.
+
 ## Artifact resolution
 
 An artifact is any directory directly containing an `.html` file, and the
@@ -148,9 +184,21 @@ podman run -p 0.0.0.0:8737:8737 \
 The container command listens on `:8737` internally; host port publication is
 the exposure boundary.
 
+### Windows
+
+No container and no WSL. `scripts/install.ps1` installs the two `.exe`s under
+`%LOCALAPPDATA%\scratchpad\bin` and registers `scratchpad-web.exe --addr
+127.0.0.1:8737` as a **per-user logon Scheduled Task** — not a Windows Service,
+which would typically need elevation and run under a different profile than the
+`%USERPROFILE%` data root. Foreground execution is equally supported. Nothing
+requires administrator rights, and no installer operation touches the data
+root. `make build-windows` cross-builds both architectures into `dist/`;
+`make release-windows` adds zip archives and `SHA256SUMS.txt`.
+
 ## Environment
 
-- `SCRATCHPAD_ROOT` — artifact root (the container sets `/data`).
+- `SCRATCHPAD_ROOT` — artifact root (the container sets `/data`; the default
+  is `%USERPROFILE%\.scratchpad` on Windows).
 - `SCRATCHPAD_URL` — advertised base URL, default `http://localhost:8737`.
 
 Ignore rules are files, not env vars.
