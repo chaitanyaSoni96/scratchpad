@@ -34,8 +34,14 @@ build-windows:
 # Zip archives + SHA256SUMS.txt via the Go helper (no dependency on a host
 # `zip` binary). RELEASE_FLAGS=-require-installer makes a missing
 # scripts/install.ps1 fatal — the tagged-release CI job sets it.
+# VERSION is quoted here on purpose (P5.7). Make passes each recipe line to
+# /bin/sh, so an unquoted $(VERSION) carrying shell metacharacters would be
+# interpreted rather than passed through. CI already refuses a release tag that
+# does not match ^v[0-9][0-9A-Za-z.+-]*$, which closes the tag vector; this is
+# the defence-in-depth half, and it also covers a hand-run
+# `make release-windows VERSION=...` that never passes through that guard.
 release-windows: build-windows
-	go run scripts/mkrelease.go -dist $(DIST) -version $(VERSION) $(RELEASE_FLAGS)
+	go run scripts/mkrelease.go -dist "$(DIST)" -version "$(VERSION)" $(RELEASE_FLAGS)
 
 clean-dist:
 	rm -rf $(DIST)
