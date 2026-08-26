@@ -2849,6 +2849,16 @@ Whoever next has Windows CI access on this branch should treat this section
 as unfinished until a run against this commit is read end to end and its
 result (pass or the specific measured failure) is recorded here.
 
+**Update: obtained.** Once GitHub Actions cleared its incident backlog, CI
+run `32994312495` (commit `013466e`, the tip of all three commits in this
+P-5/F2/gating-catch chain) came back **green across every job**, including
+`Windows amd64 native — full suite, symlink-capable`, `Windows amd64 native
+— degraded mode, no symlinks`, `Windows arm64 native — build`, `Windows
+amd64 — race and repetition`, and both installer verification jobs. This is
+the first fully-green run this task's own commits have been judged against
+end to end, and it landed only after the reparse-tag test fix below — see
+that section for what stood between the P-5/F2 commits and this result.
+
 ### Verification
 
 ```
@@ -2863,9 +2873,10 @@ GOOS=windows GOARCH=amd64 go test -c ./internal/watch # compiles, not run
 go test ./... -v -count=1 | grep -c '^--- SKIP'      # 0, unchanged on Linux
 ```
 
-Real Windows CI (`windows-2025` / `windows-11-arm`): **not yet obtained**
-— see "Verification status" above. This entry must be updated with the run
-URL and result once GitHub Actions recovers.
+Real Windows CI (`windows-2025` / `windows-11-arm`): **confirmed green**,
+CI run `32994312495` (commit `013466e`) — see the "Update: obtained" note
+above and the "Gating catch" section below for the one thing that had to
+be fixed first.
 
 Two commits: `fix(watch): resolve junctions through canonicalDir on Windows
 (P-5)` (`afc3a66`), and a follow-up correcting
@@ -3060,5 +3071,13 @@ previously-invisible defect on the very first commit judged against them
 (compiles); `GOOS=windows GOARCH=amd64 go vet ./...`; `GOOS=windows
 GOARCH=arm64 go build ./...`; `go build ./...` and `go test ./... -count=1`
 on Linux — all clean/pass. The specific assertion this fixes cannot be
-exercised outside real Windows CI (see above); that run is what will
-actually confirm this, and this entry should be updated with its result.
+exercised outside real Windows CI, and now has been: CI run `32994312495`
+(commit `013466e`) is green in every job, including all three that were
+failing before this fix — `Windows amd64 native — full suite,
+symlink-capable`, `Windows amd64 native — degraded mode, no symlinks`, and
+`Windows amd64 — race and repetition (P6.1)` — plus `Windows arm64 native
+— build` and both installer verification jobs, neither of which had ever
+been green together with this task's own commits before. This closes out
+the P-5 / P6.3 F2 / gating-catch chain: every claim this task made about
+Windows behaviour in this session is now backed by a real, green,
+gating-enforced run, not reasoning or cross-compilation alone.
