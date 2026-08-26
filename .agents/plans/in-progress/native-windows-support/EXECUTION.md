@@ -3315,8 +3315,13 @@ no-result-lines assertions, and both blocks in the new job carry one.
   named `v1.0;<command>;` ran `<command>`, inside the one job holding
   `contents: write` and a `GH_TOKEN`. `212f597` rejects any tag not matching
   `^v[0-9][0-9A-Za-z.+-]*$` before a shell sees it, and validates
-  `windows-artifacts`' `git describe` output the same way. *Follow-up not taken
-  (Makefile is shared with P6.6): quote `-version "$(VERSION)"` there too.*
+  `windows-artifacts`' `git describe` output the same way. The recommended
+  second half — quoting `-version "$(VERSION)"` in the Makefile, left alone
+  here because that file was shared with the concurrent P6.6 task — was closed
+  by P6.6 in `607a131`, with a negative control (revert the quotes and
+  `VERSION='v9.9;echo INJECTED>/tmp/pwn-proof;'` creates the file; apply them
+  and the metacharacters reach `mkrelease` as a literal archive name). Closed
+  at both layers.
 - **Uncovered archives (S5).** `sha256sum -c` only checks files the sums file
   names, and both jobs upload `dist/*.zip` by glob while `make release-windows`
   never cleans `dist/`. Demonstrated by copying an archive under a second name:
