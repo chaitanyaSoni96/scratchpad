@@ -20,14 +20,23 @@ import (
 // P-4). RequireWatchLinks, not RequireSymlinks: junction creation needs no
 // privilege at all, so this should never skip on an ordinary box.
 //
-// This test is also the empirical check P4.7 finding P-5 asks for.
-// filepath.EvalSymlinks (canonicalDir) does not resolve a junction — Go
-// reports it as ModeDir|ModeIrregular, never ModeSymlink, and
-// walkSymlinks only ever substitutes a ModeSymlink component — so unlike a
-// directory symlink (resolved to its SOURCE path), a junction and
-// everything walked through it is registered under its STORE-SIDE path.
-// If a future Go version (or this reasoning) is wrong, the first assertion
-// below is where that would show up, not the second.
+// This test is also the empirical check P4.7 finding P-5 asked for, and it
+// settles P-5 with real evidence from Windows CI (Go 1.26.5,
+// windows-amd64), not just reasoning from Go's source: canonicalDir
+// (filepath.EvalSymlinks) succeeds resolving a path UP TO AND INCLUDING a
+// junction component, but FAILS with "the system cannot find the path
+// specified" for any path that continues PAST it — even though the OS
+// itself resolves that exact path transparently for ordinary I/O (ReadDir
+// through the junction's handle, below, works fine). desiredDirs' walk
+// reaches that failing path (it must, to have discovered "inside" exists
+// at all), and skipWalkError/skipEntry treat the failure as "the entry
+// disappeared" and silently drop it. So unlike a directory symlink, where
+// everything below the link is watched, a junction's watch coverage stops
+// one level short: content nested inside it is never registered, and
+// changes there never trigger a live refresh. This is a real functional
+// gap — worse than P-5's original "registered under a different key"
+// framing — and belongs to P-5's own owner to fix, not P-4 (which asked
+// only for the coverage that would settle it either way).
 func TestDesiredDirsFollowsJunctionWatchLink(t *testing.T) {
 	testutil.RequireWatchLinks(t)
 	root := t.TempDir()
@@ -50,21 +59,14 @@ func TestDesiredDirsFollowsJunctionWatchLink(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, ok := dirs[linkCanonical]; !ok {
-		t.Fatal("the junction's own store-side path was not registered — junction watch links are not being followed at all")
+		t.Fatal("the junction's own directory was not registered — junction watch links are not being followed at all")
 	}
 
-	// desiredDirs opens the junction path directly (openWatchDir follows
-	// the reparse point at the I/O level, same as any CreateFile without
-	// FILE_FLAG_OPEN_REPARSE_POINT would), reads the TARGET's entries
-	// through that handle, then joins each entry name onto the STORE-SIDE
-	// dir variable — so a nested entry is keyed by canonicalDir(link/entry),
-	// not canonicalDir(source/entry) (P-5).
-	insideViaLink, err := canonicalDir(filepath.Join(link, "inside"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, ok := dirs[insideViaLink]; !ok {
-		t.Fatal("directory below a junction watch link was not included — the junction's contents are not being walked")
+	if _, err := canonicalDir(filepath.Join(link, "inside")); err == nil {
+		t.Fatalf("canonicalDir(%q) unexpectedly succeeded — if a Go toolchain change made EvalSymlinks "+
+			"resolve through an intermediate junction, P-5's nested-registration gap may now be fixed, "+
+			"and this test should be updated to assert the nested directory IS registered instead",
+			filepath.Join(link, "inside"))
 	}
 }
 

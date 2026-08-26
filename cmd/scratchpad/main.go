@@ -97,14 +97,19 @@ func filesFromDir(dir string) (map[string][]byte, error) {
 			return err
 		}
 		if d.IsDir() {
-			// A Windows junction (or any other reparse point Go does not
-			// resolve to a symlink) reports IsDir() true — ModeDir plus
-			// ModeIrregular, never ModeSymlink (ADR §3.3) — so without this
-			// check it would silently be walked into like an ordinary
-			// directory instead of being rejected the way a directory
-			// symlink already is below (a symlink entry's Type() is
-			// ModeSymlink, not ModeDir, so it never reaches this branch and
-			// falls through to the regular-file check instead). This keeps
+			// Defence in depth for a directory-shaped reparse point Go
+			// reports as ModeDir|ModeIrregular rather than ModeSymlink
+			// (ADR §3.3 documents os.Lstat doing exactly this for a
+			// junction) — without this check it would silently be walked
+			// into like an ordinary directory. Measured on real Windows CI
+			// (Go 1.26.5): an ordinary junction's fs.WalkDir DirEntry.Type()
+			// is ModeSymlink here, not ModeDir|ModeIrregular, so it never
+			// actually reaches this branch — it falls through to the
+			// regular-file check below instead, the same path a directory
+			// symlink already takes (that check's Type() is ModeSymlink too,
+			// so IsDir() is false and IsRegular() is false). This branch is
+			// kept anyway for whichever reparse shape does end up ModeDir
+			// here, on this or a future Go version. Either path keeps
 			// "publish -dir accepts regular files/directories only"
 			// (CLAUDE.md) true for both link flavours, not just the one
 			// Unix has.
