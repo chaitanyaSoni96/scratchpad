@@ -202,7 +202,10 @@ be rolled back with the Windows binaries.
 ## Verifying a download
 
 ```powershell
-Get-FileHash .\scratchpad-windows-amd64.zip -Algorithm SHA256
+Get-FileHash .\scratchpad_<version>_windows_amd64.zip -Algorithm SHA256
 ```
 
-Compare against `SHA256SUMS.txt` in the release. Binaries are unsigned.
+Archives are named `scratchpad_<version>_windows_<arch>.zip` (`mkrelease.go`),
+so substitute the version and architecture you actually downloaded. Compare
+against `SHA256SUMS.txt` in the release, which is coreutils-format and covers
+both architectures. Binaries are unsigned.
