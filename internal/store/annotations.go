@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
+	"io/fs"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -273,7 +273,19 @@ func loadNotesRaw(ann *annotationFS, doc string) (NotesFile, error) {
 	}
 	data, err := ann.readFile(segs)
 	if err != nil {
-		if os.IsNotExist(err) {
+		// errors.Is, not os.IsNotExist: the latter predates Go's error-
+		// wrapping convention and only recognises a fixed set of concrete
+		// types (*PathError/*LinkError/*SyscallError, or anything with its
+		// own is-shaped Is method) — it does NOT call the target's Unwrap
+		// chain the way errors.Is does. Windows's *winError (win32_windows.go)
+		// chains to fs.ErrNotExist via Unwrap, exactly as documented (ADR
+		// §3.7), but os.IsNotExist never walks that chain, so every miss
+		// here read as a hard error instead of "no notes yet" on Windows —
+		// found running annotations_test.go natively. Linux's raw
+		// unix.ENOENT already satisfies errors.Is(_, fs.ErrNotExist) via
+		// syscall.Errno's own Is method, so this is a strict fix, not a
+		// behaviour change, there.
+		if errors.Is(err, fs.ErrNotExist) {
 			return NotesFile{}, nil
 		}
 		return NotesFile{}, err
@@ -449,7 +461,11 @@ func WalkNotes(prefix string) ([]DocNotes, error) {
 	if prefix != "" && hasDocExt(segs[len(segs)-1]) {
 		f, err := loadNotesRaw(guard.ann, prefix)
 		if err != nil {
-			if os.IsNotExist(err) {
+			// loadNotesRaw itself swallows a not-exist read into a zero
+			// NotesFile (above), so this branch is defensive rather than
+			// reachable today; kept consistent with that fix (errors.Is,
+			// not os.IsNotExist) rather than left on the old predicate.
+			if errors.Is(err, fs.ErrNotExist) {
 				return nil, nil
 			}
 			return nil, err
