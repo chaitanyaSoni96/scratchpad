@@ -1343,5 +1343,37 @@ added by `main_e2e_test.go`.
 
 ### Verification run IDs
 
-Pending: recorded in a follow-up entry immediately after this task's push,
-once both native Windows CI jobs report on the new commit.
+- CI run [`32934858837`](https://github.com/chaitanyaSoni96/scratchpad/actions/runs/32934858837)
+  (commit `eff57e1`, this task's push) — **overall conclusion `success`**,
+  all six jobs green: Linux amd64 (vet/test/check-make/build), both
+  Windows cross-builds, Windows arm64 native build, and — the two jobs this
+  task cares about — both native Windows amd64 jobs report `ok` for
+  `scratchpad/cmd/scratchpad` and `scratchpad/cmd/scratchpad-web`:
+  - **`Windows amd64 native — full suite, symlink-capable (windows-2025)`**
+    (job `98074035096`): probe logs "symlink capability: PRESENT"; **all 33
+    new `TestCLI*` functions report `PASS`, zero `FAIL`**; the job's own
+    non-vacuous guard reports "symlink-capability skips: 0 (as required)" —
+    none of this task's new tests appear in any skip list, confirming they
+    were not accidentally gated.
+  - **`Windows amd64 native — degraded mode, no symlinks (windows-2025)`**
+    (`SCRATCHPAD_TEST_SYMLINKS=0`, job `98074035144`): **the same 33
+    `TestCLI*` functions report `PASS`, zero `FAIL`**, including all five
+    watch-lifecycle tests (`TestCLIWatchListUnwatch`,
+    `TestCLIWatchSameTargetIsIdempotent`,
+    `TestCLIWatchDifferentTargetCollision`, `TestCLIWatchExcessArguments`,
+    `TestCLIWatchesEmpty`) — none of them appear among this run's 26
+    `SKIP(symlink-capability)` lines (all 26 belong to pre-existing
+    `internal/store`/`internal/watch` tests, verified by name). This is the
+    task's "measured on CI rather than assumed" answer for whether `watch`
+    works without symlink capability: on this runner the OS-level privilege
+    is genuinely present regardless of the job's name (`windows-2025`
+    GitHub-hosted runners are symlink-capable, and `SCRATCHPAD_TEST_SYMLINKS`
+    only steers this repo's own test-side `RequireSymlinks` gate — see
+    "Windows specifics" above), so what this run actually demonstrates is
+    that the CLI watch tests do not themselves depend on that test-side
+    belief; it does not by itself measure the real junction fallback with
+    the OS privilege genuinely revoked, which remains `internal/store`'s
+    own scope (P1.4/P3.11/P3.12/the winspike measurements).
+  - Windows arm64 native build (`98074035136`) and the separate Winspike
+    workflow run (`32934858903`) are also green on this commit, unaffected
+    by this task (no files it owns were touched).
