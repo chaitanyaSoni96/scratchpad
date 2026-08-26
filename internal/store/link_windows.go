@@ -204,9 +204,30 @@ func stripNTPrefix(s string) string {
 // as the link itself (FILE_OPEN_REPARSE_POINT) and POSIX-disposes it —
 // never follows, never descends. isLinkAt's caller (Unwatch/Delete) has
 // already confirmed name is an allow-listed tag before this is called.
+//
+// It constrains NEITHER FILE_DIRECTORY_FILE NOR FILE_NON_DIRECTORY_FILE, for
+// the same reason deleteEntryAt (annotationfs_windows.go) does not: the
+// no-follow guarantee comes entirely from FILE_OPEN_REPARSE_POINT, and the
+// directory constraint adds nothing to it while silently excluding a whole
+// entry shape. P6.3 F3: this used to pass FILE_DIRECTORY_FILE, so a
+// FILE-shaped symbolic link — which classifyHandle reports as IsLink, because
+// IO_REPARSE_TAG_SYMLINK is on the watch allowlist regardless of whether the
+// link happens to be directory-shaped — reached here from Delete and Unwatch
+// and failed with STATUS_NOT_A_DIRECTORY. The entry was then removable by
+// neither verb, and Watches skips it too (linkTargetIsDir), so nothing in the
+// UI could clear it. The Linux twin has never had this gap: unlinkAt there is
+// Unlinkat(parent, name, 0), which removes any non-directory entry. The store
+// does not create file symlinks, so this needed an external tool to plant one
+// — but "the store can classify it and then not remove it" is exactly the
+// asymmetry this port exists to avoid.
+//
+// Widening this cannot destroy a directory tree: POSIX disposition of a
+// non-empty directory fails with STATUS_DIRECTORY_NOT_EMPTY, and the caller
+// has already resolved (parent, name) to a single entry it was asked to
+// delete.
 func unlinkAt(parent int, name string) error {
 	h, err := ntOpenAt(windows.Handle(parent), name, windows.FILE_READ_ATTRIBUTES|windows.DELETE,
-		windows.FILE_OPEN, windows.FILE_OPEN_REPARSE_POINT|windows.FILE_DIRECTORY_FILE, windows.OBJ_CASE_INSENSITIVE, 0)
+		windows.FILE_OPEN, windows.FILE_OPEN_REPARSE_POINT, windows.OBJ_CASE_INSENSITIVE, 0)
 	if err != nil {
 		return translateOpen("unlink", err)
 	}

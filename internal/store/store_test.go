@@ -413,6 +413,45 @@ func TestArtifactTreeDepthInvariant(t *testing.T) {
 	}
 }
 
+// TestDeleteRemovesFileShapedLink is P6.3 F3, written untagged so it asserts
+// the PARITY rather than the Windows fix: a link whose target is a file, not a
+// directory, must be removable by Delete on both backends, and the target must
+// survive.
+//
+// It was already true on Linux (unlinkAt there is Unlinkat(parent, name, 0),
+// which removes any non-directory entry) and false on Windows, where unlinkAt
+// passed FILE_DIRECTORY_FILE and so refused a file-shaped symlink with
+// STATUS_NOT_A_DIRECTORY. classifyHandle still reported it as IsLink — the
+// SYMLINK tag is on the watch allowlist whatever shape the link is — so Delete
+// and Unwatch both routed to unlinkAt and both failed, Watches skipped it, and
+// nothing in the product could clear the name.
+func TestDeleteRemovesFileShapedLink(t *testing.T) {
+	testutil.RequireSymlinks(t)
+	root := testRoot(t)
+
+	// The target is a FILE, outside the store, so the link Go creates is
+	// file-shaped (os.Symlink picks the directory flag from the target).
+	targetDir := t.TempDir()
+	target := filepath.Join(targetDir, "target.txt")
+	if err := os.WriteFile(target, []byte("must survive"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(root, "filelink")); err != nil {
+		t.Skipf("SKIP(symlink-capability): could not create a file symlink: %v", err)
+	}
+
+	if err := Delete("", "filelink"); err != nil {
+		t.Fatalf("Delete could not remove a file-shaped link: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(root, "filelink")); !os.IsNotExist(err) {
+		t.Fatalf("the link is still present after Delete (lstat err = %v)", err)
+	}
+	// Never followed: Delete unlinks the entry, never the thing it points at.
+	if b, err := os.ReadFile(target); err != nil || string(b) != "must survive" {
+		t.Fatalf("Delete touched the link target: content=%q err=%v", b, err)
+	}
+}
+
 func TestListAndResolvePath(t *testing.T) {
 	root := testRoot(t)
 
