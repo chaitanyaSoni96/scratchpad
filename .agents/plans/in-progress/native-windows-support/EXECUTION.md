@@ -3368,8 +3368,8 @@ no-result-lines assertions, and both blocks in the new job carry one.
 `scratchpad_<version>_windows_<arch>.zip`). The second is the *checksum
 instruction*: copy-pasting the documented verification step gave "file not
 found", which teaches users the verification is broken and to skip it. Fixed in
-`0fb8b8b` and, for the notes' "Verifying a download" section, in P6.6's
-`2a0a4f2`. `docs/windows.md` also now documents the Mark-of-the-Web /
+`0fb8b8b` and, for the notes' "Verifying a download" section, in the
+coordinator's `2a0a4f2`, which P6.6's archive-cell work turned up. `docs/windows.md` also now documents the Mark-of-the-Web /
 execution-policy wall (`Unblock-File` + a `-ExecutionPolicy Bypass` session),
 states that the installer downloads nothing and that any "pipe a URL into
 PowerShell" instruction should be treated as suspect, and names which verb
