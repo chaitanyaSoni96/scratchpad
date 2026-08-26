@@ -111,7 +111,7 @@ func TestPublishFilesAndRules(t *testing.T) {
 }
 
 func TestWatch(t *testing.T) {
-	testutil.RequireSymlinks(t)
+	testutil.RequireWatchLinks(t)
 	testRoot(t)
 	src := t.TempDir()
 	os.WriteFile(filepath.Join(src, "index.html"), []byte("<h1>src</h1>"), 0o644)
@@ -170,7 +170,7 @@ func TestWatch(t *testing.T) {
 // The no-op in TestWatch is the *only* relaxation of create-only: the name
 // still cannot be taken over by anything else.
 func TestWatchCreateOnly(t *testing.T) {
-	testutil.RequireSymlinks(t)
+	testutil.RequireWatchLinks(t)
 	testRoot(t)
 	src, other := t.TempDir(), t.TempDir()
 	for _, d := range []string{src, other} {
@@ -195,7 +195,7 @@ func TestWatchCreateOnly(t *testing.T) {
 }
 
 func TestUnwatch(t *testing.T) {
-	testutil.RequireSymlinks(t)
+	testutil.RequireWatchLinks(t)
 	root := testRoot(t)
 	src := t.TempDir()
 	os.WriteFile(filepath.Join(src, "index.html"), []byte("<h1>src</h1>"), 0o644)
@@ -614,7 +614,7 @@ func TestIsLinkFalseForPlainArtifact(t *testing.T) {
 // and ResolvePath (untested before this fix, and the one that actually used
 // the buggy fdPath-based annotate call).
 func TestIsLinkTruePositiveThroughResolvePath(t *testing.T) {
-	testutil.RequireSymlinks(t)
+	testutil.RequireWatchLinks(t)
 	testRoot(t)
 
 	src := t.TempDir()
