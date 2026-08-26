@@ -171,6 +171,16 @@ jobs:
             Write-Host "symlink-capability skips: 0 (as required)"
           }
           if ($failed -or ($testExit -ne 0)) { exit 1 }
+      # P5.6 — retain the full -v suite output so failures on this
+      # allowed-to-fail job stay inspectable after the run log expires.
+      - name: Upload test log
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-symlink-test-log
+          path: ${{ runner.temp }}/go-test-output.txt
+          if-no-files-found: ignore
+          retention-days: 14
 
   # ------------------------------------------------------------------
   # P0.3 / review F1 — Degraded-mode job: deliberately runs the suite
@@ -240,6 +250,16 @@ jobs:
           # Everything that is not symlink-gated must still pass: publish,
           # annotations on real directories, web serving, CLI behavior.
           if ($failed -or ($testExit -ne 0)) { exit 1 }
+      # P5.6 — retain the full -v suite output (same rationale as the
+      # symlink-capable job).
+      - name: Upload test log
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-degraded-test-log
+          path: ${{ runner.temp }}/go-test-output.txt
+          if-no-files-found: ignore
+          retention-days: 14
 
   # ------------------------------------------------------------------
   # P0.3 — Native Windows arm64 job (windows-11-arm runner): build-only
@@ -260,3 +280,96 @@ jobs:
       - name: Build both commands natively
         shell: pwsh
         run: go build ./cmd/...
+
+  # ------------------------------------------------------------------
+  # P5.3/P5.4/P5.6 — Windows release archives, cross-built from Linux.
+  # Runs on every push and PR: `make release-windows` cross-compiles both
+  # architectures into dist/, zips each with installer/docs/licence
+  # material, self-verifies the archive contents (scripts/mkrelease.go
+  # re-opens each zip and checks the exact name set plus PE magic), and
+  # writes SHA256SUMS.txt, which the job then independently re-verifies
+  # with sha256sum -c. The archives are retained as workflow artifacts
+  # for review; they are NOT release assets — that is the tag-gated
+  # release job below.
+  #
+  # scripts/install.ps1 (P5.1, in progress) is included when present;
+  # until it lands, mkrelease warns and builds the archive without it.
+  # Only the tagged-release path makes its absence fatal.
+  # ------------------------------------------------------------------
+  windows-artifacts:
+    name: Windows release archives (cross-built from Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history so `git describe` can version the archives from tags
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build, package, and self-verify archives
+        run: make release-windows
+      - name: Verify checksums independently
+        run: cd dist && sha256sum -c SHA256SUMS.txt
+      - name: Upload archives
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-release-archives
+          path: |
+            dist/*.zip
+            dist/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 14
+
+  # ------------------------------------------------------------------
+  # P5.6 — Release assets, TAGS ONLY. The workflow triggers on every
+  # push (branches and tags alike), so the gate lives on the job: it
+  # runs only for push events whose ref is a v* tag — a branch push can
+  # never satisfy `startsWith(github.ref, 'refs/tags/v')` because branch
+  # refs are refs/heads/*, and pull_request refs are refs/pull/*.
+  #
+  # The job rebuilds the archives from the tagged commit (rather than
+  # trusting a cross-job artifact) with VERSION set to the tag name and
+  # -require-installer, so a tagged release can never ship without
+  # scripts/install.ps1. It then creates a DRAFT GitHub release carrying
+  # the zips and SHA256SUMS.txt — a human publishes it after review; no
+  # code signing (explicitly out of scope for the first release).
+  # `contents: write` is scoped to this job only; the workflow default
+  # stays read-only.
+  # ------------------------------------------------------------------
+  release:
+    name: Draft release assets (v* tags only)
+    if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
+    needs: [linux-test, cross-build-windows, windows-arm64-build, windows-artifacts]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      # env indirection, not run-block ${{ }} interpolation, to keep ref
+      # names out of the shell-injection surface (same discipline as the
+      # concurrency comment above).
+      RELEASE_TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build release archives (installer required)
+        run: make release-windows VERSION="$RELEASE_TAG" RELEASE_FLAGS=-require-installer
+      - name: Verify checksums independently
+        run: cd dist && sha256sum -c SHA256SUMS.txt
+      - name: Create draft release with assets
+        run: |
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "release $RELEASE_TAG exists — replacing assets"
+            gh release upload "$RELEASE_TAG" dist/*.zip dist/SHA256SUMS.txt --clobber
+          else
+            gh release create "$RELEASE_TAG" --draft --verify-tag \
+              --title "$RELEASE_TAG" \
+              --notes "Draft release for $RELEASE_TAG. Verify archives against SHA256SUMS.txt before publishing. Binaries are unsigned (signing is out of scope for the first release)." \
+              dist/*.zip dist/SHA256SUMS.txt
+          fi

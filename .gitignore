@@ -1,6 +1,9 @@
 # build output (make build; the container builds its own copies)
 /bin/
 
+# Windows cross-builds and release archives (make build-windows / release-windows)
+/dist/
+
 # stale binaries from the pre-bin/ build layout
 /scratchpad
 /scratchpad-mcp

@@ -10,10 +10,35 @@ else
 $(error LAN must be 0 or 1)
 endif
 
-.PHONY: build test image web stop logs install install-skill install-cli drop-mcp
+.PHONY: build test image web stop logs install install-skill install-cli drop-mcp \
+	build-windows release-windows clean-dist
 
 build:
 	go build -o bin/ ./cmd/...
+
+# ---- Windows cross-builds and release packaging (P5.3 / P5.4) ----
+# Everything lands in dist/, never bin/: `make build` stays host-only and the
+# two outputs cannot collide. -trimpath plus CGO_ENABLED=0 makes the binaries
+# reproducible for a given toolchain+commit; the default VCS stamping records
+# the commit inside the binary. There is no -X version variable to stamp, so
+# VERSION names the archives only (tag name on releases, `git describe`
+# fallback otherwise).
+DIST := dist
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+WINDOWS_LDFLAGS := -s -w
+
+build-windows:
+	GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags="$(WINDOWS_LDFLAGS)" -o $(DIST)/windows-amd64/ ./cmd/...
+	GOOS=windows GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags="$(WINDOWS_LDFLAGS)" -o $(DIST)/windows-arm64/ ./cmd/...
+
+# Zip archives + SHA256SUMS.txt via the Go helper (no dependency on a host
+# `zip` binary). RELEASE_FLAGS=-require-installer makes a missing
+# scripts/install.ps1 fatal — the tagged-release CI job sets it.
+release-windows: build-windows
+	go run scripts/mkrelease.go -dist $(DIST) -version $(VERSION) $(RELEASE_FLAGS)
+
+clean-dist:
+	rm -rf $(DIST)
 
 test:
 	go vet ./... && go test ./... && scripts/check-make.sh
