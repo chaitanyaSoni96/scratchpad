@@ -143,7 +143,16 @@ previously accepted.
   never exercised on a runner.
 - **A genuinely non-elevated interactive session** has not been exercised. CI
   runners execute elevated; the privilege dimension was simulated faithfully,
-  the full ACL environment was not.
+  the full ACL environment was not. In particular, **per-user Scheduled Task
+  registration by a standard user — the logon task that `install.ps1
+  install`/`startup` registers — is not verified anywhere**: hosted runners
+  deny the registration to CI's secondary non-admin account (`Access is
+  denied`), so CI proves the installer's documented denial path (actionable
+  error, foreground fallback, clean exit) rather than the registration
+  itself. A pre-beta manual check on a real machine is owed — see the
+  P5.1/P5.2/P5.5 record in `EXECUTION.md` for what "pass" looks like.
+  Everything else about the task (register/start/status/stop/remove, exe-lock
+  retry, loopback binding) is CI-verified for the runner's primary user.
 - **`ReadDirectoryChangesW` overflow recovery** is implemented but was never
   reproduced deterministically.
 - **No code signing and no MSI.** SmartScreen may warn. Verify archives against
