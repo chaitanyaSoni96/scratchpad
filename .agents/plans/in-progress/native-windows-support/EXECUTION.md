@@ -1783,15 +1783,14 @@ a first-class target, not approximated.
   `de172f1` restructure the non-admin startup sub-case accordingly, pinned to
   the observed `Error: Access is denied.` line so any *other* registration
   failure still fails the job.
-- The confirming run for `de172f1` was not yet dispatched when this record
-  was written: GitHub Actions had a platform incident (opened
-  2026-08-26T15:11Z) and created no run objects for the branch's afternoon
-  pushes. Every string the new denial-branch assertions match was verified
-  present in the `32970247103` log on both engines (exit 1, `Error: Access
-  is denied.`, `could not register the scheduled task`, `foreground
-  execution is fully supported`, `Nothing else was changed`), so the change
-  is landed-but-unconfirmed, not speculative. **Update this line with the
-  green run id once Actions dispatches it.**
+- **`32994820274` (commit `91b7638`, which contains the final harness from
+  `de172f1`) — both installer jobs GREEN: `94 passed, 0 failed` per engine**
+  (`pwsh` 7.6.5 and `powershell` 5.1.26100.33296), the run dispatched after
+  GitHub Actions recovered from its 2026-08-26T15:11Z platform incident.
+  The non-admin startup sub-case took the documented-denial branch with the
+  pinned `Error: Access is denied.` assertion, printing the
+  documented-exclusion notice into the job log. This is the verification
+  run of record for P5.1/P5.2/P5.5.
 
 **Operation matrix — verified on both engines in `32970247103`, every
 operation run twice to prove idempotence:**
