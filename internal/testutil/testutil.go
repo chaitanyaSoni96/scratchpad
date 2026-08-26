@@ -8,6 +8,7 @@
 //	SKIP(symlink-capability)  the process cannot create symlinks
 //	SKIP(ntfs-required)       the volume under test is not NTFS (Windows only)
 //	SKIP(unix-only)           the test asserts genuinely Unix-specific semantics
+//	SKIP(root-account)        the process runs as root, which ignores permission bits
 //
 // The package is internal and imported only by tests; it must never be pulled
 // into production code paths.
@@ -88,5 +89,22 @@ func RequireUnix(t testing.TB) {
 	t.Helper()
 	if !isUnix {
 		t.Skipf("SKIP(unix-only): this test asserts Unix-specific semantics that do not exist on %s", runtime.GOOS)
+	}
+}
+
+// RequireNotRoot skips t when this process is running as root (or, more
+// generally, any account for which ordinary permission bits do not apply —
+// root's CAP_DAC_OVERRIDE ignores them entirely). Use it before a test that
+// plants a permission-denied entry (e.g. chmod 0o000) to prove a
+// permission-triage code path: under root the entry would still be fully
+// readable, so the test would pass without exercising anything, which is a
+// worse outcome than an honest skip. os.Geteuid reports -1 on Windows,
+// where this never skips — Windows has no analogous "ignores mode bits"
+// account for a plain directory ACL.
+func RequireNotRoot(t testing.TB) {
+	t.Helper()
+	if os.Geteuid() == 0 {
+		t.Skip("SKIP(root-account): this process is running as root, which ignores permission bits, " +
+			"so a permission-denied reproduction would not exercise anything")
 	}
 }

@@ -3,7 +3,9 @@
 package watch
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"syscall"
 )
@@ -52,12 +54,44 @@ func openWatchDir(path string) (*os.File, error) {
 // skipWalkError reports whether an error hit while resolving, opening,
 // identifying or reading a directory during desiredDirs' walk means "this
 // one entry is unreachable, skip it" rather than a fatal failure of the
-// walk (ADR §6.11 / finding F6, RW23). On Linux the only such case is
-// disappearance mid-walk — os.IsNotExist — because a permission error or a
-// busy file does not make openat/(f)stat/getdents fail in a way that is
-// otherwise indistinguishable from "gone", and this package has never
-// tolerated those. See identity_windows.go's skipWalkError for the much
-// larger Windows skip set and why it is larger.
+// walk (ADR §6.11 / finding F6, RW23, and P4.7 semantic-parity finding
+// P-3). Two cases:
+//
+//   - fs.ErrNotExist: the entry disappeared between being listed and being
+//     opened.
+//   - fs.ErrPermission: a mode bit (or ACL, on a filesystem that layers one
+//     on top of Unix permissions, e.g. NFSv4 ACLs) the server's account
+//     cannot read — a chmod 000 build artifact, a root-owned directory in a
+//     watched repo, any EACCES from openat/(f)stat/getdents. Before this
+//     fix, a single such directory anywhere under the store root made
+//     desiredDirs — and therefore newWatcher, and therefore
+//     cmd/scratchpad-web's startup call — return a hard, fatal error; under
+//     systemd --user that is a boot loop identical in shape to the one
+//     ADR §6.11 fixed on Windows only (identity_windows.go's skipWalkError
+//     already recognized fs.ErrPermission there). A skipped directory is
+//     simply not watched: the 250 ms debounce and periodic reconcile
+//     already tolerate a missing watch, so the user sees a degraded
+//     refresh for that subtree rather than a dead server.
+//
+// Deliberately errors.Is, not os.IsNotExist/os.IsPermission: those helpers
+// do not walk an Unwrap chain, so they stop matching the moment anything
+// wrapped (fmt.Errorf("%w"), a typed error) reaches this function — see
+// identity_windows.go's skipWalkError, which was fixed to errors.Is for the
+// identical reason (P3.14 red-team finding L4).
+//
+// This is a narrow, entry-scoped carve-out, not a relaxation of "watcher
+// failures are fatal": anything else — a backend Add/Remove failure, or the
+// event/error channel closing — still propagates and is still fatal (see
+// watch.go's skipEntry and CLAUDE.md's internal/watch section). See
+// identity_windows.go's skipWalkError for the larger Windows skip set and
+// why Windows needs more members (reparse tags, sharing violations, cloud
+// placeholders have no Unix analogue).
 func skipWalkError(err error) bool {
-	return os.IsNotExist(err)
+	if errors.Is(err, fs.ErrNotExist) {
+		return true
+	}
+	if errors.Is(err, fs.ErrPermission) {
+		return true
+	}
+	return false
 }
