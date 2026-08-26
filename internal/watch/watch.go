@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -45,10 +46,11 @@ type Watcher struct {
 	registered map[string]dirIdentity
 }
 
-type dirIdentity struct {
-	dev uint64
-	ino uint64
-}
+// dirIdentity is defined per-platform (identity_unix.go / identity_windows.go),
+// not here (ADR §3.5): Linux's dev+ino pair and Windows's volume-serial +
+// 128-bit FILE_ID_INFO.FileId don't share a natural common shape, and shared
+// code only ever compares values with == or stores them as map values, so an
+// opaque, per-platform, comparable struct is all this file needs.
 
 type desiredDir struct {
 	path string
@@ -225,7 +227,7 @@ func desiredDirs(root string) (map[string]desiredDir, error) {
 	walk = func(dir string, required, crossedLink bool) error {
 		canonical, err := canonicalDir(dir)
 		if err != nil {
-			if !required && os.IsNotExist(err) {
+			if !required && skipEntry(dir, err) {
 				return nil
 			}
 			return fmt.Errorf("resolve directory %q: %w", dir, err)
@@ -237,9 +239,15 @@ func desiredDirs(root string) (map[string]desiredDir, error) {
 		// than two independent path lookups) so the two questions "what is
 		// this" and "what does it contain" are answered about the same
 		// object — see identity's doc comment and platform-api-inventory.md.
-		f, err := os.Open(dir)
+		//
+		// openWatchDir, not os.Open: on Windows os.Open's share mode omits
+		// FILE_SHARE_DELETE (P13.go_share_mode, RW24), so a directory the
+		// watcher happens to have open here could block the user's own
+		// rename/delete of it, or one of the store's own atomic replaces,
+		// for a reason that has nothing to do with watching it.
+		f, err := openWatchDir(dir)
 		if err != nil {
-			if !required && os.IsNotExist(err) {
+			if !required && skipEntry(dir, err) {
 				return nil
 			}
 			return fmt.Errorf("open directory %q: %w", dir, err)
@@ -247,12 +255,15 @@ func desiredDirs(root string) (map[string]desiredDir, error) {
 		defer f.Close()
 		id, err := identity(f)
 		if err != nil {
+			if !required && skipEntry(dir, err) {
+				return nil
+			}
 			return fmt.Errorf("identify directory %q: %w", dir, err)
 		}
 		dirs[canonical] = desiredDir{path: canonical, id: id}
 		entries, err := f.ReadDir(-1)
 		if err != nil {
-			if !required && os.IsNotExist(err) {
+			if !required && skipEntry(dir, err) {
 				return nil
 			}
 			return fmt.Errorf("read directory %q: %w", dir, err)
@@ -293,4 +304,33 @@ func canonicalDir(path string) (string, error) {
 		return "", err
 	}
 	return filepath.Clean(abs), nil
+}
+
+// skipEntry reports whether err, encountered while resolving, opening,
+// identifying or reading dir during desiredDirs' walk, means "this one entry
+// is unreachable" rather than "the walk itself is broken" — and, when it
+// does, logs the skip once. skipWalkError (identity_unix.go /
+// identity_windows.go) is where the actual classification lives, since what
+// counts as "just this entry" is platform-specific (R16's third clause, ADR
+// §6.11 / finding F6): on Windows, an unserviced reparse tag — an
+// APPEXECLINK, a OneDrive placeholder, a ProjFS entry — must not stop the
+// whole tree from being watched, and per §6.11 item 3 that includes the very
+// first walk newWatcher runs at startup, or a single such entry anywhere
+// under the store root permanently prevents the web server from starting at
+// all (the "boot loop").
+//
+// This is a deliberate, narrow carve-out, not a relaxation of "watcher
+// failures are fatal": everything skipWalkError does NOT recognize —
+// a backend Add/Remove failure, or the event/error channel closing —
+// still propagates as a hard error out of desiredDirs/reconcile/newWatcher,
+// which Run and main.go still treat as fatal so the process supervisor
+// restarts a watcher that is actually broken (see CLAUDE.md's
+// internal/watch section). Only entry-scoped, expected-on-Windows
+// conditions are ever forgiven here.
+func skipEntry(dir string, err error) bool {
+	if !skipWalkError(err) {
+		return false
+	}
+	log.Printf("scratchpad: watch: skipping unreadable or unclassifiable directory %q: %v", dir, err)
+	return true
 }
