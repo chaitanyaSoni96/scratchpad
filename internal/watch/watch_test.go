@@ -62,6 +62,28 @@ func (f *fakeBackend) Close() error {
 	return nil
 }
 
+// mustCanonical is canonicalDir, fatal on error. Backend bookkeeping
+// (fakeBackend.adds/removes, Watcher.registered) is keyed on desiredDirs'
+// canonicalized form, not on whatever spelling a test happened to build a
+// path with. On Windows those two can disagree in spelling while naming the
+// same directory: TEMP resolving to an 8.3 short-name alias (observed:
+// RUNNER~1) versus canonicalDir's filepath.EvalSymlinks, which normalizes to
+// the long name (runneradmin) — precisely the case the ADR's §7.1/§7.2
+// identity-over-spelling reasoning covers, and the same fix already applied
+// to internal/store's tests for the identical symptom (commit 4d87801,
+// TestUnwatch/TestWatchResolvesSymlinkedAncestorAtCreation's sameTarget). A
+// byte-exact comparison against a raw t.TempDir()-built path is the wrong
+// tool here, on both platforms — canonicalizing first is correct always and
+// only visibly matters on Windows.
+func mustCanonical(t *testing.T, path string) string {
+	t.Helper()
+	canonical, err := canonicalDir(path)
+	if err != nil {
+		t.Fatalf("canonicalDir(%q): %v", path, err)
+	}
+	return canonical
+}
+
 func TestNewWatcherRegistersInitialTreeAndReportsFailure(t *testing.T) {
 	root := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(root, "a", "b"), 0o755); err != nil {
@@ -131,12 +153,13 @@ func TestReconcileReplacesWatchWhenDirectoryIdentityChanges(t *testing.T) {
 	if err := w.reconcile(); err != nil {
 		t.Fatal(err)
 	}
+	dirCanonical := mustCanonical(t, dir)
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if len(b.removes) != 1 || b.removes[0] != dir {
+	if len(b.removes) != 1 || b.removes[0] != dirCanonical {
 		t.Fatalf("removes = %v, want replaced path", b.removes)
 	}
-	if len(b.adds) != 3 || b.adds[len(b.adds)-1] != dir {
+	if len(b.adds) != 3 || b.adds[len(b.adds)-1] != dirCanonical {
 		t.Fatalf("adds = %v, want replacement registration", b.adds)
 	}
 }
@@ -166,12 +189,13 @@ func TestReconcileReplacesWatchWhenLinkTargetIdentityChanges(t *testing.T) {
 	if err := w.reconcile(); err != nil {
 		t.Fatal(err)
 	}
+	targetCanonical := mustCanonical(t, target)
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if len(b.removes) != 1 || b.removes[0] != target {
+	if len(b.removes) != 1 || b.removes[0] != targetCanonical {
 		t.Fatalf("removes = %v, want old target removed", b.removes)
 	}
-	if b.adds[len(b.adds)-1] != target {
+	if b.adds[len(b.adds)-1] != targetCanonical {
 		t.Fatalf("adds = %v, want new target registered", b.adds)
 	}
 }
@@ -223,12 +247,13 @@ func TestReconcileRemovesTargetWatchAfterUnwatch(t *testing.T) {
 	if err := w.reconcile(); err != nil {
 		t.Fatal(err)
 	}
+	targetCanonical := mustCanonical(t, target)
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if b.watches[target] {
+	if b.watches[targetCanonical] {
 		t.Fatal("target remained watched after link removal")
 	}
-	if len(b.removes) != 1 || b.removes[0] != target {
+	if len(b.removes) != 1 || b.removes[0] != targetCanonical {
 		t.Fatalf("removes = %v, want target", b.removes)
 	}
 }
@@ -239,11 +264,24 @@ func TestRealBackendWatchesReplacementDirectory(t *testing.T) {
 	if err := os.Mkdir(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	// w.registered is keyed by canonicalDir's output (watch.go's reconcile),
+	// not by whatever spelling this test built dir with — see mustCanonical's
+	// doc comment. Canonicalizing once, before the replacement, is correct:
+	// the canonical *string* for a given name is stable across the directory
+	// object being swapped out from under it.
+	dirCanonical := mustCanonical(t, dir)
 	w, err := New(root, NewHub())
 	if err != nil {
 		t.Fatal(err)
 	}
-	oldID := w.registered[dir]
+	oldID, ok := w.registered[dirCanonical]
+	if !ok {
+		t.Fatalf("dir %q was not registered under its canonical key %q", dir, dirCanonical)
+	}
+	var zero dirIdentity
+	if oldID == zero {
+		t.Fatal("initial identity was the zero value — identity() is not reading real data")
+	}
 	if err := os.Rename(dir, filepath.Join(t.TempDir(), "old")); err != nil {
 		t.Fatal(err)
 	}
@@ -253,7 +291,7 @@ func TestRealBackendWatchesReplacementDirectory(t *testing.T) {
 	if err := w.reconcile(); err != nil {
 		t.Fatal(err)
 	}
-	if got := w.registered[dir]; got == oldID {
+	if got := w.registered[dirCanonical]; got == oldID {
 		t.Fatalf("replacement retained old identity %+v", got)
 	}
 	if err := w.backend.Close(); err != nil {
