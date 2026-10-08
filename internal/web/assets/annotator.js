@@ -511,14 +511,14 @@
     }
     bodyEl.addEventListener("input", syncDirty);
     bodyEl.addEventListener("keydown", function (e) {
-      if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
-        e.preventDefault();
-        saveNoteImpl(id, bodyEl.textContent);
-      } else if (e.key === "Enter") {
+      if (e.key !== "Enter" || e.isComposing) return; // don't steal an IME's confirm-Enter
+      e.preventDefault();
+      if (e.shiftKey) {
         // contenteditable would insert <div>s; keep the body plain text
-        e.preventDefault();
         document.execCommand("insertText", false, "\n");
         syncDirty();
+      } else {
+        saveNoteImpl(id, bodyEl.textContent);
       }
     });
     syncDirty();
